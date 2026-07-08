@@ -1,25 +1,18 @@
-# my-1st-agent
+# Mining Knowledge QA
 
-一个最小的 Python 问答 agent。
+矿产资源专业知识库问答产品规划与原型项目。
 
-## 运行
+## 当前阶段
 
-```bash
-cd /home/nalanmading/My-project/my-1st-agent
-source .venv/bin/activate
-cp .env.example .env
-```
+本项目先用于沉淀产品需求、接口约定、架构方案和原型说明。知识库检索服务可在独立项目中实现，后续通过 API 接入。
 
-编辑 `.env`，填入你的 `OPENAI_API_KEY`。
+## 文档
 
-然后运行：
+- `docs/PRD.md` - 产品需求文档
+- `docs/ARCHITECTURE.md` - 技术架构草案
+- `docs/API_SPEC.md` - 前后端与知识库接口约定
+- `docs/WIREFRAMES.md` - 页面原型说明
 
-```bash
-python qa_agent.py
-```
+## 本地配置
 
-退出时输入：
-
-```text
-exit
-```
+`.env` 仅用于本地模型/API 配置，不提交到 Git。
