@@ -142,6 +142,55 @@ Knowledge-gap tasks are only created for in-scope questions. Out-of-scope questi
 
 Authentication is the same as `/api/ask`.
 
+## GET /api/usage
+
+查询当前 API Key 的调用量和限流配置。
+
+Authentication is the same as `/api/ask`.
+
+### Response
+
+```json
+{
+  "scope": "current_api_key",
+  "rate_limit": {
+    "enabled": true,
+    "limit_per_minute": 30,
+    "backend": "redis"
+  },
+  "usage": {
+    "total_calls": 12,
+    "today_calls": 12,
+    "endpoint_counts": {
+      "/api/ask": 10,
+      "/api/standards": 2
+    },
+    "status_counts": {
+      "queued_for_enrichment": 8,
+      "out_of_scope": 2,
+      "unknown": 2
+    },
+    "average_duration_ms": 12.3,
+    "last_call_at": "2026-07-09T04:41:33.007337+00:00"
+  }
+}
+```
+
+When the per-key rate limit is exceeded, API endpoints return:
+
+```json
+{
+  "detail": {
+    "code": "RATE_LIMITED",
+    "message": "API rate limit exceeded.",
+    "limit_per_minute": 30,
+    "current_count": 31,
+    "backend": "redis",
+    "retry_after_seconds": 20
+  }
+}
+```
+
 ### Request Query
 
 ```text

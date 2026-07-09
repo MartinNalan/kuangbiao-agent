@@ -28,6 +28,9 @@ OPENAI_MODEL=deepseek-v4-flash
 KNOWLEDGE_BASE_URL=
 ENABLE_SYNC_WEB_SUPPLEMENT=false
 API_KEYS=dev-local-key
+REDIS_URL=redis://127.0.0.1:6379/0
+RATE_LIMIT_ENABLED=true
+RATE_LIMIT_PER_MINUTE=30
 ```
 
 `KNOWLEDGE_BASE_URL` 为空时，系统不会编造答案，会返回证据不足提示。知识库服务完成后，填入知识库后端地址即可接入 `/knowledge/search` 和 `/knowledge/standards`。
@@ -79,6 +82,21 @@ curl -X POST http://127.0.0.1:8000/api/ask \
 ```
 
 `API_KEYS` 为空时用于本地开发，不启用 API Key 鉴权；配置后，`/api/*` 需要通过 `X-API-Key` 或 `Authorization: Bearer <key>` 调用。调用日志写入本地 `data/api_calls.jsonl`，不会提交到 Git。
+
+限流默认启用，优先使用 Redis；Redis 不可用时自动降级到本地内存限流。本地安装 Redis：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y redis-server
+sudo systemctl enable --now redis-server
+redis-cli ping
+```
+
+用量统计：
+
+```bash
+curl http://127.0.0.1:8000/api/usage -H 'X-API-Key: dev-local-key'
+```
 
 ## 许可证与数据边界
 
