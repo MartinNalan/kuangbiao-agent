@@ -42,6 +42,38 @@
 - 在未经授权时公开标准全文。
 - 自动认定冲突来源中哪个一定正确。
 
+### 2.1 本地工作目录与 Git 边界
+
+知识库构建产物应统一放在问答项目当前工作目录下的本地数据目录：
+
+```text
+/home/nalanmading/My-project/my-1st-agent/data/knowledge_base/
+```
+
+该目录用于本地集中管理和后续服务器迁移，不提交 GitHub。`data/` 已在 `.gitignore` 中忽略。
+
+建议目录结构：
+
+```text
+data/knowledge_base/
+  raw/              # 原始标准文件、下载页、截图或分页 PDF；按授权策略决定是否长期保留
+  processed/        # OCR、清洗、版面解析后的中间结果
+  indexes/          # Elasticsearch/OpenSearch/SQLite FTS/向量索引等本地索引产物
+  db/               # SQLite、PostgreSQL dump、schema 迁移文件或本地数据库导出
+  candidates/       # 联网/OCR 产生的候选暂存结果，等待管理员审核
+  logs/             # OCR、清洗、入库、质量检查日志
+  manifests/        # 入库清单、来源清单、版本清单和校验摘要
+```
+
+边界要求：
+
+- 真实标准全文、OCR 后全文、索引文件、数据库文件、原始 PDF、截图和中间产物只能放在 `data/knowledge_base/` 或其他已忽略目录下。
+- 不得将真实标准全文、OCR 文本、索引、数据库或原始文件提交到 Git。
+- 可以把 schema、接口说明、字段解释、搭建说明和不含真实标准全文的示例写入 `docs/` 或 `coordination/`。
+- 问答后端只通过 `KNOWLEDGE_BASE_URL` 调用知识库服务，不直接读取数据库、索引文件或本地 OCR 文件。
+- 知识库服务必须暴露统一 API：`POST /knowledge/search`、`GET /knowledge/standards`、`POST /knowledge/candidates`。
+- 如果知识库 agent 需要记录搭建进度，应写入 `coordination/` 下的协作文档，避免把运行数据混入文档。
+
 ## 3. 入库资料范围
 
 第一批建议入库：
@@ -124,7 +156,7 @@ Elasticsearch
   -> full-text index for standards, clauses, OCR text, tables
 
 Object Storage or Local Files
-  -> raw PDFs, uploaded files, OCR intermediate outputs
+  -> data/knowledge_base/raw, processed, candidates, manifests, logs
 
 Worker Queue
   -> OCR, parsing, indexing, quality checks
