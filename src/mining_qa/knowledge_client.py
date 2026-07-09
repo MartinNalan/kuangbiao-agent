@@ -34,7 +34,7 @@ class KnowledgeClient:
             },
         }
         url = self.settings.knowledge_base_url.rstrip("/") + "/knowledge/search"
-        async with httpx.AsyncClient(timeout=self.settings.request_timeout_seconds) as client:
+        async with httpx.AsyncClient(timeout=self.settings.request_timeout_seconds, trust_env=False) as client:
             response = await client.post(url, json=payload)
             response.raise_for_status()
             return KnowledgeSearchResponse.model_validate(response.json())
@@ -44,7 +44,34 @@ class KnowledgeClient:
             return StandardsResponse()
 
         url = self.settings.knowledge_base_url.rstrip("/") + "/knowledge/standards"
-        async with httpx.AsyncClient(timeout=self.settings.request_timeout_seconds) as client:
+        async with httpx.AsyncClient(timeout=self.settings.request_timeout_seconds, trust_env=False) as client:
             response = await client.get(url, params=params)
             response.raise_for_status()
             return StandardsResponse.model_validate(response.json())
+
+    async def create_candidates(self, question: str, sources: list[dict[str, Any]]) -> int:
+        if not self.enabled or not sources:
+            return 0
+
+        url = self.settings.knowledge_base_url.rstrip("/") + "/knowledge/candidates"
+        created = 0
+        async with httpx.AsyncClient(timeout=self.settings.request_timeout_seconds, trust_env=False) as client:
+            for source in sources:
+                payload = {
+                    "triggering_question": question,
+                    "standard_no": source.get("standard_no"),
+                    "title": source.get("title"),
+                    "source_url": source.get("url"),
+                    "source_type": source.get("source_type"),
+                    "text_access": source.get("text_access"),
+                    "extracted_text": source.get("quote"),
+                    "review_status": "candidate_found",
+                    "copyright_note": "Candidate discovered from official source lookup; admin approval required before public KB ingestion.",
+                }
+                try:
+                    response = await client.post(url, json=payload)
+                    response.raise_for_status()
+                except httpx.HTTPError:
+                    continue
+                created += 1
+        return created

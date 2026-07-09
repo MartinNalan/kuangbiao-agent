@@ -32,3 +32,24 @@ class LLMClient:
             data = response.json()
 
         return data["choices"][0]["message"]["content"].strip()
+
+    async def complete_json(self, messages: list[dict[str, str]]) -> str:
+        if not self.enabled:
+            return ""
+
+        payload: dict[str, Any] = {
+            "model": self.settings.openai_model,
+            "messages": messages,
+            "temperature": 0,
+            "response_format": {"type": "json_object"},
+        }
+        headers = {
+            "Authorization": f"Bearer {self.settings.openai_api_key}",
+            "Content-Type": "application/json",
+        }
+        async with httpx.AsyncClient(timeout=self.settings.request_timeout_seconds, trust_env=False) as client:
+            response = await client.post(self.settings.chat_completions_url, headers=headers, json=payload)
+            response.raise_for_status()
+            data = response.json()
+
+        return data["choices"][0]["message"]["content"].strip()

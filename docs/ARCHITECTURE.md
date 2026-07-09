@@ -109,9 +109,11 @@ OCR 输出至少应包含：
 Question
   -> Local Knowledge Retrieval
   -> If evidence is insufficient:
-       -> Official source lookup
+       -> LLM extracts likely standard numbers/names as search clues only
+       -> Official source lookup on std.samr.gov.cn / nrsis.org.cn
        -> Source availability classification
        -> Optional candidate source discovery
+       -> Optional OCR task into candidate staging
   -> Evidence merge
   -> LLM answer with source limitations
 ```
@@ -127,6 +129,10 @@ Question
 | unavailable | unavailable | 不能支撑条款级回答 |
  
 当来源不是 `official_fulltext`，后端必须把限制传给答案生成模块，避免模型把元数据当成正文依据。
+
+大模型训练数据只能用于“推测可能相关的标准线索”，不能作为标准状态、条款内容或结论依据。所有候选标准必须经官方平台或本地知识库验证后才能进入 `sources`。
+
+联网或 OCR 新获得的数据不直接写入正式知识库。系统应先写入候选暂存区，记录来源 URL、标准号、页码、OCR 文本、置信度、触发问题、任务状态和版权/授权备注。管理员批量审核通过后，才允许进入正式知识库索引，供后续用户复用。
 
 自然资源领域行标需要额外适配 `nrsis.org.cn`：
 

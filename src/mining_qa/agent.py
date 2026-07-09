@@ -4,6 +4,7 @@ from .config import Settings
 from .knowledge_client import KnowledgeClient
 from .llm_client import LLMClient
 from .schemas import AskRequest, AskResponse, Limitations, RetrievalStats, Source
+from .web_supplement import WebSupplement
 
 
 SYSTEM_PROMPT = """你是矿产资源标准知识问答 agent。
@@ -22,6 +23,7 @@ class MiningQAAgent:
         self.settings = settings
         self.knowledge = KnowledgeClient(settings)
         self.llm = LLMClient(settings)
+        self.web = WebSupplement(settings, self.llm)
 
     async def ask(self, request: AskRequest) -> AskResponse:
         session_id = request.session_id or str(uuid4())
@@ -39,6 +41,16 @@ class MiningQAAgent:
         notes = list(kb_result.coverage.get("notes", []))
         if kb_result.coverage.get("needs_web_supplement"):
             notes.append("本地知识库证据不足，建议补充官方元数据、全文入口或 OCR 任务。")
+            web_result = await self.web.search(request.question)
+            sources.extend(web_result.sources)
+            retrieval.web_hits = len(web_result.sources)
+            notes.extend(web_result.notes)
+            staged_count = await self.knowledge.create_candidates(
+                request.question,
+                [source.model_dump(exclude_none=True) for source in web_result.sources],
+            )
+            if staged_count:
+                notes.append(f"已将 {staged_count} 条联网候选来源写入候选暂存区，等待管理员审核后入库。")
 
         limitations = Limitations(has_clause_level_evidence=has_clause_evidence, notes=notes)
 

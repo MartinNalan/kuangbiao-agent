@@ -67,6 +67,14 @@
 
 When `has_clause_level_evidence` is `false`, the answer must not present a normative conclusion as if it came from standard正文.
 
+When local KB evidence is insufficient, `/api/ask` may call the web supplement module:
+
+1. Use the LLM only to extract likely standard numbers/names for search.
+2. Verify candidates against official platforms such as `std.samr.gov.cn` and `nrsis.org.cn`.
+3. Return official metadata or reader links in `sources`.
+4. Keep `has_clause_level_evidence=false` unless retrievable正文 evidence is available.
+5. If OCR or page parsing is triggered, store the result as a candidate record first; do not add it to the public KB until admin approval.
+
 ## POST /api/feedback
 
 ### Request
@@ -179,6 +187,20 @@ page_size=20
   "status": "approved_public"
 }
 ```
+
+## Candidate Staging
+
+联网补充、官方阅读器 OCR、网页解析或用户问题触发的新材料，默认进入候选暂存区。
+
+建议由知识库服务提供：
+
+```text
+POST /knowledge/candidates
+GET /knowledge/candidates
+POST /knowledge/candidates/{candidate_id}/decision
+```
+
+候选数据只有在管理员审核为 `approved_for_kb` 后，才能进入正式知识库、全文索引、向量索引或知识图谱。
 
 ## Knowledge Service Contract
 
