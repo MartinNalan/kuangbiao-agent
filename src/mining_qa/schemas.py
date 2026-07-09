@@ -33,6 +33,13 @@ class AskRequest(BaseModel):
     filters: AskFilters = Field(default_factory=AskFilters)
 
 
+class KnowledgeGapTask(BaseModel):
+    task_id: str
+    status: Literal["queued", "searching", "ocr_pending", "ocr_running", "review_pending", "approved_for_kb", "rejected", "done"] = "queued"
+    type: Literal["knowledge_gap"] = "knowledge_gap"
+    message: str
+
+
 class Source(BaseModel):
     title: str
     standard_no: str | None = None
@@ -61,9 +68,11 @@ class Limitations(BaseModel):
 class AskResponse(BaseModel):
     answer: str
     session_id: str
+    status: Literal["answered", "insufficient_evidence", "out_of_scope", "queued_for_enrichment"] = "answered"
     sources: list[Source] = Field(default_factory=list)
     retrieval: RetrievalStats = Field(default_factory=RetrievalStats)
     limitations: Limitations = Field(default_factory=Limitations)
+    knowledge_gap_task: KnowledgeGapTask | None = None
     confidence: Literal["low", "medium", "high"] = "low"
 
 

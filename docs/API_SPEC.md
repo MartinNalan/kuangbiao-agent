@@ -86,6 +86,8 @@ When local KB evidence is insufficient, `/api/ask` may call the web supplement m
 4. Keep `has_clause_level_evidence=false` unless retrievable正文 evidence is available.
 5. If OCR or page parsing is triggered, store the result as a candidate record first; do not add it to the public KB until admin approval.
 
+MVP default: synchronous web supplement is disabled unless `ENABLE_SYNC_WEB_SUPPLEMENT=true`. The default insufficient-evidence path should return quickly and create a knowledge-gap task.
+
 If the question is in scope but no clause-level evidence is available, the response may include:
 
 ```json

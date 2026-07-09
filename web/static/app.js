@@ -134,10 +134,15 @@ async function submitQuestion(event) {
     const data = await response.json();
 
     answerText.textContent = data.answer || "无回答。";
-    confidenceBadge.textContent = data.confidence || "unknown";
+    confidenceBadge.textContent = data.status || data.confidence || "unknown";
     confidenceBadge.classList.toggle("muted", data.confidence === "low");
     setStats(data.retrieval || {});
     renderLimitations(data.limitations || {});
+    if (data.knowledge_gap_task) {
+      const taskNote = document.createElement("div");
+      taskNote.textContent = `补库任务：${data.knowledge_gap_task.task_id}（${data.knowledge_gap_task.status}）`;
+      limitations.appendChild(taskNote);
+    }
     renderSources(data.sources || []);
     saveHistory(question);
   } catch (error) {

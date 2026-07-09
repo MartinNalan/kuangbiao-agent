@@ -9,7 +9,10 @@ from .schemas import AskRequest
 async def run(question: str) -> None:
     agent = MiningQAAgent(get_settings())
     response = await agent.ask(AskRequest(question=question))
+    print(f"Status: {response.status}")
     print(response.answer)
+    if response.knowledge_gap_task:
+        print(f"\nKnowledge gap task: {response.knowledge_gap_task.task_id} ({response.knowledge_gap_task.status})")
     if response.sources:
         print("\nSources:")
         for source in response.sources:

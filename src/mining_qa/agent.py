@@ -1,6 +1,8 @@
 from uuid import uuid4
 
 from .config import Settings
+from .domain_gate import DomainGate
+from .gap_tasks import KnowledgeGapTaskStore
 from .knowledge_client import KnowledgeClient
 from .llm_client import LLMClient
 from .schemas import AskRequest, AskResponse, Limitations, RetrievalStats, Source
@@ -24,9 +26,25 @@ class MiningQAAgent:
         self.knowledge = KnowledgeClient(settings)
         self.llm = LLMClient(settings)
         self.web = WebSupplement(settings, self.llm)
+        self.domain_gate = DomainGate()
+        self.gap_tasks = KnowledgeGapTaskStore()
 
     async def ask(self, request: AskRequest) -> AskResponse:
         session_id = request.session_id or str(uuid4())
+        domain_decision = self.domain_gate.check(request.question)
+        if not domain_decision.in_scope:
+            limitations = Limitations(
+                has_clause_level_evidence=False,
+                notes=["问题不属于矿产资源标准规范及相关政策技术服务范围，已拒绝处理。"],
+            )
+            return AskResponse(
+                answer="本服务仅回答矿产资源、地质勘查、矿山设计、自然资源管理、标准规范及相关政策技术问题，无法处理该问题。",
+                session_id=session_id,
+                status="out_of_scope",
+                limitations=limitations,
+                confidence="low",
+            )
+
         filters = request.filters.model_dump(exclude_none=True)
         kb_result = await self.knowledge.search(request.question, filters)
 
@@ -39,7 +57,7 @@ class MiningQAAgent:
         )
         has_clause_evidence = bool(kb_result.coverage.get("has_clause_level_evidence", False))
         notes = list(kb_result.coverage.get("notes", []))
-        if kb_result.coverage.get("needs_web_supplement"):
+        if kb_result.coverage.get("needs_web_supplement") and self.settings.enable_sync_web_supplement:
             notes.append("本地知识库证据不足，建议补充官方元数据、全文入口或 OCR 任务。")
             web_result = await self.web.search(request.question)
             sources.extend(web_result.sources)
@@ -51,16 +69,21 @@ class MiningQAAgent:
             )
             if staged_count:
                 notes.append(f"已将 {staged_count} 条联网候选来源写入候选暂存区，等待管理员审核后入库。")
+        elif kb_result.coverage.get("needs_web_supplement"):
+            notes.append("本地知识库证据不足，已进入异步补库流程；本次请求不等待联网搜索或 OCR。")
 
         limitations = Limitations(has_clause_level_evidence=has_clause_evidence, notes=notes)
 
         if not has_clause_evidence:
+            gap_task = self.gap_tasks.create(request.question, domain_decision, len(sources))
             return AskResponse(
                 answer=self._insufficient_answer(request.question, notes),
                 session_id=session_id,
+                status="queued_for_enrichment",
                 sources=sources,
                 retrieval=retrieval,
                 limitations=limitations,
+                knowledge_gap_task=gap_task,
                 confidence="low",
             )
 
@@ -68,6 +91,7 @@ class MiningQAAgent:
         return AskResponse(
             answer=answer,
             session_id=session_id,
+            status="answered",
             sources=sources,
             retrieval=retrieval,
             limitations=limitations,

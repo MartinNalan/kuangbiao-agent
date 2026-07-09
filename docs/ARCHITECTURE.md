@@ -139,6 +139,8 @@ Question
   -> LLM answer with source limitations
 ```
 
+同步问答请求默认不执行完整联网搜索或 OCR。MVP 默认策略是创建知识库缺口任务并快速返回；只有显式开启 `ENABLE_SYNC_WEB_SUPPLEMENT=true` 时，才在请求内做官方元数据补充。
+
 来源可访问性分类：
 
 | source_type | text_access | 用途 |

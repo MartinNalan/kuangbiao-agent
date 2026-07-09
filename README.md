@@ -26,11 +26,12 @@ OPENAI_API_KEY=sk-your-api-key-here
 OPENAI_BASE_URL=https://api.deepseek.com
 OPENAI_MODEL=deepseek-v4-flash
 KNOWLEDGE_BASE_URL=
+ENABLE_SYNC_WEB_SUPPLEMENT=false
 ```
 
 `KNOWLEDGE_BASE_URL` 为空时，系统不会编造答案，会返回证据不足提示。知识库服务完成后，填入知识库后端地址即可接入 `/knowledge/search` 和 `/knowledge/standards`。
 
-本地知识库证据不足时，系统会尝试进行官方来源补充：先用模型提取可能相关的标准号/标准名称，再查询国家标准公开系统和自然资源标准化信息服务平台。联网结果只作为元数据或公开阅读入口；未取得可检索正文时，不生成条款级结论。
+本地知识库证据不足时，默认快速返回证据不足，并记录知识库缺口任务；后台后续再进行官方来源补充、OCR 和候选入库审核。若设置 `ENABLE_SYNC_WEB_SUPPLEMENT=true`，同步请求会尝试查询国家标准公开系统和自然资源标准化信息服务平台，但仍不会在缺少正文证据时生成条款级结论。
 
 联网或 OCR 新获得的数据应先进入候选暂存区，管理员确认后才进入正式知识库和索引。
 

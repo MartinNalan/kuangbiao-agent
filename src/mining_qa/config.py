@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     openai_base_url: str = Field(default="https://api.deepseek.com", alias="OPENAI_BASE_URL")
     openai_model: str = Field(default="deepseek-v4-flash", alias="OPENAI_MODEL")
     knowledge_base_url: str = Field(default="", alias="KNOWLEDGE_BASE_URL")
+    enable_sync_web_supplement: bool = Field(default=False, alias="ENABLE_SYNC_WEB_SUPPLEMENT")
     request_timeout_seconds: float = Field(default=60.0, alias="REQUEST_TIMEOUT_SECONDS")
 
     @property
