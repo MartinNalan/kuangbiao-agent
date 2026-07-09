@@ -4,7 +4,17 @@ KB agent should append progress updates here.
 
 ## Latest Status
 
-No status reported yet.
+Date: 2026-07-10 07:48:40 +0800
+Role: KB agent
+Status: completed
+Summary:
+- Completed T008, T009, and T010 from `coordination/task_board.md`.
+- Raw `/knowledge/search` quotes now return short evidence snippets and do not include raw full text unless `include_full_text=true`.
+- Standard/specification clause chunks were rebuilt: `clause_no` empty rate improved from 2,359/18,516 (12.74%) to 1,792/20,910 (8.57%).
+- `/knowledge/health` now reports `vector_count`, `kg_entity_count`, and `kg_relation_count`.
+- Current real KB state: 388 documents, 28,104 chunks, 307 MNR `矿产资源管理` policy/law documents, 82 downloaded attachments, 2,593 policy clause chunks, 20,910 standard/specification clause chunks, 24,219 vectors, 25,303 KG entities, 45,915 KG relations.
+- Regression passed with `PYTHONPATH=src .venv/bin/python scripts/run_kb_regression.py`.
+- Detailed completion record is appended below at `Date: 2026-07-10 07:48:40 +0800`.
 
 Date: 2026-07-08
 Role: KB agent
@@ -51,6 +61,106 @@ Blocked:
 Questions:
 - None newly raised.
 
+Date: 2026-07-10 07:25:53 +0800
+Role: KB agent
+Status: handoff_ready
+Summary:
+- Expanded KB delivery is ready for collaborator review and product integration.
+- Implemented four active stacks: SQLite/FTS5 full-text retrieval, clause-level chunking, SQLite lightweight KG, and MVP local hashed-vector retrieval; hybrid ranking now merges full-text/vector/graph candidates.
+- Current real KB state: 388 documents, 25,710 chunks, 307 MNR `矿产资源管理` policy/law documents, 82 downloaded attachments, 2,593 policy clause chunks, 18,516 standard/specification clause chunks, 21,825 vectors, 22,909 KG entities, 42,562 KG relations.
+- Policy ingest now has 0 zero-chunk policy documents after fixing nested official HTML extraction.
+- Real regression passed with `PYTHONPATH=src .venv/bin/python scripts/run_kb_regression.py`, covering `/knowledge/health`, policy search, regulation search, standard search, catalog lookup, and `/api/ask` end-to-end.
+- Local services were verified on `http://127.0.0.1:18081` for KB and `http://127.0.0.1:18080` for QA API with `API_KEYS=dev-local-key`.
+- The official MNR category page reports 310 items, but the crawler parsed 307 unique detail pages from the current 21-page pagination; this discrepancy is recorded in the task doc.
+Files changed/created:
+- `/home/nalanmading/My-project/my-1st-agent/docs/KB_BUILD_TASKS_20260709.md`
+- `/home/nalanmading/My-project/my-1st-agent/docs/KNOWLEDGE_BASE_MVP_RUNBOOK.md`
+- `/home/nalanmading/My-project/my-1st-agent/scripts/ingest_mnr_mineral_policies.py`
+- `/home/nalanmading/My-project/my-1st-agent/scripts/rebuild_clause_chunks.py`
+- `/home/nalanmading/My-project/my-1st-agent/scripts/build_sqlite_kg.py`
+- `/home/nalanmading/My-project/my-1st-agent/scripts/build_chunk_vectors.py`
+- `/home/nalanmading/My-project/my-1st-agent/scripts/run_kb_regression.py`
+- `/home/nalanmading/My-project/my-1st-agent/src/mining_qa/kb_build_utils.py`
+- `/home/nalanmading/My-project/my-1st-agent/src/mining_qa/knowledge_store.py`
+Next:
+- Main programmer can review API contract and decide whether to expose only `/api/ask` publicly while keeping `/knowledge/*` internal, as required by KB requirements.
+- Product/PRD side should review answer quality with representative policy and standard questions before user-facing release.
+- Future upgrade path remains: replace MVP hash-vector adapter with configurable embedding/vector backend and migrate SQLite KG to Neo4j only if graph traversal needs become heavier.
+Blocked:
+- No blocker for current local/internal integration.
+Questions:
+- None for the KB agent at handoff time.
+
+Date: 2026-07-10 07:48:40 +0800
+Role: KB agent
+Status: completed
+Summary:
+- Claimed and completed T008, T009, and T010 from `coordination/task_board.md`.
+- T008: tightened raw `/knowledge/search` evidence snippets. `quote` now selects directly relevant sentences around query terms, caps default snippets more aggressively, keeps table evidence to caption plus up to three relevant rows, and still returns full raw chunk text only when trusted internal callers explicitly set `include_full_text=true`.
+- T009: improved clause metadata completeness by recognizing OCR patterns such as `5.3.4.2一般...`, appendix headings, Chinese chapter/article headings, and carrying active section headings into following clauses. Rebuilt standard/specification clause chunks and refreshed KG/vector indexes.
+- T010: expanded `/knowledge/health` to include operational index counts: `vector_count`, `kg_entity_count`, and `kg_relation_count`.
+- Measured result after rebuild: 388 documents, 28,104 chunks, 2,593 policy clause chunks, 20,910 standard/specification clause chunks, 24,219 vectors, 25,303 KG entities, 45,915 KG relations.
+- Standard/specification `clause_no` empty rate improved from 2,359/18,516 (12.74%) to 1,792/20,910 (8.57%).
+- Verified with `PYTHONPATH=src .venv/bin/python scripts/run_kb_regression.py`; health, policy search, regulation search, standard search, catalog lookup, and `/api/ask` end-to-end all passed.
+Files changed/created:
+- `/home/nalanmading/My-project/my-1st-agent/src/mining_qa/kb_build_utils.py`
+- `/home/nalanmading/My-project/my-1st-agent/src/mining_qa/knowledge_store.py`
+- `/home/nalanmading/My-project/my-1st-agent/scripts/run_kb_regression.py`
+- `/home/nalanmading/My-project/my-1st-agent/data/knowledge_base/` (ignored local KB data refreshed)
+- `/home/nalanmading/My-project/my-1st-agent/docs/KB_BUILD_TASKS_20260709.md`
+- `/home/nalanmading/My-project/my-1st-agent/docs/KNOWLEDGE_BASE_MVP_RUNBOOK.md`
+- `/home/nalanmading/My-project/my-1st-agent/coordination/task_board.md`
+- `/home/nalanmading/My-project/my-1st-agent/coordination/kb_agent_status.md`
+Next:
+- Remaining empty `clause_no` records are mostly front matter, tables, OCR fragments, or headings without stable clause numbers; further reduction would require document-specific parsing or manual curation.
+- Continue answer-quality review with real questions and tune ranking/quote selection if users report missing context.
+Blocked:
+- No blocker.
+Questions:
+- None newly raised.
+
+Date: 2026-07-09 18:44:39 +0800
+Role: KB agent
+Status: waiting_for_coordination
+Summary:
+- Read `/home/nalanmading/My-project/my-1st-agent/docs/KNOWLEDGE_BASE_REQUIREMENTS.md`.
+- User confirmed first KB ingestion batch should include all governed standards, not only 10-30 MVP samples.
+- Implementation is intentionally paused until coordination questions are answered.
+Files changed/created:
+- `/home/nalanmading/My-project/my-1st-agent/coordination/kb_agent_questions.md`
+- `/home/nalanmading/My-project/my-1st-agent/coordination/kb_agent_status.md`
+Next:
+- Wait for main programmer / PRD answers to KB-Q002 through KB-Q007.
+- After confirmation, build the KB under `/home/nalanmading/My-project/my-1st-agent/data/knowledge_base/` and ingest all governed standards.
+Blocked:
+- Need confirmation on search backend choice, service integration boundary, auth/visibility behavior, full-text exposure policy, upload/review MVP scope, and public/local status for the first full ingestion.
+Questions:
+- KB-Q002 through KB-Q007 are open in `coordination/kb_agent_questions.md`.
+
+Date: 2026-07-09 19:00:47 +0800
+Role: KB agent
+Status: implemented_mvp
+Summary:
+- Built the first local/internal KB MVP as a standalone FastAPI service under `/knowledge/*`.
+- Implemented SQLite + FTS5 storage/search with a replaceable adapter boundary in `mining_qa.knowledge_store`.
+- Ingested all governed standards from `/home/nalanmading/My-project/ore_expert/knowledge_governance` into `data/knowledge_base/`.
+- First full ingest result: 81 documents, 4601 chunks, 716 manual table chunks.
+- Implemented capped evidence quotes by default, `visibility=internal`, `source_type=local_kb`, and `text_access=ocr_text`.
+- Verified KB health, search, standards catalog, candidate creation, and QA API end-to-end against the real KB.
+Files changed/created:
+- `/home/nalanmading/My-project/my-1st-agent/src/mining_qa/knowledge_store.py`
+- `/home/nalanmading/My-project/my-1st-agent/src/mining_qa/knowledge_service.py`
+- `/home/nalanmading/My-project/my-1st-agent/scripts/ingest_governed_standards.py`
+- `/home/nalanmading/My-project/my-1st-agent/docs/KNOWLEDGE_BASE_MVP_RUNBOOK.md`
+- `/home/nalanmading/My-project/my-1st-agent/data/knowledge_base/` (ignored local data)
+Next:
+- Improve section/clause parsing precision and ranking with more regression questions.
+- Add optional vector and graph adapters after MVP retrieval is stable.
+Blocked:
+- No blocker for MVP.
+Questions:
+- No new open questions.
+
 Date: 2026-07-09
 Role: KB agent
 Status: in_progress
@@ -66,6 +176,109 @@ Files changed/created:
 - `/home/nalanmading/My-project/ore_expert/knowledge_governance/kb_registry.sqlite`
 Next:
 - Ingest the 10 preserved supplemental files; for the 3 newer versions, mark the older compilation-derived documents as superseded in retrieval/indexing policy.
+Blocked:
+- No blocker.
+Questions:
+- None newly raised.
+
+Date: 2026-07-09
+Role: KB agent
+Status: in_progress
+Summary:
+- Processed all 10 preserved supplemental files into document-level JSON/MD/TXT plus page-level OCR/text artifacts where applicable.
+- Confirmed replacement standards: `DZ/T 0204-2022`, `GB/T 12719-2021`, and `GB/T 25283-2023`; these should supersede older compilation-derived versions in retrieval/indexing policy.
+- Queried the Natural Resources Standardization Information Service Platform for missing/ambiguous standard numbers and recorded `DZ/T 0430-2023`, `DZ/T 0479-2024`, and `DZ/T 0400-2022` in metadata.
+- Generated 10 supplemental document records and updated `kb_registry.sqlite` table `supplemental_documents` to 10 rows.
+Files changed/created:
+- `/home/nalanmading/My-project/ore_expert/scripts/process_supplement_ingest.py`
+- `/home/nalanmading/My-project/ore_expert/knowledge_governance/supplement_ingest/processed_documents/`
+- `/home/nalanmading/My-project/ore_expert/knowledge_governance/supplement_ingest/supplement_processed_report.md`
+- `/home/nalanmading/My-project/ore_expert/knowledge_governance/kb_registry.sqlite`
+Next:
+- Apply replacement policy during full-text indexing so superseded compilation standards are not returned as authoritative when a newer single-file version exists.
+- Run table-structure QA for table-heavy pages before knowledge-graph extraction.
+Blocked:
+- No blocker.
+Questions:
+- None newly raised.
+
+Date: 2026-07-09
+Role: KB agent
+Status: in_progress
+Summary:
+- Implemented refer Word table-structure extraction for standards published before 2021 only.
+- Extracted table structures and merged-cell metadata from 41 Word reference files; 35 matched eligible documents with usable table candidates.
+- Attached `curated_table_candidates` to matched document JSON files using refer Word for structure only; authoritative text remains OCR/compilation/newer PDF/manual.
+- Reclassified suspect QA pages: original 964 suspect pages, 364 covered by refer Word table-structure candidates, 600 still unresolved for manual review.
+Files changed/created:
+- `/home/nalanmading/My-project/ore_expert/scripts/apply_refer_word_table_structures.py`
+- `/home/nalanmading/My-project/ore_expert/knowledge_governance/refer_table_rebuild/`
+- `/home/nalanmading/My-project/ore_expert/knowledge_governance/qa_review/suspect_pages_unresolved.csv`
+- `/home/nalanmading/My-project/ore_expert/knowledge_governance/qa_review/suspect_pages_unresolved.md`
+- `/home/nalanmading/My-project/ore_expert/knowledge_governance/qa_review/suspect_documents_unresolved_summary.md`
+Next:
+- User can manually review unresolved pages and provide Excel tables for high-value unresolved tables, especially standards from 2021 onward where refer Word is intentionally disallowed.
+Blocked:
+- No blocker.
+Questions:
+- None newly raised.
+
+Date: 2026-07-09 17:03:25 +0800
+Role: KB agent
+Status: in_progress
+Summary:
+- Removed four soon-to-be-replaced compilation standards from the standard-level KB: `DZ/T 0326-2018` 石墨、碎云母矿产地质勘查规范, its modification sheet, `DZ/T 0291-2015` 饰面石材矿产地质勘查规范, and its modification sheet.
+- Deleted their generated JSON/MD/TXT artifacts, removed them from compilation standards manifests, deleted SQLite registry/pages/tasks records, and removed related QA unresolved entries.
+- Retained raw compilation OCR page outputs for traceability only; they are no longer standard-level KB documents.
+Files changed/created:
+- `/home/nalanmading/My-project/ore_expert/knowledge_governance/compilation_standards/standards_manifest.csv`
+- `/home/nalanmading/My-project/ore_expert/knowledge_governance/compilation_standards/standards_manifest.json`
+- `/home/nalanmading/My-project/ore_expert/knowledge_governance/kb_registry.sqlite`
+- `/home/nalanmading/My-project/ore_expert/knowledge_governance/qa_review/`
+- `/home/nalanmading/My-project/ore_expert/knowledge_governance/deprecated_removed/removed_standards_20260709_170303.json`
+Next:
+- When new versions arrive, ingest them as replacement standards and link them to the deprecated removal record if needed.
+Blocked:
+- No blocker.
+Questions:
+- None newly raised.
+
+Date: 2026-07-09 17:27:27 +0800
+Role: KB agent
+Status: in_progress
+Summary:
+- Removed expired `DZ/T 0204-2002` 稀土矿产地质勘查规范 from the compilation standard-level KB.
+- Deleted its generated JSON/MD/TXT artifacts, removed it from compilation standards manifests, deleted SQLite registry/page/task/duplicate-link records, and removed old-version QA unresolved entries.
+- Kept `DZ/T 0204-2022` 矿产地质勘查规范 稀土 in the supplemental KB, along with replacement relationship notes and raw OCR traceability.
+Files changed/created:
+- `/home/nalanmading/My-project/ore_expert/knowledge_governance/compilation_standards/standards_manifest.csv`
+- `/home/nalanmading/My-project/ore_expert/knowledge_governance/compilation_standards/standards_manifest.json`
+- `/home/nalanmading/My-project/ore_expert/knowledge_governance/kb_registry.sqlite`
+- `/home/nalanmading/My-project/ore_expert/knowledge_governance/qa_review/`
+- `/home/nalanmading/My-project/ore_expert/knowledge_governance/deprecated_removed/removed_dzt0204_2002_20260709_172701.json`
+Next:
+- Continue treating `DZ/T 0204-2022` as the active稀土 standard.
+Blocked:
+- No blocker.
+Questions:
+- None newly raised.
+
+Date: 2026-07-09 18:27:32 +0800
+Role: KB agent
+Status: in_progress
+Summary:
+- Removed `GB/T 25283-2010` 矿产资源综合勘查评价规范 and its No.1 amendment from the compilation standard-level KB because `GB/T 25283-2023` is already retained as the active replacement.
+- Marked `DZ/T 0479-2024` 压覆矿产资源调查评估规范 QA table flags as false positives because the user confirmed it has no tables.
+- Updated the unresolved QA workflow to honor false-positive document overrides and regenerated unresolved page/document lists; unresolved standards are now 7 documents.
+Files changed/created:
+- `/home/nalanmading/My-project/ore_expert/scripts/recheck_unresolved_with_refer_words.py`
+- `/home/nalanmading/My-project/ore_expert/knowledge_governance/qa_review/qa_false_positive_overrides.json`
+- `/home/nalanmading/My-project/ore_expert/knowledge_governance/qa_review/suspect_pages_unresolved.csv`
+- `/home/nalanmading/My-project/ore_expert/knowledge_governance/qa_review/suspect_pages_unresolved.md`
+- `/home/nalanmading/My-project/ore_expert/knowledge_governance/qa_review/unresolved_standards_list.md`
+- `/home/nalanmading/My-project/ore_expert/knowledge_governance/deprecated_removed/removed_gbt25283_2010_20260709_182702.json`
+Next:
+- Treat `GB/T 25283-2023` as the active comprehensive exploration/evaluation standard.
 Blocked:
 - No blocker.
 Questions:
@@ -88,3 +301,57 @@ Blocked:
 Questions:
 - 
 ```
+
+Date: 2026-07-09 18:40:19 +0800
+Role: KB agent
+Status: in_progress
+Summary:
+- Applied user-curated Word tables from `/home/nalanmading/My-project/ore_expert/standard_specification/modified` into the standard KB as `manual_table_corrections`, preserving original OCR/body text.
+- Added regenerated MD/TXT `人工校核表格` sections for affected standards.
+- Removed legacy `GB 12719-91` 矿区水文地质工程地质勘探规范 from standard-level KB and registry; retained active `GB/T 12719-2021`.
+- Applied 19 curated tables from `矿区水文地质工程地质环境地质勘查规范.docx` to `GB/T 12719-2021`.
+- Refreshed QA table-suspect lists; remaining unresolved standards: 0.
+Files changed/created:
+- `/home/nalanmading/My-project/ore_expert/scripts/apply_modified_manual_tables.py`
+- `/home/nalanmading/My-project/ore_expert/scripts/recheck_unresolved_with_refer_words.py`
+- `/home/nalanmading/My-project/ore_expert/knowledge_governance/manual_table_curation/modified_manual_table_manifest.csv`
+- `/home/nalanmading/My-project/ore_expert/knowledge_governance/manual_table_curation/modified_manual_table_manifest.json`
+- `/home/nalanmading/My-project/ore_expert/knowledge_governance/qa_review/`
+- `/home/nalanmading/My-project/ore_expert/knowledge_governance/deprecated_removed/removed_gb12719_91_20260709_manual_table_curation.json`
+Next:
+- Use `manual_table_corrections` as authoritative table structures for downstream full-text/vector/graph ingestion.
+Blocked:
+- No blocker.
+Questions:
+- None newly raised.
+
+Date: 2026-07-10 00:02:40 +0800
+Role: KB agent
+Status: completed
+Summary:
+- Completed the expanded mineral-resources KB task set requested by the user.
+- Downloaded and ingested the official MNR policy/law database category `矿产资源管理`: 307 unique policy detail pages parsed from 21 pages, with 82 attachments downloaded under `data/knowledge_base/raw/mnr_policy/attachments/`.
+- Added clause-level chunks for MNR policy/law documents and rebuilt clause-level chunks for existing governed standards/specifications.
+- Built the lightweight SQLite knowledge graph in `kg_entities` and `kg_relations`.
+- Built MVP local hashed vectors in `chunk_vectors` and enabled hybrid full-text + vector + graph ranking in `knowledge_store.py`.
+- Current KB counts after fixing special nested HTML policy pages: 388 documents, 25,710 chunks, 2,593 policy clause chunks, 18,516 standard/specification clause chunks, 0 zero-chunk policy documents, 21,825 vectors, 22,909 KG entities, 42,562 KG relations.
+- Verified real KB and main QA API with `scripts/run_kb_regression.py`; health, policy search, regulation search, standard search, catalog lookup and `/api/ask` end-to-end all passed.
+Files changed/created:
+- `/home/nalanmading/My-project/my-1st-agent/src/mining_qa/kb_build_utils.py`
+- `/home/nalanmading/My-project/my-1st-agent/src/mining_qa/knowledge_store.py`
+- `/home/nalanmading/My-project/my-1st-agent/scripts/ingest_mnr_mineral_policies.py`
+- `/home/nalanmading/My-project/my-1st-agent/scripts/rebuild_clause_chunks.py`
+- `/home/nalanmading/My-project/my-1st-agent/scripts/build_sqlite_kg.py`
+- `/home/nalanmading/My-project/my-1st-agent/scripts/build_chunk_vectors.py`
+- `/home/nalanmading/My-project/my-1st-agent/scripts/run_kb_regression.py`
+- `/home/nalanmading/My-project/my-1st-agent/docs/KB_BUILD_TASKS_20260709.md`
+- `/home/nalanmading/My-project/my-1st-agent/docs/KNOWLEDGE_BASE_MVP_RUNBOOK.md`
+- `/home/nalanmading/My-project/my-1st-agent/data/knowledge_base/` (ignored local KB data)
+Next:
+- Review answer quality with more real business questions and tune ranking/graph extraction where needed.
+- Later replace the MVP local hash-vector adapter with a configurable embedding/vector backend if higher semantic recall is required.
+- Later upgrade SQLite KG to Neo4j only if graph traversal requirements exceed the lightweight MVP.
+Blocked:
+- No blocker.
+Questions:
+- None newly raised.

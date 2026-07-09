@@ -8,9 +8,10 @@ from fastapi.staticfiles import StaticFiles
 from .agent import MiningQAAgent
 from .auth import require_api_key
 from .config import PROJECT_ROOT, get_settings
+from .feedback_log import FeedbackLogger
 from .knowledge_client import KnowledgeClient
 from .rate_limit import RateLimiter
-from .schemas import AskRequest, AskResponse, StandardsResponse
+from .schemas import AskRequest, AskResponse, FeedbackRequest, FeedbackResponse, StandardsResponse
 from .usage_log import UsageLogger
 from .usage_stats import UsageStats
 
@@ -18,6 +19,7 @@ from .usage_stats import UsageStats
 app = FastAPI(title="Mining Knowledge QA", version="0.1.0")
 app.mount("/static", StaticFiles(directory=PROJECT_ROOT / "web" / "static"), name="static")
 usage_logger = UsageLogger()
+feedback_logger = FeedbackLogger()
 usage_stats = UsageStats()
 rate_limiter = RateLimiter()
 
@@ -80,6 +82,29 @@ async def ask(
         }
     )
     return response
+
+
+@app.post("/api/feedback", response_model=FeedbackResponse)
+async def feedback(
+    request: FeedbackRequest,
+    http_request: Request,
+    api_key: Annotated[str, Depends(authenticated_api_key)],
+) -> FeedbackResponse:
+    await enforce_rate_limit(api_key)
+    feedback_logger.write(
+        {
+            "api_key": api_key,
+            "endpoint": "/api/feedback",
+            "method": "POST",
+            "client_host": http_request.client.host if http_request.client else None,
+            "session_id": request.session_id,
+            "rating": request.rating,
+            "reason": request.reason,
+            "comment": request.comment,
+            "question": request.question,
+        }
+    )
+    return FeedbackResponse()
 
 
 @app.get("/api/standards", response_model=StandardsResponse)

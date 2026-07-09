@@ -11,9 +11,18 @@ const limitations = document.querySelector("#limitations");
 const sourcesList = document.querySelector("#sourcesList");
 const askButton = document.querySelector("#askButton");
 const standardsList = document.querySelector("#standardsList");
+const feedbackPanel = document.querySelector("#feedbackPanel");
+const feedbackDetail = document.querySelector("#feedbackDetail");
+const feedbackReason = document.querySelector("#feedbackReason");
+const feedbackComment = document.querySelector("#feedbackComment");
+const feedbackStatus = document.querySelector("#feedbackStatus");
+const satisfiedButton = document.querySelector("#satisfiedButton");
+const unsatisfiedButton = document.querySelector("#unsatisfiedButton");
+const sendFeedbackButton = document.querySelector("#sendFeedbackButton");
 
 const historyKey = "mining_qa_recent_questions";
 const devApiKey = "dev-local-key";
+let currentAnswer = null;
 
 function switchView(view) {
   const isAsk = view === "ask";
@@ -99,6 +108,9 @@ function renderSources(sources) {
   sources.forEach((source) => {
     const item = document.createElement("article");
     item.className = "source-item";
+    const officialLink = source.url
+      ? `<a class="source-link" href="${escapeAttr(source.url)}" target="_blank" rel="noreferrer">${escapeHtml(source.source_platform || "官方来源")}</a>`
+      : "";
     item.innerHTML = `
       <div class="source-title">${escapeHtml(source.title || "未知文件")}</div>
       <div class="source-meta">
@@ -107,6 +119,7 @@ function renderSources(sources) {
         <span>${source.page == null ? "无页码" : `第 ${source.page} 页`}</span>
         <span>${escapeHtml(source.source_type || "unknown")}</span>
         <span>${escapeHtml(source.text_access || "unknown")}</span>
+        ${officialLink}
       </div>
       ${source.quote ? `<div class="quote">${escapeHtml(source.quote)}</div>` : ""}
     `;
@@ -120,6 +133,8 @@ async function submitQuestion(event) {
   if (!question) return;
 
   askButton.disabled = true;
+  currentAnswer = null;
+  resetFeedback();
   askButton.textContent = "查询中";
   answerText.textContent = "正在检索知识库...";
   confidenceBadge.textContent = "查询中";
@@ -133,8 +148,9 @@ async function submitQuestion(event) {
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const data = await response.json();
+    currentAnswer = { sessionId: data.session_id, question };
 
-    answerText.textContent = data.answer || "无回答。";
+    renderAnswer(data.answer || "无回答。");
     confidenceBadge.textContent = data.status || data.confidence || "unknown";
     confidenceBadge.classList.toggle("muted", data.confidence === "low");
     setStats(data.retrieval || {});
@@ -145,14 +161,54 @@ async function submitQuestion(event) {
       limitations.appendChild(taskNote);
     }
     renderSources(data.sources || []);
+    feedbackPanel.classList.remove("hidden");
     saveHistory(question);
   } catch (error) {
-    answerText.textContent = `请求失败：${error.message}`;
+    renderAnswer(`请求失败：${error.message}`);
     confidenceBadge.textContent = "失败";
     confidenceBadge.classList.add("muted");
   } finally {
     askButton.disabled = false;
     askButton.textContent = "提交问题";
+  }
+}
+
+function resetFeedback() {
+  feedbackPanel.classList.add("hidden");
+  feedbackDetail.classList.add("hidden");
+  feedbackStatus.textContent = "";
+  feedbackComment.value = "";
+  satisfiedButton.disabled = false;
+  unsatisfiedButton.disabled = false;
+  sendFeedbackButton.disabled = false;
+}
+
+async function submitFeedback(rating, reason = null, comment = "") {
+  if (!currentAnswer?.sessionId) return;
+  satisfiedButton.disabled = true;
+  unsatisfiedButton.disabled = true;
+  sendFeedbackButton.disabled = true;
+  feedbackStatus.textContent = "正在提交反馈...";
+  try {
+    const response = await fetch("/api/feedback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-API-Key": devApiKey },
+      body: JSON.stringify({
+        session_id: currentAnswer.sessionId,
+        question: currentAnswer.question,
+        rating,
+        reason,
+        comment: comment.trim() || null,
+      }),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    feedbackStatus.textContent = rating === "satisfied" ? "已记录：满意。" : "已记录：不满意。";
+    feedbackDetail.classList.add("hidden");
+  } catch (error) {
+    feedbackStatus.textContent = `反馈提交失败：${error.message}`;
+    satisfiedButton.disabled = false;
+    unsatisfiedButton.disabled = false;
+    sendFeedbackButton.disabled = false;
   }
 }
 
@@ -194,6 +250,9 @@ function renderStandards(items) {
   items.forEach((item) => {
     const node = document.createElement("article");
     node.className = "standard-item";
+    const officialLink = item.url
+      ? `<a class="source-link" href="${escapeAttr(item.url)}" target="_blank" rel="noreferrer">${escapeHtml(item.source_platform || "官方来源")}</a>`
+      : "";
     node.innerHTML = `
       <div class="standard-title">${escapeHtml(item.title || "未知标准")}</div>
       <div class="standard-meta">
@@ -201,10 +260,39 @@ function renderStandards(items) {
         <span>${escapeHtml(item.status || "状态未知")}</span>
         <span>${escapeHtml(item.text_access || "unknown")}</span>
         <span>${item.can_answer ? "可问答" : "不可问答"}</span>
+        ${officialLink}
       </div>
     `;
     standardsList.appendChild(node);
   });
+}
+
+function renderAnswer(value) {
+  answerText.innerHTML = renderInlineMarkdown(value);
+}
+
+function renderInlineMarkdown(value) {
+  let html = escapeHtml(value);
+  const links = [];
+  html = html.replace(
+    /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
+    (_, label, url) => {
+      const token = `@@LINK_${links.length}@@`;
+      links.push(`<a href="${escapeAttr(url)}" target="_blank" rel="noreferrer">${label}</a>`);
+      return token;
+    },
+  );
+  html = html.replace(
+    /(https?:\/\/[^\s<]+)/g,
+    (url) => `<a href="${escapeAttr(url)}" target="_blank" rel="noreferrer">${url}</a>`,
+  );
+  html = html.replace(/^###\s+(.+)$/gm, '<span class="answer-heading">$1</span>');
+  html = html.replace(/^##\s+(.+)$/gm, '<span class="answer-heading">$1</span>');
+  html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  links.forEach((link, index) => {
+    html = html.replace(`@@LINK_${index}@@`, link);
+  });
+  return html;
 }
 
 function escapeHtml(value) {
@@ -216,10 +304,23 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+function escapeAttr(value) {
+  return escapeHtml(value).replaceAll("`", "&#096;");
+}
+
 document.querySelectorAll(".nav-tab").forEach((button) => {
   button.addEventListener("click", () => switchView(button.dataset.view));
 });
 
 document.querySelector("#askForm").addEventListener("submit", submitQuestion);
 document.querySelector("#standardsForm").addEventListener("submit", submitStandards);
+satisfiedButton.addEventListener("click", () => submitFeedback("satisfied"));
+unsatisfiedButton.addEventListener("click", () => {
+  feedbackStatus.textContent = "";
+  feedbackDetail.classList.remove("hidden");
+  feedbackReason.focus();
+});
+sendFeedbackButton.addEventListener("click", () => {
+  submitFeedback("unsatisfied", feedbackReason.value, feedbackComment.value);
+});
 renderHistory();

@@ -62,17 +62,27 @@ Request
 - Schema 与结构化存储
 - 标准目录查询
 - 全文搜索
-- 向量检索，二期接入
-- 知识图谱实体/关系查询，二期接入
+- 向量检索
+- 知识图谱实体/关系查询
 - 用户上传资料的私有库与审核状态管理
 - 返回统一格式的证据列表
 
-MVP 阶段先实现 schema、标准目录查询和 Elasticsearch 全文搜索。ChromaDB 向量检索和 Neo4j 知识图谱作为后续增强能力接入。Embedding Provider 必须可配置，不使用 `deepseek-v4-flash` 作为 embedding 模型。
+当前本地/internal MVP 已实现为独立 FastAPI 知识库服务，路由前缀为 `/knowledge/*`，由问答后端通过 `KNOWLEDGE_BASE_URL` 调用。该服务是内部服务，不作为公网产品接口暴露。
+
+MVP 当前实现：
+
+- SQLite + FTS5：结构化存储、标准目录和全文检索。
+- clause-level chunks：标准、规范和政策文件的条款级证据。
+- SQLite KG：轻量知识图谱实体和关系。
+- SQLite local vector：确定性 hash 字符 n-gram 向量，作为可替换的 MVP 向量召回层。
+- Hybrid retrieval：全文、向量和图谱候选合并排序。
+
+Elasticsearch/OpenSearch、ChromaDB/FAISS 和 Neo4j 仍是后续规模化或质量升级方向。Embedding Provider 必须可配置，不使用 `deepseek-v4-flash` 作为 embedding 模型。
 
 接受的知识库架构分三层：
 
 - 最低兼容：结构化元数据 + 全文检索 + 标准目录查询 + 证据检索接口。
-- 推荐 MVP：PostgreSQL + Elasticsearch + 本地/对象存储 + 后台 OCR/解析任务 + Knowledge API。
+- 推荐 MVP：关系型数据库或 SQLite + FTS5 + 本地/对象存储 + 后台 OCR/解析任务 + Knowledge API。
 - 增强架构：ChromaDB + 可配置 Embedding Provider + Neo4j + 混合检索。
 
 外部知识库可以通过适配器接入，但必须转换为本项目的证据格式；缺少条款、页码、来源和质量状态时，问答模块应降级回答。

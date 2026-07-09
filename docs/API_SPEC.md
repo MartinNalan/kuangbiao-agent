@@ -1,5 +1,17 @@
 # API Spec
 
+## API Boundary
+
+Cloud and commercial deployments should expose only the controlled QA API surface:
+
+- `GET /health`
+- `POST /api/ask`
+- `GET /api/standards`
+- `POST /api/feedback`
+- `GET /api/usage`
+
+The knowledge service routes under `/knowledge/*` are internal backend-to-backend contracts. They must not be exposed as public internet APIs because they can reveal knowledge-base structure, internal metadata, chunks, candidates, or full-text retrieval behavior. Public clients should receive only the capped evidence snippets, source links, usage data, and task identifiers returned by `/api/*`.
+
 ## POST /api/ask
 
 Authentication:
@@ -73,6 +85,7 @@ When `status=out_of_scope`, the service must not call KB retrieval, web suppleme
 
 `source_type` allowed values:
 
+- `local_kb`
 - `official_metadata`
 - `official_fulltext`
 - `official_visual`
@@ -122,11 +135,29 @@ Knowledge-gap tasks are only created for in-scope questions. Out-of-scope questi
 ```json
 {
   "session_id": "session-id",
-  "message_id": "answer-id",
-  "rating": "useful",
-  "comment": "引用准确"
+  "rating": "unsatisfied",
+  "question": "关于矿体外推所依据的距离，是否存在不同标准规定不一致的情况？",
+  "reason": "answer_too_vague",
+  "comment": "需要明确列出不同标准采用的距离基准"
 }
 ```
+
+`rating` values:
+
+- `satisfied`
+- `unsatisfied`
+
+`reason` suggested values:
+
+- `wrong_standard`
+- `wrong_clause`
+- `missing_evidence`
+- `quote_too_long`
+- `answer_too_vague`
+- `format_issue`
+- `other`
+
+API clients should store the `session_id` returned by `/api/ask` and submit feedback against that ID. This lets the service collect blind spots for later targeted retrieval, chunking, and prompt/rule improvements.
 
 ### Response
 
@@ -141,6 +172,45 @@ Knowledge-gap tasks are only created for in-scope questions. Out-of-scope questi
 查询知识库中是否已有某个标准。
 
 Authentication is the same as `/api/ask`.
+
+### Request Query
+
+```text
+q=方解石
+standard_no=DZ/T 0321-2018
+status=current
+text_access=ocr_text
+page=1
+page_size=20
+```
+
+### Response
+
+```json
+{
+  "items": [
+    {
+      "document_id": "doc-001",
+      "title": "方解石矿地质勘查规范",
+      "standard_no": "DZ/T 0321-2018",
+      "document_type": "industry_standard",
+      "status": "current",
+      "source_type": "official_visual",
+      "text_access": "ocr_text",
+      "validation_status": "parsed",
+      "can_answer": true,
+      "publish_date": "2018-07-05",
+      "implementation_date": "2018-11-01",
+      "ingestion_time": "2026-07-08T00:00:00+08:00"
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "page_size": 20,
+    "total": 1
+  }
+}
+```
 
 ## GET /api/usage
 
@@ -187,45 +257,6 @@ When the per-key rate limit is exceeded, API endpoints return:
     "current_count": 31,
     "backend": "redis",
     "retry_after_seconds": 20
-  }
-}
-```
-
-### Request Query
-
-```text
-q=方解石
-standard_no=DZ/T 0321-2018
-status=current
-text_access=ocr_text
-page=1
-page_size=20
-```
-
-### Response
-
-```json
-{
-  "items": [
-    {
-      "document_id": "doc-001",
-      "title": "方解石矿地质勘查规范",
-      "standard_no": "DZ/T 0321-2018",
-      "document_type": "industry_standard",
-      "status": "current",
-      "source_type": "official_visual",
-      "text_access": "ocr_text",
-      "validation_status": "parsed",
-      "can_answer": true,
-      "publish_date": "2018-07-05",
-      "implementation_date": "2018-11-01",
-      "ingestion_time": "2026-07-08T00:00:00+08:00"
-    }
-  ],
-  "pagination": {
-    "page": 1,
-    "page_size": 20,
-    "total": 1
   }
 }
 ```
@@ -293,9 +324,9 @@ POST /knowledge/candidates/{candidate_id}/decision
 
 候选数据只有在管理员审核为 `approved_for_kb` 后，才能进入后台正式知识库、全文索引、向量索引或知识图谱。上述资产仍只供后台服务使用，不作为公开接口暴露。
 
-## Knowledge Service Contract
+## Internal Knowledge Service Contract
 
-后端调用知识库服务时，建议先约定统一接口：
+后端调用知识库服务时，建议先约定统一接口。These routes are internal only and should be bound to localhost, private network, service mesh, or a firewall-protected backend segment:
 
 ```text
 POST /knowledge/search

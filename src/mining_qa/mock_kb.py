@@ -20,6 +20,8 @@ MOCK_STANDARDS = [
         "publish_date": "2020-04-28",
         "implementation_date": "2020-05-01",
         "ingestion_time": "2026-07-09T00:00:00+08:00",
+        "url": "mock://standards/gbt-13908-2020",
+        "source_platform": "Mock KB",
     },
     {
         "document_id": "mock-calcite-001",
@@ -34,6 +36,24 @@ MOCK_STANDARDS = [
         "publish_date": "2018-07-05",
         "implementation_date": "2018-11-01",
         "ingestion_time": "2026-07-09T00:00:00+08:00",
+        "url": "mock://standards/dzt-0321-2018",
+        "source_platform": "Mock KB",
+    },
+    {
+        "document_id": "mock-placer-gold-001",
+        "title": "矿产地质勘查规范 金属砂矿类",
+        "standard_no": "DZ/T 0208-2020",
+        "document_type": "industry_standard",
+        "status": "current",
+        "source_type": "local_kb",
+        "text_access": "ocr_text",
+        "validation_status": "verified",
+        "can_answer": True,
+        "publish_date": "2020-04-30",
+        "implementation_date": "2020-05-01",
+        "ingestion_time": "2026-07-09T00:00:00+08:00",
+        "url": "mock://standards/dzt-0208-2020",
+        "source_platform": "Mock KB",
     },
 ]
 
@@ -46,6 +66,83 @@ async def health() -> dict[str, object]:
 @app.post("/knowledge/search")
 async def search(payload: dict[str, Any]) -> dict[str, Any]:
     query = str(payload.get("query", ""))
+
+    if "沙金" in query or "砂金" in query:
+        return {
+            "results": [
+                {
+                    "document_id": "mock-placer-gold-001",
+                    "title": "矿产地质勘查规范 金属砂矿类",
+                    "standard_no": "DZ/T 0208-2020",
+                    "clause_no": None,
+                    "page": None,
+                    "quote": "标准目录命中：DZ/T 0208-2020《矿产地质勘查规范 金属砂矿类》。",
+                    "score": 0.95,
+                    "source_type": "local_kb",
+                    "text_access": "ocr_text",
+                    "validation_status": "verified",
+                    "source_platform": "Mock KB",
+                    "url": "mock://standards/dzt-0208-2020",
+                    "hit_type": ["catalog"],
+                }
+            ],
+            "retrieval": {
+                "full_text_hits": 1,
+                "vector_hits": 1,
+                "graph_hits": 1,
+                "web_hits": 0,
+            },
+            "coverage": {
+                "has_clause_level_evidence": False,
+                "needs_web_supplement": False,
+                "notes": ["Mock KB 命中标准目录。"],
+            },
+        }
+
+    if "矿体外推" in query:
+        return {
+            "results": [
+                {
+                    "document_id": "mock-projection-001",
+                    "title": "固体矿产资源量估算规程 第2部分：几何法",
+                    "standard_no": "DZ/T 0338.2-2020",
+                    "clause_no": "5.4.2",
+                    "page": 12,
+                    "quote": "5.4.2 相邻的两个工程一个见矿，另一个不见矿时，采用有限外推法，自见矿工程外推工程间距的1/2尖灭。若实际工程间距大于推断资源量工程间距，则按推断资源量工程间距的1/2尖推。",
+                    "score": 0.96,
+                    "source_type": "local_kb",
+                    "text_access": "ocr_text",
+                    "validation_status": "verified",
+                    "source_platform": "Mock KB",
+                    "url": "mock://standards/dzt-0338-2-2020",
+                },
+                {
+                    "document_id": "mock-projection-002",
+                    "title": "矿产地质勘查规范 岩金",
+                    "standard_no": "DZ/T 0205-2020",
+                    "clause_no": "8.3.4.5.2",
+                    "page": 39,
+                    "quote": "8.3.4.5.2 有限外推：两个工程中一个工程见矿，另一个工程未见矿，两工程间距大于或等于理论工程间距，可按理论工程间距的1/2尖推、1/4平推；如两工程间距小于理论工程间距，则按两工程实际间距1/2尖推、1/4平推。",
+                    "score": 0.94,
+                    "source_type": "local_kb",
+                    "text_access": "ocr_text",
+                    "validation_status": "verified",
+                    "source_platform": "Mock KB",
+                    "url": "mock://standards/dzt-0205-2020",
+                },
+            ],
+            "retrieval": {
+                "full_text_hits": 2,
+                "vector_hits": 2,
+                "graph_hits": 2,
+                "web_hits": 0,
+            },
+            "coverage": {
+                "has_clause_level_evidence": True,
+                "needs_web_supplement": False,
+                "notes": ["Mock KB 命中矿体外推条款级证据。"],
+            },
+        }
 
     if "金矿" in query or "基本工程间距" in query:
         return {
@@ -61,6 +158,7 @@ async def search(payload: dict[str, Any]) -> dict[str, Any]:
                     "source_type": "local_kb",
                     "text_access": "ocr_text",
                     "validation_status": "verified",
+                    "source_platform": "Mock KB",
                     "url": "mock://standards/gbt-13908-2020",
                 }
             ],

@@ -51,7 +51,27 @@
                 <h3>答案</h3>
                 <span id="confidenceBadge" class="badge muted">未查询</span>
               </div>
-              <pre id="answerText" class="answer-text">等待提问。</pre>
+              <div id="answerText" class="answer-text">等待提问。</div>
+              <div id="feedbackPanel" class="feedback-panel hidden">
+                <div class="feedback-actions" aria-label="回答反馈">
+                  <button id="satisfiedButton" class="secondary-button" type="button">满意</button>
+                  <button id="unsatisfiedButton" class="secondary-button" type="button">不满意</button>
+                </div>
+                <div id="feedbackDetail" class="feedback-detail hidden">
+                  <select id="feedbackReason">
+                    <option value="answer_too_vague">回答太笼统</option>
+                    <option value="wrong_standard">引用标准不对</option>
+                    <option value="wrong_clause">引用条款不对</option>
+                    <option value="missing_evidence">证据不足</option>
+                    <option value="quote_too_long">引用太长</option>
+                    <option value="format_issue">格式问题</option>
+                    <option value="other">其他</option>
+                  </select>
+                  <input id="feedbackComment" type="text" placeholder="补充说明，可选" />
+                  <button id="sendFeedbackButton" type="button">提交反馈</button>
+                </div>
+                <div id="feedbackStatus" class="feedback-status"></div>
+              </div>
             </article>
 
             <article class="meta-panel">

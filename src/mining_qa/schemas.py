@@ -50,6 +50,7 @@ class Source(BaseModel):
     source_type: SourceType = "unavailable"
     text_access: TextAccess = "unavailable"
     url: str | None = None
+    source_platform: str | None = None
     validation_status: str | None = None
 
 
@@ -76,6 +77,27 @@ class AskResponse(BaseModel):
     confidence: Literal["low", "medium", "high"] = "low"
 
 
+class FeedbackRequest(BaseModel):
+    session_id: str
+    rating: Literal["satisfied", "unsatisfied"]
+    question: str | None = None
+    comment: str | None = None
+    reason: Literal[
+        "wrong_standard",
+        "wrong_clause",
+        "missing_evidence",
+        "quote_too_long",
+        "answer_too_vague",
+        "format_issue",
+        "other",
+    ] | None = None
+
+
+class FeedbackResponse(BaseModel):
+    ok: bool = True
+    message: str = "feedback recorded"
+
+
 class StandardItem(BaseModel):
     document_id: str
     title: str
@@ -89,6 +111,8 @@ class StandardItem(BaseModel):
     publish_date: str | None = None
     implementation_date: str | None = None
     ingestion_time: str | None = None
+    url: str | None = None
+    source_platform: str | None = None
 
 
 class Pagination(BaseModel):
