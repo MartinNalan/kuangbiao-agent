@@ -21,6 +21,7 @@
 {
   "answer": "根据当前知识库检索结果，...",
   "session_id": "session-id",
+  "status": "answered",
   "sources": [
     {
       "title": "文件名称",
@@ -44,9 +45,19 @@
     "has_clause_level_evidence": true,
     "notes": []
   },
+  "knowledge_gap_task": null,
   "confidence": "medium"
 }
 ```
+
+`status` suggested values:
+
+- `answered`: 已根据证据回答。
+- `insufficient_evidence`: 问题属于服务范围，但没有条款级证据。
+- `out_of_scope`: 问题不属于矿产资源标准规范相关服务范围。
+- `queued_for_enrichment`: 已返回证据不足，同时创建补库任务。
+
+When `status=out_of_scope`, the service must not call KB retrieval, web supplement, OCR, multimodal parsing, or long LLM reasoning. It should return a fixed refusal message and should not create a knowledge-gap task.
 
 `source_type` allowed values:
 
@@ -74,6 +85,21 @@ When local KB evidence is insufficient, `/api/ask` may call the web supplement m
 3. Return official metadata or reader links in `sources`.
 4. Keep `has_clause_level_evidence=false` unless retrievable正文 evidence is available.
 5. If OCR or page parsing is triggered, store the result as a candidate record first; do not add it to the public KB until admin approval.
+
+If the question is in scope but no clause-level evidence is available, the response may include:
+
+```json
+{
+  "knowledge_gap_task": {
+    "task_id": "kgap_20260709_0001",
+    "status": "queued",
+    "type": "knowledge_gap",
+    "message": "已记录为知识库缺口任务，后台将低优先级补充官方来源和 OCR 候选。"
+  }
+}
+```
+
+Knowledge-gap tasks are only created for in-scope questions. Out-of-scope questions must not be collected as demand signals.
 
 ## POST /api/feedback
 

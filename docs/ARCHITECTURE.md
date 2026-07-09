@@ -6,6 +6,7 @@
 Browser
   -> Frontend Web App
   -> Backend API
+  -> API Client / Customer System
   -> Knowledge Retrieval Service
        -> Full-text Search
        -> Vector Search
@@ -18,21 +19,41 @@ Browser
 
 职责：
 
-- 提供问答输入框
+- 提供内测和演示用问答输入框
 - 展示答案、引用、检索依据和反馈入口
 - 管理会话状态
 - 调用后端 API
+- 管理员后续使用前端处理 API Key、用量、补库任务和候选审核
 
 ## 3. 后端
 
 职责：
 
 - 接收用户问题
+- 校验 API Key、限流和调用范围
+- 判断问题是否属于矿产资源标准规范相关领域
 - 调用知识库检索接口
 - 组织检索结果
 - 调用大模型生成答案
 - 返回结构化结果
 - 记录日志和反馈
+- 对无证据但领域相关的问题创建异步补库任务
+
+后端处理流程：
+
+```text
+Request
+  -> Authentication / rate limit
+  -> Domain relevance gate
+       -> If irrelevant: fixed refusal, no KB/LLM/OCR/web supplement
+  -> Local KB retrieval
+       -> If clause evidence exists: answer with citations
+       -> If no clause evidence: return insufficient evidence
+  -> Optional web metadata supplement
+  -> Optional knowledge-gap task queued for background processing
+```
+
+领域相关性判断应尽量低成本。优先使用规则、关键词和短分类模型；只有通过初筛后，才进入检索、联网、OCR、多模态或长上下文推理。
 
 ## 4. 知识库服务
 
@@ -134,6 +155,8 @@ Question
 
 联网或 OCR 新获得的数据不直接写入正式知识库。系统应先写入候选暂存区，记录来源 URL、标准号、页码、OCR 文本、置信度、触发问题、任务状态和版权/授权备注。管理员批量审核通过后，才允许进入正式知识库索引，供后续用户复用。
 
+知识库缺口任务可以异步、低并发执行。MVP 阶段允许单 worker 或定时任务串行处理，以降低服务器压力。任务处理顺序应优先考虑问题频次、标准明确程度、来源可信度和业务价值。
+
 自然资源领域行标需要额外适配 `nrsis.org.cn`：
 
 - 查询页可通过 `key` 参数按标准号或标准名称检索。
@@ -156,3 +179,4 @@ Question
 - 知识库：独立服务
 - 域名：指向云服务器入口
 - HTTPS：通过 Nginx + 证书管理
+- 商业形态：API-first，前端主要用于内测、演示和管理
