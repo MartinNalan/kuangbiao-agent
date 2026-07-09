@@ -13,6 +13,7 @@ const askButton = document.querySelector("#askButton");
 const standardsList = document.querySelector("#standardsList");
 
 const historyKey = "mining_qa_recent_questions";
+const devApiKey = "dev-local-key";
 
 function switchView(view) {
   const isAsk = view === "ask";
@@ -127,7 +128,7 @@ async function submitQuestion(event) {
   try {
     const response = await fetch("/api/ask", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-API-Key": devApiKey },
       body: JSON.stringify({ question }),
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -171,7 +172,9 @@ async function submitStandards(event) {
   standardsList.textContent = "查询中...";
 
   try {
-    const response = await fetch(`/api/standards?${params.toString()}`);
+    const response = await fetch(`/api/standards?${params.toString()}`, {
+      headers: { "X-API-Key": devApiKey },
+    });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const data = await response.json();
     renderStandards(data.items || []);

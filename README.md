@@ -27,6 +27,7 @@ OPENAI_BASE_URL=https://api.deepseek.com
 OPENAI_MODEL=deepseek-v4-flash
 KNOWLEDGE_BASE_URL=
 ENABLE_SYNC_WEB_SUPPLEMENT=false
+API_KEYS=dev-local-key
 ```
 
 `KNOWLEDGE_BASE_URL` 为空时，系统不会编造答案，会返回证据不足提示。知识库服务完成后，填入知识库后端地址即可接入 `/knowledge/search` 和 `/knowledge/standards`。
@@ -67,6 +68,17 @@ curl http://127.0.0.1:8000/health
 ```bash
 PYTHONPATH=src python -m mining_qa "哪个标准规定了金矿基本工程间距？"
 ```
+
+API 调用示例：
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/ask \
+  -H 'Content-Type: application/json' \
+  -H 'X-API-Key: dev-local-key' \
+  -d '{"question":"哪个规范规定了铁矿的推荐工程间距？"}'
+```
+
+`API_KEYS` 为空时用于本地开发，不启用 API Key 鉴权；配置后，`/api/*` 需要通过 `X-API-Key` 或 `Authorization: Bearer <key>` 调用。调用日志写入本地 `data/api_calls.jsonl`，不会提交到 Git。
 
 ## 许可证与数据边界
 

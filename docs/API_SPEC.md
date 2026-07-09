@@ -2,6 +2,18 @@
 
 ## POST /api/ask
 
+Authentication:
+
+```text
+X-API-Key: your-api-key
+```
+
+or:
+
+```text
+Authorization: Bearer your-api-key
+```
+
 ### Request
 
 ```json
@@ -127,6 +139,8 @@ Knowledge-gap tasks are only created for in-scope questions. Out-of-scope questi
 ## GET /api/standards
 
 查询知识库中是否已有某个标准。
+
+Authentication is the same as `/api/ask`.
 
 ### Request Query
 
