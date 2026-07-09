@@ -98,6 +98,28 @@ redis-cli ping
 curl http://127.0.0.1:8000/api/usage -H 'X-API-Key: dev-local-key'
 ```
 
+## 知识库 Mock 与回归测试
+
+在真实知识库接入前，可以用内置 mock 服务验证 API 对接：
+
+```bash
+PYTHONPATH=src uvicorn mining_qa.mock_kb:app --host 127.0.0.1 --port 18081
+```
+
+另一个终端启动主 API：
+
+```bash
+KNOWLEDGE_BASE_URL=http://127.0.0.1:18081 \
+API_KEYS=dev-local-key \
+PYTHONPATH=src uvicorn mining_qa.api:app --host 127.0.0.1 --port 8000
+```
+
+自动回归测试：
+
+```bash
+.venv/bin/python scripts/run_api_regression.py
+```
+
 ## 许可证与数据边界
 
 计划采用双许可证路线：

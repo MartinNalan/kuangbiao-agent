@@ -300,6 +300,9 @@ POST /knowledge/candidates/{candidate_id}/decision
 ```text
 POST /knowledge/search
 GET /knowledge/standards
+POST /knowledge/candidates
 ```
 
 返回候选证据，不直接返回最终自然语言答案。
+
+本仓库提供 `mining_qa.mock_kb:app` 用于模拟上述接口，便于真实知识库接入前进行 API 回归测试。
