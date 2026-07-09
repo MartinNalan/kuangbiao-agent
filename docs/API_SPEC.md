@@ -96,7 +96,7 @@ When local KB evidence is insufficient, `/api/ask` may call the web supplement m
 2. Verify candidates against official platforms such as `std.samr.gov.cn` and `nrsis.org.cn`.
 3. Return official metadata or reader links in `sources`.
 4. Keep `has_clause_level_evidence=false` unless retrievable正文 evidence is available.
-5. If OCR or page parsing is triggered, store the result as a candidate record first; do not add it to the public KB until admin approval.
+5. If OCR or page parsing is triggered, store the result as a candidate record first; do not add it to the service-visible KB scope until admin approval.
 
 MVP default: synchronous web supplement is disabled unless `ENABLE_SYNC_WEB_SUPPLEMENT=true`. The default insufficient-evidence path should return quickly and create a knowledge-gap task.
 
@@ -246,7 +246,7 @@ page_size=20
 
 ## POST /api/uploads/{upload_id}/submit-review
 
-用户申请将上传资料提交管理员审核。审核通过后才能进入公共知识库。
+用户申请将上传资料提交管理员审核。审核通过后才能进入受控服务可检索范围；知识库本体不对外公开。
 
 ### Response
 
@@ -265,7 +265,7 @@ page_size=20
 
 ```json
 {
-  "decision": "approved_public",
+  "decision": "approved_for_service",
   "comment": "来源和版本已核验"
 }
 ```
@@ -275,7 +275,7 @@ page_size=20
 ```json
 {
   "ok": true,
-  "status": "approved_public"
+  "status": "approved_for_service"
 }
 ```
 
@@ -291,7 +291,7 @@ GET /knowledge/candidates
 POST /knowledge/candidates/{candidate_id}/decision
 ```
 
-候选数据只有在管理员审核为 `approved_for_kb` 后，才能进入正式知识库、全文索引、向量索引或知识图谱。
+候选数据只有在管理员审核为 `approved_for_kb` 后，才能进入后台正式知识库、全文索引、向量索引或知识图谱。上述资产仍只供后台服务使用，不作为公开接口暴露。
 
 ## Knowledge Service Contract
 
