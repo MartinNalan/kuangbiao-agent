@@ -2,3 +2,14 @@
 .env
 __pycache__/
 *.pyc
+.firecrawl/
+data/
+uploads/
+indexes/
+models/
+*.pdf
+*.PDF
+*.docx
+*.DOCX
+*.xlsx
+*.XLSX

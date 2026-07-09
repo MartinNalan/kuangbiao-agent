@@ -1,0 +1,27 @@
+import argparse
+import asyncio
+
+from .agent import MiningQAAgent
+from .config import get_settings
+from .schemas import AskRequest
+
+
+async def run(question: str) -> None:
+    agent = MiningQAAgent(get_settings())
+    response = await agent.ask(AskRequest(question=question))
+    print(response.answer)
+    if response.sources:
+        print("\nSources:")
+        for source in response.sources:
+            print(f"- {source.standard_no or ''} {source.title} {source.chapter or ''}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Ask the Mining Knowledge QA agent.")
+    parser.add_argument("question", help="Question to ask")
+    args = parser.parse_args()
+    asyncio.run(run(args.question))
+
+
+if __name__ == "__main__":
+    main()
