@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>矿标智询</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">矿</div>
+          <div>
+            <h1>矿标智询</h1>
+            <p>Mining Knowledge QA</p>
+          </div>
+        </div>
+
+        <nav class="nav-tabs" aria-label="主视图">
+          <button class="nav-tab active" data-view="ask" type="button">问答</button>
+          <button class="nav-tab" data-view="standards" type="button">标准目录</button>
+        </nav>
+
+        <section class="side-section">
+          <h2>最近问题</h2>
+          <div id="historyList" class="history-list"></div>
+        </section>
+      </aside>
+
+      <main class="workspace">
+        <section class="topbar">
+          <div>
+            <h2 id="viewTitle">专业问答</h2>
+            <p id="statusLine">本地知识库优先，证据不足时降级回答。</p>
+          </div>
+          <a class="docs-link" href="/docs" target="_blank" rel="noreferrer">API Docs</a>
+        </section>
+
+        <section id="askView" class="view active">
+          <form id="askForm" class="query-panel">
+            <textarea id="questionInput" rows="4" placeholder="输入矿产资源、地质勘查、标准条款相关问题"></textarea>
+            <div class="query-actions">
+              <button id="askButton" type="submit">提交问题</button>
+            </div>
+          </form>
+
+          <section class="result-grid">
+            <article class="answer-panel">
+              <div class="panel-header">
+                <h3>答案</h3>
+                <span id="confidenceBadge" class="badge muted">未查询</span>
+              </div>
+              <pre id="answerText" class="answer-text">等待提问。</pre>
+            </article>
+
+            <article class="meta-panel">
+              <div class="panel-header">
+                <h3>检索概况</h3>
+              </div>
+              <dl id="retrievalStats" class="stats">
+                <div><dt>全文</dt><dd>0</dd></div>
+                <div><dt>向量</dt><dd>0</dd></div>
+                <div><dt>图谱</dt><dd>0</dd></div>
+                <div><dt>联网</dt><dd>0</dd></div>
+              </dl>
+              <div id="limitations" class="limitations"></div>
+            </article>
+          </section>
+
+          <section class="sources-panel">
+            <div class="panel-header">
+              <h3>引用来源</h3>
+            </div>
+            <div id="sourcesList" class="sources-list empty">暂无引用来源。</div>
+          </section>
+        </section>
+
+        <section id="standardsView" class="view">
+          <form id="standardsForm" class="catalog-search">
+            <input id="standardQuery" type="search" placeholder="标准号或标准名称" />
+            <input id="standardNo" type="search" placeholder="标准号精确过滤" />
+            <select id="textAccess">
+              <option value="">正文状态</option>
+              <option value="metadata_only">仅元数据</option>
+              <option value="pdf_text">PDF 文本</option>
+              <option value="ocr_text">OCR 文本</option>
+              <option value="image_ocr_required">需要 OCR</option>
+              <option value="unavailable">不可用</option>
+            </select>
+            <button type="submit">查询</button>
+          </form>
+          <div id="standardsList" class="standards-list empty">等待查询。</div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

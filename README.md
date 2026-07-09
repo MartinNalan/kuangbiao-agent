@@ -45,6 +45,12 @@ pip install -r requirements.txt
 PYTHONPATH=src uvicorn mining_qa.api:app --host 127.0.0.1 --port 8000
 ```
 
+打开页面：
+
+```text
+http://127.0.0.1:8000
+```
+
 健康检查：
 
 ```bash

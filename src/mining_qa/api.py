@@ -1,14 +1,22 @@
 from typing import Annotated
 
 from fastapi import FastAPI, Query
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from .agent import MiningQAAgent
-from .config import get_settings
+from .config import PROJECT_ROOT, get_settings
 from .knowledge_client import KnowledgeClient
 from .schemas import AskRequest, AskResponse, StandardsResponse
 
 
 app = FastAPI(title="Mining Knowledge QA", version="0.1.0")
+app.mount("/static", StaticFiles(directory=PROJECT_ROOT / "web" / "static"), name="static")
+
+
+@app.get("/", include_in_schema=False)
+async def index() -> FileResponse:
+    return FileResponse(PROJECT_ROOT / "web" / "index.html")
 
 
 @app.get("/health")
