@@ -14,6 +14,8 @@ The knowledge service routes under `/knowledge/*` are internal backend-to-backen
 
 When the API server is running, interactive OpenAPI docs are available at `/docs`, `/redoc`, and `/openapi.json`. Developer-oriented examples are in `docs/OPENAPI_QUICKSTART.md`.
 
+API keys may come from the legacy `API_KEYS` environment variable or from the local API Key registry. The registry stores only key hashes and metadata under `data/api_keys.json`; plaintext keys are shown only once at creation time.
+
 ## POST /api/ask
 
 Authentication:

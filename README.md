@@ -29,6 +29,7 @@ OPENAI_MODEL=deepseek-v4-flash
 KNOWLEDGE_BASE_URL=
 ENABLE_SYNC_WEB_SUPPLEMENT=false
 API_KEYS=dev-local-key
+API_KEY_REGISTRY_PATH=
 REDIS_URL=redis://127.0.0.1:6379/0
 RATE_LIMIT_ENABLED=true
 RATE_LIMIT_PER_MINUTE=30
@@ -82,7 +83,18 @@ curl -X POST http://127.0.0.1:8000/api/ask \
   -d '{"question":"哪个规范规定了铁矿的推荐工程间距？"}'
 ```
 
-`API_KEYS` 为空时用于本地开发，不启用 API Key 鉴权；配置后，`/api/*` 需要通过 `X-API-Key` 或 `Authorization: Bearer <key>` 调用。调用日志写入本地 `data/api_calls.jsonl`，不会提交到 Git。
+`API_KEYS` 为空且没有 API Key registry 时用于本地开发，不启用 API Key 鉴权；配置后，`/api/*` 需要通过 `X-API-Key` 或 `Authorization: Bearer <key>` 调用。调用日志写入本地 `data/api_calls.jsonl`，不会提交到 Git。
+
+API Key registry 支持本地可管理 key，默认写入 `data/api_keys.json`，只保存 key hash 和元数据，不保存明文 key：
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/manage_api_keys.py create --name test-client --purpose "local testing"
+PYTHONPATH=src .venv/bin/python scripts/manage_api_keys.py list
+PYTHONPATH=src .venv/bin/python scripts/manage_api_keys.py disable key_xxxxxx
+PYTHONPATH=src .venv/bin/python scripts/manage_api_keys.py enable key_xxxxxx
+```
+
+创建命令输出的 `api_key` 只显示一次，需要当场保存。`.env` 中的 `API_KEYS` 仍作为 legacy key 兼容。
 
 交互式 OpenAPI 文档：
 

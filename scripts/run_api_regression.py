@@ -8,11 +8,15 @@ from urllib.parse import urlparse
 
 import httpx
 
+from mining_qa.api_keys import ApiKeyRegistry
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 API_URL = os.getenv("API_URL", "http://127.0.0.1:18080")
 KB_URL = os.getenv("KB_URL", "http://127.0.0.1:18081")
 API_KEY = os.getenv("API_KEY", "test-key")
+REGISTRY_API_KEY = "registry-test-key"
+DISABLED_API_KEY = "disabled-test-key"
 
 
 def url_port(url: str) -> str:
@@ -61,6 +65,14 @@ def post_ask(question: str, api_key: str | None = API_KEY) -> httpx.Response:
 
 
 def main() -> int:
+    registry_path = PROJECT_ROOT / "data" / "test_api_keys.json"
+    if registry_path.exists():
+        registry_path.unlink()
+    registry = ApiKeyRegistry(registry_path)
+    registry_record, _ = registry.create("regression-registry-key", purpose="api regression", api_key=REGISTRY_API_KEY)
+    disabled_record, _ = registry.create("regression-disabled-key", purpose="api regression disabled", api_key=DISABLED_API_KEY)
+    registry.set_enabled(disabled_record.key_id, False)
+
     env = os.environ.copy()
     env.update(
         {
@@ -68,6 +80,7 @@ def main() -> int:
             "OPENAI_API_KEY": "",
             "KNOWLEDGE_BASE_URL": KB_URL,
             "API_KEYS": API_KEY,
+            "API_KEY_REGISTRY_PATH": str(registry_path),
             "RATE_LIMIT_PER_MINUTE": "100",
             "RATE_LIMIT_ENABLED": "true",
             "REDIS_URL": "redis://127.0.0.1:6379/0",
@@ -87,6 +100,16 @@ def main() -> int:
 
         unauthorized = post_ask("哪个规范规定了铁矿的推荐工程间距？", api_key=None)
         assert_equal(unauthorized.status_code, 401, "missing api key status")
+
+        disabled = post_ask("哪个规范规定了铁矿的推荐工程间距？", api_key=DISABLED_API_KEY)
+        assert_equal(disabled.status_code, 401, "disabled registry api key status")
+
+        registry_auth = post_ask("1+1=几？", api_key=REGISTRY_API_KEY)
+        assert_equal(registry_auth.status_code, 200, "registry api key status")
+        assert_equal(registry_auth.json()["status"], "out_of_scope", "registry api key response status")
+        used_record = ApiKeyRegistry(registry_path).find(REGISTRY_API_KEY)
+        if not used_record or not used_record.last_used_at:
+            raise AssertionError("registry key last_used_at should be updated after successful auth")
 
         out_of_scope = post_ask("1+1=几？")
         assert_equal(out_of_scope.status_code, 200, "out-of-scope http status")
@@ -176,6 +199,8 @@ def main() -> int:
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        if registry_path.exists():
+            registry_path.unlink()
 
 
 if __name__ == "__main__":

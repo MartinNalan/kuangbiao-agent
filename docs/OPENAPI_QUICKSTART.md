@@ -42,6 +42,14 @@ Authorization: Bearer dev-local-key
 
 `dev-local-key` is a local development placeholder. Do not use it in production.
 
+For local managed keys, create a registry key:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/manage_api_keys.py create --name test-client --purpose "local testing"
+```
+
+The generated `api_key` is shown once and is not stored in plaintext. Registry metadata is stored in `data/api_keys.json`, which is ignored by Git. `API_KEYS` in `.env` remains supported as a legacy compatibility path.
+
 ## Ask
 
 ```bash
@@ -123,4 +131,3 @@ Rate limited:
 ```
 
 Out-of-scope questions return HTTP 200 with `status=out_of_scope`; they are rejected before KB retrieval or model reasoning.
-

@@ -1,7 +1,9 @@
 import hashlib
+from pathlib import Path
 
 from fastapi import Header, HTTPException, status
 
+from .api_keys import ApiKeyRegistry
 from .config import Settings
 
 
@@ -26,11 +28,13 @@ def require_api_key(
     authorization: str | None = Header(default=None, alias="Authorization"),
 ) -> str:
     allowed_keys = settings.allowed_api_keys
-    if not allowed_keys:
+    registry = ApiKeyRegistry(Path(settings.api_key_registry_path) if settings.api_key_registry_path else None)
+    registry_enabled = registry.exists()
+    if not allowed_keys and not registry_enabled:
         return "local-dev"
 
     api_key = x_api_key or extract_bearer_token(authorization)
-    if not api_key or api_key not in allowed_keys:
+    if not api_key:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={
@@ -38,4 +42,19 @@ def require_api_key(
                 "message": "Missing or invalid API key.",
             },
         )
-    return api_key
+
+    if registry_enabled:
+        record = registry.authenticate(api_key)
+        if record:
+            return api_key
+
+    if api_key in allowed_keys:
+        return api_key
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail={
+            "code": "UNAUTHORIZED",
+            "message": "Missing or invalid API key.",
+        },
+    )

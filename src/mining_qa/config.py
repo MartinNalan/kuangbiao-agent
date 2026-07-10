@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     knowledge_base_url: str = Field(default="", alias="KNOWLEDGE_BASE_URL")
     enable_sync_web_supplement: bool = Field(default=False, alias="ENABLE_SYNC_WEB_SUPPLEMENT")
     api_keys: str = Field(default="", alias="API_KEYS")
+    api_key_registry_path: str = Field(default="", alias="API_KEY_REGISTRY_PATH")
     redis_url: str = Field(default="redis://127.0.0.1:6379/0", alias="REDIS_URL")
     rate_limit_enabled: bool = Field(default=True, alias="RATE_LIMIT_ENABLED")
     rate_limit_per_minute: int = Field(default=30, alias="RATE_LIMIT_PER_MINUTE")

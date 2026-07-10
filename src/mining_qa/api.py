@@ -1,11 +1,13 @@
 from typing import Annotated
 from time import perf_counter
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .agent import MiningQAAgent
+from .api_keys import ApiKeyRegistry
 from .auth import require_api_key
 from .config import PROJECT_ROOT, get_settings
 from .feedback_log import FeedbackLogger
@@ -65,6 +67,7 @@ async def health() -> dict[str, object]:
         "model": settings.openai_model,
         "knowledge_base_enabled": bool(settings.knowledge_base_url),
         "api_auth_enabled": bool(settings.allowed_api_keys),
+        "api_key_registry_enabled": ApiKeyRegistry(Path(settings.api_key_registry_path) if settings.api_key_registry_path else None).exists(),
         "rate_limit_enabled": settings.rate_limit_enabled,
         "rate_limit_per_minute": settings.rate_limit_per_minute,
         "rate_limit_backend": rate_limiter.last_backend,
