@@ -156,6 +156,15 @@ def main() -> int:
         if not any("自然资源部负责本级已颁发勘查许可证或采矿许可证" in (source.get("quote") or "") for source in authority.json().get("sources", [])):
             raise AssertionError("policy-authority sources should include direct authority quote")
 
+        authority_missing_permit = post_ask("我是一个大型的金矿，我的储量报告评审应该去哪个机构")
+        assert_equal(authority_missing_permit.status_code, 200, "policy-authority-missing-permit http status")
+        assert_equal(authority_missing_permit.json()["status"], "answered", "policy-authority-missing-permit response status")
+        missing_answer = authority_missing_permit.json()["answer"]
+        if "许可证颁发层级" not in missing_answer or "省级自然资源主管部门" not in missing_answer:
+            raise AssertionError("policy-authority-missing-permit should ask user to judge by permit issuing level")
+        if "煤层气" in missing_answer or "石油天然气" in missing_answer:
+            raise AssertionError("policy-authority-missing-permit should not drift to oil/gas standards")
+
         standards = httpx.get(
             f"{API_URL}/api/standards",
             headers={"X-API-Key": API_KEY},

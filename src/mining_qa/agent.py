@@ -15,7 +15,16 @@ ANSWER_CACHE: dict[str, AskResponse] = {}
 CACHEABLE_COMPARISON_TERMS = ("不一致", "差异", "不同", "比较", "列举", "哪些标准", "哪些规范")
 PROJECTION_DISTANCE_TERMS = ("外推所依据的距离", "外推依据", "外推距离", "依据的距离")
 POLICY_AUTHORITY_INTENT_TERMS = ("哪个机构", "去哪个机构", "谁负责", "哪一级部门", "哪个部门", "权限", "负责")
-POLICY_AUTHORITY_TOPIC_TERMS = ("储量评审", "评审备案", "采矿证", "采矿许可证", "勘查许可证", "矿产资源储量")
+POLICY_AUTHORITY_TOPIC_TERMS = (
+    "储量评审",
+    "储量报告评审",
+    "储量报告",
+    "评审备案",
+    "采矿证",
+    "采矿许可证",
+    "勘查许可证",
+    "矿产资源储量",
+)
 
 
 SYSTEM_PROMPT = """你是矿产资源标准知识问答 agent。

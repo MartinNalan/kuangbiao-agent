@@ -144,7 +144,9 @@ async def search(payload: dict[str, Any]) -> dict[str, Any]:
             },
         }
 
-    if "储量评审" in query and ("采矿证" in query or "采矿许可证" in query or "哪个机构" in query):
+    if ("储量评审" in query or "储量报告评审" in query or "储量报告" in query) and (
+        "采矿证" in query or "采矿许可证" in query or "哪个机构" in query
+    ):
         return {
             "results": [
                 {

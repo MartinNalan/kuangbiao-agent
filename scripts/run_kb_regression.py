@@ -98,22 +98,26 @@ def assert_catalog() -> None:
 
 
 def assert_policy_authority() -> None:
-    query = "我的采矿证是自然资源部颁发的，我的储量评审应该去哪个机构"
-    result = post_json(
-        f"{KB_URL}/knowledge/search",
-        {"query": query, "options": {"top_k": 5, "include_full_text": False}},
-    )
-    hits = result.get("results") or []
-    top3 = hits[:3]
-    expected = [
-        hit
-        for hit in top3
-        if hit.get("standard_no") == "自然资规〔2023〕6号"
-        and hit.get("clause_no") == "十、"
-        and "自然资源部负责本级已颁发勘查许可证或采矿许可证" in (hit.get("quote") or "")
+    queries = [
+        "我的采矿证是自然资源部颁发的，我的储量评审应该去哪个机构",
+        "我是一个大型的金矿，我的储量报告评审应该去哪个机构",
     ]
-    assert_true(bool(expected), f"policy authority target clause not in top 3: {top3}")
-    assert_true(result.get("retrieval", {}).get("graph_hits", 0) > 0, "policy authority should use graph hits")
+    for query in queries:
+        result = post_json(
+            f"{KB_URL}/knowledge/search",
+            {"query": query, "options": {"top_k": 5, "include_full_text": False}},
+        )
+        hits = result.get("results") or []
+        top3 = hits[:3]
+        expected = [
+            hit
+            for hit in top3
+            if hit.get("standard_no") == "自然资规〔2023〕6号"
+            and hit.get("clause_no") == "十、"
+            and "自然资源部负责本级已颁发勘查许可证或采矿许可证" in (hit.get("quote") or "")
+        ]
+        assert_true(bool(expected), f"policy authority target clause not in top 3 for {query}: {top3}")
+        assert_true(result.get("retrieval", {}).get("graph_hits", 0) > 0, "policy authority should use graph hits")
     print("OK search: policy authority retrieval")
 
 
