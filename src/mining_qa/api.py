@@ -16,7 +16,23 @@ from .usage_log import UsageLogger
 from .usage_stats import UsageStats
 
 
-app = FastAPI(title="Mining Knowledge QA", version="0.1.0")
+OPENAPI_TAGS = [
+    {"name": "system", "description": "Service health and runtime metadata."},
+    {"name": "qa", "description": "Controlled public QA API for mineral-resource standards and policies."},
+    {"name": "catalog", "description": "Knowledge-base catalog lookup through the public API boundary."},
+    {"name": "feedback", "description": "Answer-quality feedback for retrieval and KB improvement."},
+    {"name": "usage", "description": "Per-API-key usage and rate-limit status."},
+]
+
+app = FastAPI(
+    title="Mining Knowledge QA",
+    version="0.1.0",
+    description=(
+        "API-first mineral-resource standards QA service. Public clients should use only "
+        "`/api/*` and `/health`; `/knowledge/*` belongs to the private internal KB service."
+    ),
+    openapi_tags=OPENAPI_TAGS,
+)
 app.mount("/static", StaticFiles(directory=PROJECT_ROOT / "web" / "static"), name="static")
 usage_logger = UsageLogger()
 feedback_logger = FeedbackLogger()
@@ -36,7 +52,12 @@ async def index() -> FileResponse:
     return FileResponse(PROJECT_ROOT / "web" / "index.html")
 
 
-@app.get("/health")
+@app.get(
+    "/health",
+    tags=["system"],
+    summary="Check service health",
+    description="Returns runtime configuration flags without exposing secrets or knowledge-base content.",
+)
 async def health() -> dict[str, object]:
     settings = get_settings()
     return {
@@ -55,7 +76,16 @@ async def enforce_rate_limit(api_key: str) -> None:
     rate_limiter.raise_if_limited(result)
 
 
-@app.post("/api/ask", response_model=AskResponse)
+@app.post(
+    "/api/ask",
+    response_model=AskResponse,
+    tags=["qa"],
+    summary="Ask a domain-scoped question",
+    description=(
+        "Answers mineral-resource standards, technical specification, and related policy questions. "
+        "Out-of-scope questions are rejected before KB retrieval or model reasoning."
+    ),
+)
 async def ask(
     request: AskRequest,
     http_request: Request,
@@ -84,7 +114,13 @@ async def ask(
     return response
 
 
-@app.post("/api/feedback", response_model=FeedbackResponse)
+@app.post(
+    "/api/feedback",
+    response_model=FeedbackResponse,
+    tags=["feedback"],
+    summary="Submit answer feedback",
+    description="Records satisfaction or issue feedback against a returned session_id.",
+)
 async def feedback(
     request: FeedbackRequest,
     http_request: Request,
@@ -107,7 +143,13 @@ async def feedback(
     return FeedbackResponse()
 
 
-@app.get("/api/standards", response_model=StandardsResponse)
+@app.get(
+    "/api/standards",
+    response_model=StandardsResponse,
+    tags=["catalog"],
+    summary="Search the standard catalog",
+    description="Checks whether a standard or policy document is available through the controlled QA service.",
+)
 async def standards(
     http_request: Request,
     api_key: Annotated[str, Depends(authenticated_api_key)],
@@ -146,7 +188,12 @@ async def standards(
     return response
 
 
-@app.get("/api/usage")
+@app.get(
+    "/api/usage",
+    tags=["usage"],
+    summary="Get current API-key usage",
+    description="Returns per-key usage counters and current rate-limit configuration.",
+)
 async def usage(api_key: Annotated[str, Depends(authenticated_api_key)]) -> dict[str, object]:
     await enforce_rate_limit(api_key)
     settings = get_settings()

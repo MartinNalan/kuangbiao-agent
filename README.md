@@ -11,6 +11,7 @@
 - `docs/PRD.md` - 产品需求文档
 - `docs/ARCHITECTURE.md` - 技术架构草案
 - `docs/API_SPEC.md` - 前后端与知识库接口约定
+- `docs/OPENAPI_QUICKSTART.md` - 公开 QA API 调用说明和示例
 - `docs/WIREFRAMES.md` - 页面原型说明
 - `docs/KNOWLEDGE_BASE_REQUIREMENTS.md` - 知识库构建要求
 - `docs/LICENSING_AND_REPOSITORIES.md` - 双许可证与仓库策略
@@ -82,6 +83,16 @@ curl -X POST http://127.0.0.1:8000/api/ask \
 ```
 
 `API_KEYS` 为空时用于本地开发，不启用 API Key 鉴权；配置后，`/api/*` 需要通过 `X-API-Key` 或 `Authorization: Bearer <key>` 调用。调用日志写入本地 `data/api_calls.jsonl`，不会提交到 Git。
+
+交互式 OpenAPI 文档：
+
+```text
+http://127.0.0.1:8000/docs
+http://127.0.0.1:8000/redoc
+http://127.0.0.1:8000/openapi.json
+```
+
+更多调用示例见 `docs/OPENAPI_QUICKSTART.md` 和 `examples/api_client.py`。
 
 限流默认启用，优先使用 Redis；Redis 不可用时自动降级到本地内存限流。本地安装 Redis：
 

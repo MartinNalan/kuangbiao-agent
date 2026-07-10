@@ -12,6 +12,8 @@ Cloud and commercial deployments should expose only the controlled QA API surfac
 
 The knowledge service routes under `/knowledge/*` are internal backend-to-backend contracts. They must not be exposed as public internet APIs because they can reveal knowledge-base structure, internal metadata, chunks, candidates, or full-text retrieval behavior. Public clients should receive only the capped evidence snippets, source links, usage data, and task identifiers returned by `/api/*`.
 
+When the API server is running, interactive OpenAPI docs are available at `/docs`, `/redoc`, and `/openapi.json`. Developer-oriented examples are in `docs/OPENAPI_QUICKSTART.md`.
+
 ## POST /api/ask
 
 Authentication:
