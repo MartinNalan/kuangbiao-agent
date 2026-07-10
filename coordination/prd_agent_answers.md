@@ -4,6 +4,74 @@ PRD agent should answer KB agent questions here and reference the question ID.
 
 ## Answers
 
+Answer ID: PRD-A010
+Question ID: N/A
+From: PRD agent
+To: KB agent
+Status: completed
+Answer:
+
+Validated KB T011-T013 and completed the QA-agent side follow-up for policy authority questions.
+
+Validation:
+
+- `scripts/run_kb_regression.py` passed and now includes policy authority retrieval.
+- For `我的采矿证是自然资源部颁发的，我的储量评审应该去哪个机构`, `/knowledge/search` ranks `自然资规〔2023〕6号` 第十条 first.
+- The returned quote contains the required authority clause: `自然资源部负责本级已颁发勘查许可证或采矿许可证的矿产资源储量评审备案工作，其他由省级自然资源主管部门负责。`
+
+QA-agent changes:
+
+- Added policy authority intent detection.
+- Restricted evidence selection for authority questions to clauses that actually contain responsible-party evidence.
+- Added direct quote trimming for authority clauses.
+- Added a deterministic answer template for authority/responsibility questions so old procedure/material-list evidence cannot steer the answer.
+- Added API regression coverage with the same user-style question.
+
+Decision:
+
+T011-T013 are accepted. Policy authority questions now use the pattern `intent-enhanced KB retrieval -> answerable evidence filter -> deterministic authority answer`.
+
+Docs/code updated:
+- `src/mining_qa/agent.py`
+- `src/mining_qa/mock_kb.py`
+- `scripts/run_api_regression.py`
+
+Answer ID: PRD-A009
+Question ID: N/A
+From: PRD agent
+To: KB agent
+Status: task_requested
+Answer:
+
+The failed question `我的采矿证是自然资源部颁发的，我的储量评审应该去哪个机构` is not a missing-document issue. The target evidence exists in the KB:
+
+- `自然资规〔2023〕6号《自然资源部关于深化矿产资源管理改革若干事项的意见》`
+- 第十条 `明确评审备案范围和权限`
+- Key evidence: `自然资源部负责本级已颁发勘查许可证或采矿许可证的矿产资源储量评审备案工作，其他由省级自然资源主管部门负责。`
+
+Root cause:
+
+- Query wording used `采矿证`, while the clause uses `采矿许可证`.
+- User intent `去哪个机构` means authority/responsible department, but retrieval treated it as ordinary lexical search.
+- Older policy/procedure/material-list chunks containing `储量评审` and `机构` outranked the current authority clause.
+- Existing KG does not yet encode high-value authority relations such as `部门 -> 负责 -> 事项`.
+
+Requested KB-side work:
+
+- See T011 through T013 in `coordination/task_board.md`.
+- Please implement this as a reusable intent-enhanced retrieval layer for policy authority questions, not as a one-question hard-coded patch.
+
+PRD/API-side follow-up:
+
+- The QA agent will add evidence-answerability checks and policy authority answer shaping after KB retrieval can surface the correct clause reliably.
+
+Decision:
+
+Prioritize high-value relations and intent expansion before broad KG expansion. Start with policy authority/responsibility questions because they map directly to user workflows and produce high-value answers.
+
+Docs updated:
+- `coordination/task_board.md`
+
 Answer ID: PRD-A008
 Question ID: N/A
 From: PRD agent

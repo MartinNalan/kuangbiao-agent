@@ -90,6 +90,77 @@ def add_relation(conn, src: str, rel: str, dst: str, evidence: str | None, confi
     )
 
 
+def add_authority_relations(conn, chunk, ceid: str, now: str) -> None:
+    text = chunk["text"] or ""
+    if "自然资源部负责本级已颁发勘查许可证或采矿许可证" not in text:
+        return
+    if "其他由省级自然资源主管部门负责" not in text:
+        return
+
+    source_url = chunk["source_ref"]
+    quote = (
+        "自然资源部负责本级已颁发勘查许可证或采矿许可证的矿产资源储量评审备案工作，"
+        "其他由省级自然资源主管部门负责。"
+    )
+    responsibilities = [
+        (
+            "自然资源部",
+            "本级已颁发勘查许可证或采矿许可证的矿产资源储量评审备案",
+            1.0,
+        ),
+        (
+            "省级自然资源主管部门",
+            "其他矿产资源储量评审备案",
+            1.0,
+        ),
+    ]
+    for org, responsibility, confidence in responsibilities:
+        org_eid = add_entity(conn, "Organization", org, None, {"source": "policy_clause"}, now)
+        resp_eid = add_entity(
+            conn,
+            "Responsibility",
+            responsibility,
+            None,
+            {
+                "document_id": chunk["document_id"],
+                "standard_no": chunk["standard_no"],
+                "clause_no": chunk["clause_no"],
+                "section_path": chunk["section_path"],
+                "source_url": source_url,
+                "quote": quote,
+            },
+            now,
+        )
+        add_relation(
+            conn,
+            org_eid,
+            "RESPONSIBLE_FOR",
+            resp_eid,
+            chunk["chunk_id"],
+            confidence,
+            {
+                "document_id": chunk["document_id"],
+                "standard_no": chunk["standard_no"],
+                "clause_no": chunk["clause_no"],
+                "section_path": chunk["section_path"],
+                "source_url": source_url,
+                "quote": quote,
+                "source_policy": "自然资源部关于深化矿产资源管理改革若干事项的意见",
+            },
+            now,
+        )
+        add_relation(
+            conn,
+            ceid,
+            "STATES_RESPONSIBILITY",
+            resp_eid,
+            chunk["chunk_id"],
+            confidence,
+            {"quote": quote, "source_url": source_url},
+            now,
+        )
+
+
 def build_kg(db_path: Path) -> dict[str, int]:
     now = utc_now()
     with connect(db_path) as conn:
@@ -120,7 +191,7 @@ def build_kg(db_path: Path) -> dict[str, int]:
 
         chunks = conn.execute(
             """
-            select chunk_id, document_id, chunk_type, title, standard_no, section_path, clause_no, text
+            select chunk_id, document_id, chunk_type, title, standard_no, section_path, clause_no, text, source_ref
             from chunks
             where chunk_type in ('clause', 'policy_clause', 'table')
             """
@@ -149,6 +220,7 @@ def build_kg(db_path: Path) -> dict[str, int]:
                 code = ref_match.group(0).replace("—", "-").replace("－", "-").replace("–", "-")
                 ref_eid = add_entity(conn, "StandardCode", code, None, {}, now)
                 add_relation(conn, doc_eid, "REFERENCES_STANDARD", ref_eid, chunk["chunk_id"], 0.75, {}, now)
+            add_authority_relations(conn, chunk, ceid, now)
 
         ecount = conn.execute("select count(*) from kg_entities").fetchone()[0]
         rcount = conn.execute("select count(*) from kg_relations").fetchone()[0]

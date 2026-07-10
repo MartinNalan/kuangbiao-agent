@@ -122,6 +122,17 @@ def main() -> int:
         if not projection.json().get("sources") or len(projection.json()["sources"]) < 2:
             raise AssertionError("projection-comparison response should include multiple sources")
 
+        authority = post_ask("我的采矿证是自然资源部颁发的，我的储量评审应该去哪个机构")
+        assert_equal(authority.status_code, 200, "policy-authority http status")
+        assert_equal(authority.json()["status"], "answered", "policy-authority response status")
+        authority_answer = authority.json()["answer"]
+        if "自然资源部" not in authority_answer or "自然资规〔2023〕6号" not in authority_answer:
+            raise AssertionError("policy-authority answer should identify Natural Resources Ministry and policy basis")
+        if "国土资厅发〔2000〕54号" in authority_answer:
+            raise AssertionError("policy-authority answer should not rely on outdated material-list evidence")
+        if not any("自然资源部负责本级已颁发勘查许可证或采矿许可证" in (source.get("quote") or "") for source in authority.json().get("sources", [])):
+            raise AssertionError("policy-authority sources should include direct authority quote")
+
         standards = httpx.get(
             f"{API_URL}/api/standards",
             headers={"X-API-Key": API_KEY},

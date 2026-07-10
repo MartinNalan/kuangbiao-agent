@@ -14,6 +14,8 @@ ANSWER_CACHE_ENABLED = False
 ANSWER_CACHE: dict[str, AskResponse] = {}
 CACHEABLE_COMPARISON_TERMS = ("不一致", "差异", "不同", "比较", "列举", "哪些标准", "哪些规范")
 PROJECTION_DISTANCE_TERMS = ("外推所依据的距离", "外推依据", "外推距离", "依据的距离")
+POLICY_AUTHORITY_INTENT_TERMS = ("哪个机构", "去哪个机构", "谁负责", "哪一级部门", "哪个部门", "权限", "负责")
+POLICY_AUTHORITY_TOPIC_TERMS = ("储量评审", "评审备案", "采矿证", "采矿许可证", "勘查许可证", "矿产资源储量")
 
 
 SYSTEM_PROMPT = """你是矿产资源标准知识问答 agent。
@@ -77,6 +79,12 @@ class MiningQAAgent:
         has_catalog_evidence = self._is_standard_selection_question(request.question) and bool(sources)
         has_usable_evidence = has_clause_evidence or has_catalog_evidence
         notes = list(kb_result.coverage.get("notes", []))
+        if self._is_policy_authority_question(request.question):
+            has_authority_evidence = any(self._is_policy_authority_source(source) for source in sources)
+            has_usable_evidence = has_authority_evidence
+            has_clause_evidence = has_authority_evidence
+            if not has_authority_evidence:
+                notes.append("已识别为职责/权限归属问题，但当前证据未包含明确负责主体，不能给出确定结论。")
         if kb_result.coverage.get("needs_web_supplement") and self.settings.enable_sync_web_supplement:
             notes.append("本地知识库证据不足，建议补充官方元数据、全文入口或 OCR 任务。")
             web_result = await self.web.search(request.question)
@@ -184,6 +192,26 @@ class MiningQAAgent:
                     break
             if selected:
                 return selected
+        if self._is_policy_authority_question(question):
+            selected = []
+            for hit in hits:
+                quote = hit.get("quote") or hit.get("text") or ""
+                standard_no = hit.get("standard_no") or ""
+                clause = hit.get("clause_no") or hit.get("section_path") or ""
+                is_target_policy = "自然资规〔2023〕6号" in standard_no
+                has_responsible_party = (
+                    "自然资源部负责本级已颁发勘查许可证或采矿许可证" in quote
+                    or "其他由省级自然资源主管部门负责" in quote
+                    or ("自然资源主管部门" in quote and "委托矿产资源储量评审机构" in quote)
+                )
+                if has_responsible_party:
+                    selected.append(hit)
+                elif is_target_policy and ("九、" in clause or "强化矿产资源储量评审备案" in quote):
+                    selected.append(hit)
+                if len(selected) >= 2:
+                    break
+            if selected:
+                return selected
 
         top = hits[0]
         top_score = float(top.get("score") or 0)
@@ -248,15 +276,51 @@ class MiningQAAgent:
     def _is_projection_distance_question(self, question: str) -> bool:
         return "矿体外推" in question and any(term in question for term in PROJECTION_DISTANCE_TERMS)
 
+    def _is_policy_authority_question(self, question: str) -> bool:
+        return any(term in question for term in POLICY_AUTHORITY_INTENT_TERMS) and any(
+            term in question for term in POLICY_AUTHORITY_TOPIC_TERMS
+        )
+
+    def _is_policy_authority_source(self, source: Source) -> bool:
+        quote = source.quote or ""
+        return (
+            "自然资源部负责本级已颁发勘查许可证或采矿许可证" in quote
+            or "其他由省级自然资源主管部门负责" in quote
+            or ("自然资源主管部门" in quote and "委托矿产资源储量评审机构" in quote)
+        )
+
     def _trim_source_quotes(self, question: str, sources: list[Source]) -> list[Source]:
-        if not self._is_projection_distance_question(question):
+        if not self._is_projection_distance_question(question) and not self._is_policy_authority_question(question):
             return sources
         trimmed = []
         for source in sources:
             item = source.model_copy()
-            item.quote = self._evidence_quote_for_prompt(question, source.quote)
+            if self._is_policy_authority_question(question):
+                item.quote = self._direct_policy_authority_quote(source.quote or "")
+            else:
+                item.quote = self._evidence_quote_for_prompt(question, source.quote)
             trimmed.append(item)
         return trimmed
+
+    def _direct_policy_authority_quote(self, text: str) -> str:
+        clean = re.sub(r"\s+", " ", text).strip()
+        patterns = [
+            r"(自然资源部负责本级已颁发勘查许可证或采矿许可证的矿产资源储量评审备案工作，其他由省级自然资源主管部门负责。)",
+            r"(自然资源主管部门可以委托矿产资源储量评审机构根据评审备案范围和权限组织开展评审备案工作，相关费用按照国家有关规定执行。)",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, clean)
+            if match:
+                return match.group(1)
+        anchors = ("自然资源部负责", "省级自然资源主管部门负责", "委托矿产资源储量评审机构")
+        for anchor in anchors:
+            idx = clean.find(anchor)
+            if idx >= 0:
+                end = clean.find("。", idx)
+                if end >= 0:
+                    return clean[idx : end + 1]
+                return clean[idx : idx + 220].rstrip()
+        return clean[:260] + ("..." if len(clean) > 260 else "")
 
     def _direct_projection_quote(self, text: str) -> str:
         normalized = re.sub(r"\s+", " ", text).strip()
@@ -328,6 +392,40 @@ class MiningQAAgent:
         )
 
     def _fast_answer(self, question: str, sources: list[Source]) -> str | None:
+        if self._is_policy_authority_question(question) and sources:
+            authority_source = next((source for source in sources if self._is_policy_authority_source(source)), None)
+            if authority_source:
+                issuing_authority = "自然资源部" if any(term in question for term in ("自然资源部", "部颁发", "部发")) else None
+                conclusion = (
+                    "应由 **自然资源部** 负责矿产资源储量评审备案。"
+                    if issuing_authority
+                    else "需要按许可证颁发层级判断：自然资源部本级已颁发许可证的，由 **自然资源部** 负责；其他由 **省级自然资源主管部门** 负责。"
+                )
+                lines = [
+                    conclusion,
+                    "",
+                    f"- **依据文件**：{authority_source.standard_no or '未知文号'}《{authority_source.title}》",
+                    f"- **依据条款**：{authority_source.chapter or '相关条款'}",
+                    f"- **直接依据**：{authority_source.quote}",
+                ]
+                delegated_source = next(
+                    (
+                        source
+                        for source in sources
+                        if source is not authority_source and source.quote and "委托矿产资源储量评审机构" in source.quote
+                    ),
+                    None,
+                )
+                if delegated_source:
+                    lines.extend(
+                        [
+                            "",
+                            "补充说明：自然资源主管部门可以委托矿产资源储量评审机构按评审备案范围和权限组织评审，"
+                            "但责任主体仍按上述条款确定。",
+                        ]
+                    )
+                return "\n".join(lines)
+
         if self._is_standard_selection_question(question) and sources:
             source = sources[0]
             return (

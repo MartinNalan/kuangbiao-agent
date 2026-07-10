@@ -4,17 +4,17 @@ KB agent should append progress updates here.
 
 ## Latest Status
 
-Date: 2026-07-10 07:48:40 +0800
+Date: 2026-07-10 08:45:30 +0800
 Role: KB agent
 Status: completed
 Summary:
-- Completed T008, T009, and T010 from `coordination/task_board.md`.
-- Raw `/knowledge/search` quotes now return short evidence snippets and do not include raw full text unless `include_full_text=true`.
-- Standard/specification clause chunks were rebuilt: `clause_no` empty rate improved from 2,359/18,516 (12.74%) to 1,792/20,910 (8.57%).
-- `/knowledge/health` now reports `vector_count`, `kg_entity_count`, and `kg_relation_count`.
-- Current real KB state: 388 documents, 28,104 chunks, 307 MNR `矿产资源管理` policy/law documents, 82 downloaded attachments, 2,593 policy clause chunks, 20,910 standard/specification clause chunks, 24,219 vectors, 25,303 KG entities, 45,915 KG relations.
-- Regression passed with `PYTHONPATH=src .venv/bin/python scripts/run_kb_regression.py`.
-- Detailed completion record is appended below at `Date: 2026-07-10 07:48:40 +0800`.
+- Completed T011, T012, and T013 from `coordination/task_board.md`.
+- Added policy-authority retrieval intent expansion for `储量评审备案权限/负责机构` questions, including `采矿证 -> 采矿许可证` and `去哪个机构/谁负责 -> 自然资源主管部门负责` style mappings.
+- Added two high-value KG `RESPONSIBLE_FOR` relations from `自然资规〔2023〕6号` 第十条 with evidence chunk `chunk-d773de5f6908f935`.
+- Regression now checks that `我的采矿证是自然资源部颁发的，我的储量评审应该去哪个机构` ranks `自然资规〔2023〕6号` 第十条 in top 3 with the required quote.
+- Current real KB state: 388 documents, 28,104 chunks, 24,219 vectors, 25,307 KG entities, 45,919 KG relations.
+- `PYTHONPATH=src .venv/bin/python scripts/run_kb_regression.py` and `API_URL=http://127.0.0.1:18180 KB_URL=http://127.0.0.1:18181 PYTHONPATH=src .venv/bin/python scripts/run_api_regression.py` both passed.
+- Detailed completion record is appended below at `Date: 2026-07-10 08:45:30 +0800`.
 
 Date: 2026-07-08
 Role: KB agent
@@ -114,6 +114,34 @@ Files changed/created:
 Next:
 - Remaining empty `clause_no` records are mostly front matter, tables, OCR fragments, or headings without stable clause numbers; further reduction would require document-specific parsing or manual curation.
 - Continue answer-quality review with real questions and tune ranking/quote selection if users report missing context.
+Blocked:
+- No blocker.
+Questions:
+- None newly raised.
+
+Date: 2026-07-10 08:45:30 +0800
+Role: KB agent
+Status: completed
+Summary:
+- Claimed and completed T011, T012, and T013 from `coordination/task_board.md`.
+- T011: added policy-authority retrieval intent expansion and ranking boost for `储量评审备案权限/负责机构` questions. The search layer now maps user wording such as `采矿证`, `去哪个机构`, `谁负责`, `哪一级部门` to canonical retrieval terms including `采矿许可证`, `评审备案范围和权限`, `自然资源主管部门负责`, `自然资源部负责`, and `省级自然资源主管部门负责`.
+- T012: extended SQLite KG construction with explicit high-value authority relations from `自然资规〔2023〕6号` 第十条. Stored relations: `自然资源部 RESPONSIBLE_FOR 本级已颁发勘查许可证或采矿许可证的矿产资源储量评审备案` and `省级自然资源主管部门 RESPONSIBLE_FOR 其他矿产资源储量评审备案`, both linked to evidence chunk `chunk-d773de5f6908f935` with source URL and quote metadata.
+- T013: added regression coverage for the question `我的采矿证是自然资源部颁发的，我的储量评审应该去哪个机构`; `/knowledge/search` now ranks `自然资规〔2023〕6号` 第十条 at #1 in local verification and asserts top-3 in regression, with quote containing `自然资源部负责本级已颁发勘查许可证或采矿许可证`.
+- Current real KB counts after KG rebuild: 388 documents, 28,104 chunks, 24,219 vectors, 25,307 KG entities, 45,919 KG relations.
+- Verification passed: `PYTHONPATH=src .venv/bin/python scripts/run_kb_regression.py`.
+- API regression also passed: `API_URL=http://127.0.0.1:18180 KB_URL=http://127.0.0.1:18181 PYTHONPATH=src .venv/bin/python scripts/run_api_regression.py`.
+Files changed/created:
+- `/home/nalanmading/My-project/my-1st-agent/src/mining_qa/knowledge_store.py`
+- `/home/nalanmading/My-project/my-1st-agent/scripts/build_sqlite_kg.py`
+- `/home/nalanmading/My-project/my-1st-agent/scripts/run_kb_regression.py`
+- `/home/nalanmading/My-project/my-1st-agent/data/knowledge_base/` (ignored local KG data refreshed)
+- `/home/nalanmading/My-project/my-1st-agent/docs/KB_BUILD_TASKS_20260709.md`
+- `/home/nalanmading/My-project/my-1st-agent/docs/KNOWLEDGE_BASE_MVP_RUNBOOK.md`
+- `/home/nalanmading/My-project/my-1st-agent/coordination/task_board.md`
+- `/home/nalanmading/My-project/my-1st-agent/coordination/kb_agent_status.md`
+Next:
+- Extend the same authority-relation pattern to additional high-value policy clauses as real questions reveal them.
+- If policy authority questions grow, move the synonym/intent map from inline code into a small config file to simplify maintenance.
 Blocked:
 - No blocker.
 Questions:

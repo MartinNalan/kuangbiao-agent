@@ -29,7 +29,7 @@ This directory is ignored by Git.
 
 ## Completion Snapshot
 
-Date: 2026-07-10 07:48 +0800
+Date: 2026-07-10 08:45 +0800
 
 - MNR policy/law unique detail pages parsed and ingested: 307.
 - MNR attachments downloaded: 82 files.
@@ -40,8 +40,9 @@ Date: 2026-07-10 07:48 +0800
 - Empty standard/specification clause numbers reduced from 2,359/18,516 (12.74%) to 1,792/20,910 (8.57%).
 - Policy documents with zero chunks: 0.
 - Local hashed vectors: 24,219.
-- SQLite KG entities: 25,303.
-- SQLite KG relations: 45,915.
+- SQLite KG entities: 25,307.
+- SQLite KG relations: 45,919.
+- Added high-value policy authority KG relations for `自然资规〔2023〕6号` 第十条: `自然资源部 RESPONSIBLE_FOR 本级已颁发勘查许可证或采矿许可证的矿产资源储量评审备案` and `省级自然资源主管部门 RESPONSIBLE_FOR 其他矿产资源储量评审备案`.
 - Regression command passed: `PYTHONPATH=src .venv/bin/python scripts/run_kb_regression.py`.
 
 ## Current Policy Source

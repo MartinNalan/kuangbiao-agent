@@ -144,6 +144,53 @@ async def search(payload: dict[str, Any]) -> dict[str, Any]:
             },
         }
 
+    if "储量评审" in query and ("采矿证" in query or "采矿许可证" in query or "哪个机构" in query):
+        return {
+            "results": [
+                {
+                    "document_id": "mock-policy-authority-001",
+                    "title": "自然资源部关于深化矿产资源管理改革若干事项的意见",
+                    "standard_no": "自然资规〔2023〕6号",
+                    "clause_no": "十、",
+                    "section_path": "十、明确评审备案范围和权限",
+                    "page": None,
+                    "quote": "自然资源部负责本级已颁发勘查许可证或采矿许可证的矿产资源储量评审备案工作，其他由省级自然资源主管部门负责。",
+                    "score": 0.99,
+                    "source_type": "official_fulltext",
+                    "text_access": "html_text",
+                    "validation_status": "parsed",
+                    "source_platform": "Mock KB",
+                    "url": "mock://policy/zrzg-2023-6",
+                },
+                {
+                    "document_id": "mock-policy-authority-001",
+                    "title": "自然资源部关于深化矿产资源管理改革若干事项的意见",
+                    "standard_no": "自然资规〔2023〕6号",
+                    "clause_no": "九、",
+                    "section_path": "九、强化矿产资源储量评审备案",
+                    "page": None,
+                    "quote": "自然资源主管部门可以委托矿产资源储量评审机构根据评审备案范围和权限组织开展评审备案工作，相关费用按照国家有关规定执行。",
+                    "score": 0.95,
+                    "source_type": "official_fulltext",
+                    "text_access": "html_text",
+                    "validation_status": "parsed",
+                    "source_platform": "Mock KB",
+                    "url": "mock://policy/zrzg-2023-6",
+                },
+            ],
+            "retrieval": {
+                "full_text_hits": 2,
+                "vector_hits": 2,
+                "graph_hits": 2,
+                "web_hits": 0,
+            },
+            "coverage": {
+                "has_clause_level_evidence": True,
+                "needs_web_supplement": False,
+                "notes": ["Mock KB 命中政策权限条款。"],
+            },
+        }
+
     if "金矿" in query or "基本工程间距" in query:
         return {
             "results": [

@@ -97,6 +97,26 @@ def assert_catalog() -> None:
     print("OK catalog: policy document lookup")
 
 
+def assert_policy_authority() -> None:
+    query = "我的采矿证是自然资源部颁发的，我的储量评审应该去哪个机构"
+    result = post_json(
+        f"{KB_URL}/knowledge/search",
+        {"query": query, "options": {"top_k": 5, "include_full_text": False}},
+    )
+    hits = result.get("results") or []
+    top3 = hits[:3]
+    expected = [
+        hit
+        for hit in top3
+        if hit.get("standard_no") == "自然资规〔2023〕6号"
+        and hit.get("clause_no") == "十、"
+        and "自然资源部负责本级已颁发勘查许可证或采矿许可证" in (hit.get("quote") or "")
+    ]
+    assert_true(bool(expected), f"policy authority target clause not in top 3: {top3}")
+    assert_true(result.get("retrieval", {}).get("graph_hits", 0) > 0, "policy authority should use graph hits")
+    print("OK search: policy authority retrieval")
+
+
 def assert_api() -> None:
     headers = {"X-API-Key": API_KEY, "Content-Type": "application/json"}
     data = post_json(f"{API_URL}/api/ask", {"question": "哪个标准规定了金矿基本工程间距？"}, headers=headers)
@@ -141,6 +161,7 @@ def main() -> int:
         assert_search("压覆矿产资源审批需要注意什么", "压覆矿产资源", "official_fulltext")
         assert_search("矿产资源法实施条例 战略性矿产资源目录", "中华人民共和国矿产资源法实施条例", "official_fulltext")
         assert_search("哪个标准规定了金矿基本工程间距？", "矿产地质勘查规范 岩金", "local_kb")
+        assert_policy_authority()
         assert_catalog()
 
         if get_json(f"{API_URL}/health") is None:

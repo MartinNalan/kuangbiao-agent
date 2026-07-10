@@ -322,6 +322,12 @@ def is_policy_management_query(query: str) -> bool:
     )
 
 
+def is_policy_authority_query(query: str) -> bool:
+    return any(term in query for term in ("哪个机构", "去哪个机构", "谁负责", "哪一级部门", "哪个部门", "权限", "负责")) and any(
+        term in query for term in ("储量评审", "评审备案", "采矿证", "采矿许可证", "勘查许可证", "矿产资源储量")
+    )
+
+
 def is_standard_or_technical_query(query: str) -> bool:
     return any(term in query for term in ("标准", "规范", "规程", "技术", "工程间距", "勘查类型", "勘查规范"))
 
@@ -390,6 +396,14 @@ def query_terms(query: str) -> list[str]:
         "战略性矿产",
         "矿产资源法实施条例",
         "矿产资源法",
+        "采矿许可证",
+        "勘查许可证",
+        "储量评审备案",
+        "矿产资源储量评审备案",
+        "评审备案范围和权限",
+        "自然资源主管部门负责",
+        "自然资源部负责",
+        "省级自然资源主管部门负责",
     ]
     synonyms = {
         "金矿": ["岩金"],
@@ -397,6 +411,11 @@ def query_terms(query: str) -> list[str]:
         "沙金": ["砂金", "金属砂矿", "金属砂矿类"],
         "砂金": ["沙金", "金属砂矿", "金属砂矿类"],
         "金属砂矿": ["砂金", "沙金", "金属砂矿类"],
+        "采矿证": ["采矿许可证"],
+        "储量评审": ["矿产资源储量评审备案", "评审备案范围和权限"],
+        "去哪个机构": ["谁负责", "负责", "自然资源主管部门负责"],
+        "哪个机构": ["谁负责", "负责", "自然资源主管部门负责"],
+        "哪一级部门": ["省级自然资源主管部门负责", "自然资源部负责"],
     }
     for term in raw_terms:
         term = term.strip()
@@ -414,6 +433,17 @@ def query_terms(query: str) -> list[str]:
         for source, replacements in synonyms.items():
             if source in term or source in query:
                 terms.extend(replacements)
+    if is_policy_authority_query(query):
+        terms.extend(
+            [
+                "自然资规〔2023〕6号",
+                "明确评审备案范围和权限",
+                "自然资源部",
+                "省级自然资源主管部门",
+                "自然资源部负责本级已颁发勘查许可证或采矿许可证",
+                "其他由省级自然资源主管部门负责",
+            ]
+        )
     deduped: list[str] = []
     seen = set()
     for term in terms:
@@ -514,6 +544,25 @@ def intent_score(row: sqlite3.Row, query: str) -> float:
             score += 1.5
         if document_type in {"standard", "national_standard", "industry_standard", "guidance"}:
             score += 1.0
+    if is_policy_authority_query(query):
+        text = row["text"] or ""
+        title = row["title"] or ""
+        standard_no = row["standard_no"] or ""
+        section = row["section_path"] or ""
+        if source_type == "official_fulltext":
+            score += 2.0
+        if "自然资规〔2023〕6号" in standard_no:
+            score += 5.0
+        if "深化矿产资源管理改革若干事项" in title:
+            score += 2.0
+        if "明确评审备案范围和权限" in section or row["clause_no"] == "十、":
+            score += 4.0
+        if "自然资源部负责本级已颁发勘查许可证或采矿许可证" in text:
+            score += 10.0
+        if "其他由省级自然资源主管部门负责" in text:
+            score += 3.0
+        if "矿产资源储量评审备案" in text and "负责" in text:
+            score += 2.0
     return score
 
 

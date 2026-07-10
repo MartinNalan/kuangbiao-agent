@@ -53,8 +53,9 @@ Current expanded KB result:
 - Policy documents with zero chunks: 0
 - Empty standard/specification clause numbers: 1,792/20,910 (8.57%)
 - Local hashed vectors: 24,219
-- SQLite KG entities: 25,303
-- SQLite KG relations: 45,915
+- SQLite KG entities: 25,307
+- SQLite KG relations: 45,919
+- High-value policy authority relations: `自然资规〔2023〕6号` 第十条 contains two `RESPONSIBLE_FOR` relations for `自然资源部` and `省级自然资源主管部门`.
 
 ## Verify The KB
 
@@ -69,6 +70,7 @@ The regression covers:
 - Policy-oriented hybrid search: `压覆矿产资源审批需要注意什么`.
 - Regulation-oriented hybrid search: `矿产资源法实施条例 战略性矿产资源目录`.
 - Standard-oriented hybrid search: `哪个标准规定了金矿基本工程间距？`.
+- Policy authority hybrid search: `我的采矿证是自然资源部颁发的，我的储量评审应该去哪个机构`.
 - `GET /knowledge/standards` policy catalog lookup.
 - Main QA API `/api/ask` end-to-end with KB retrieval stats.
 
