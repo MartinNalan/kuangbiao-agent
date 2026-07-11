@@ -494,8 +494,9 @@ async def ask(
         except AccountStoreError as error:
             raise account_error(error) from error
 
+    agent = MiningQAAgent(settings)
     try:
-        result = await MiningQAAgent(settings).ask(payload)
+        result = await agent.ask(payload)
         result.request_id = request_id
         if quota_reserved:
             settlement = store.settle_qa_quota(
@@ -509,6 +510,10 @@ async def ask(
         if quota_reserved:
             store.fail_qa_quota(request_id, settings.quota_timezone)
         raise
+    finally:
+        close_agent = getattr(agent, "aclose", None)
+        if close_agent is not None:
+            await close_agent()
 
     if principal.user_id and conversation_id:
         try:

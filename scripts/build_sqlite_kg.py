@@ -51,8 +51,10 @@ def init_kg(conn) -> None:
           created_at text not null
         );
         create index if not exists idx_kg_entities_type_name on kg_entities(entity_type, normalized_name);
+        create index if not exists idx_kg_entities_normalized_name on kg_entities(normalized_name);
         create index if not exists idx_kg_rel_source on kg_relations(source_entity_id, relation_type);
         create index if not exists idx_kg_rel_target on kg_relations(target_entity_id, relation_type);
+        create index if not exists idx_kg_rel_evidence_chunk on kg_relations(evidence_chunk_id);
         """
     )
     conn.execute("delete from kg_relations")

@@ -38,10 +38,10 @@ class KnowledgeClient:
             "filters": filters,
             "retrieval_plan": effective_plan.to_payload(),
             "options": {
-                "top_k": 30
+                "top_k": 20
                 if effective_plan.search_mode in {"comparison", "exhaustive"}
                 or effective_plan.exhaustive_search
-                else 12,
+                else 10,
                 "include_full_text": False,
                 "allow_web_supplement": True,
                 "retrieval_round": retrieval_round,

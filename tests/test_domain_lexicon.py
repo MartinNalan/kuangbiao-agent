@@ -1,0 +1,78 @@
+import unittest
+
+from mining_qa.knowledge_store import domain_lexicon, lexicon_query_expansions, matched_lexicon_entries
+from mining_qa.query_understanding import understand_query
+
+
+REQUIRED_FIELDS = {
+    "lexicon_id",
+    "user_expression",
+    "canonical_term",
+    "intent_label",
+    "domain",
+    "positive_expansions",
+    "negative_terms",
+    "evidence_required_patterns",
+    "priority",
+    "status",
+    "created_at",
+    "updated_at",
+}
+
+
+class DomainLexiconTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        domain_lexicon.cache_clear()
+
+    def test_active_entries_have_complete_unique_schema(self) -> None:
+        entries = domain_lexicon()
+        self.assertGreaterEqual(len(entries), 23)
+        self.assertEqual(len({entry["lexicon_id"] for entry in entries}), len(entries))
+        self.assertEqual(len({entry["user_expression"] for entry in entries}), len(entries))
+        for entry in entries:
+            self.assertTrue(REQUIRED_FIELDS.issubset(entry))
+            self.assertEqual(entry["status"], "active")
+            self.assertIsInstance(entry["positive_expansions"], list)
+            self.assertIsInstance(entry["negative_terms"], list)
+            self.assertIsInstance(entry["evidence_required_patterns"], list)
+
+    def test_new_colloquial_terms_expand_to_governed_vocabulary(self) -> None:
+        cases = {
+            "压矿审批怎么处理": "压覆矿产资源",
+            "水工环勘查应该用哪个规范": "GB/T 12719-2021",
+            "探转采需要达到什么程度": "探矿权转采矿权",
+            "矿权价款需要什么缴纳材料": "矿业权出让收益（价款）",
+            "共伴生资源量怎么评价": "GB/T 25283-2023",
+            "工程网度怎么确定": "勘查工程间距",
+        }
+        for query, expected in cases.items():
+            with self.subTest(query=query):
+                self.assertIn(expected, lexicon_query_expansions(query))
+
+    def test_low_ambiguity_aliases_reach_existing_deterministic_intents(self) -> None:
+        cases = {
+            "储量备案应该去哪个机构": "authority_responsibility",
+            "关于外推距离，不同标准规定是否不一致": "projection_comparison",
+            "伴生矿产资源量类型如何确定，共伴生矿产是否相同": "companion_resource_type",
+            "金矿Ⅰ类型工程网度是多少": "engineering_distance_lookup",
+            "探转采需要达到什么条件": "exploration_to_mining_eligibility",
+            "压矿审批需要提交什么材料": "service_materials",
+        }
+        for query, expected_intent in cases.items():
+            with self.subTest(query=query):
+                self.assertEqual(understand_query(query).intent, expected_intent)
+
+    def test_positive_expansion_does_not_trigger_an_unrelated_entry(self) -> None:
+        matches = matched_lexicon_entries("岩金工程间距是多少")
+        self.assertNotIn("lex-authority-background-scale", {entry["lexicon_id"] for entry in matches})
+
+    def test_no_overly_broad_single_mining_right_token_is_active(self) -> None:
+        expressions = {entry["user_expression"] for entry in domain_lexicon()}
+        self.assertNotIn("矿权", expressions)
+        self.assertNotIn("矿产", expressions)
+        self.assertNotIn("地质", expressions)
+
+
+if __name__ == "__main__":
+    unittest.main()

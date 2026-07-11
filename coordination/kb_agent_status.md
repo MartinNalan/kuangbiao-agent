@@ -568,3 +568,25 @@ Blocked:
 - No blocker.
 Questions:
 - None newly raised.
+
+Date: 2026-07-12
+Role: KB agent
+Status: completed
+Summary:
+- Extended the governed domain lexicon from 9 to 23 active entries with 14 low-ambiguity mineral-resource terms: `储量备案`, `探转采`, `压矿`, `压覆审批`, `水工环`, `开发利用方案`, `三率`, `共伴生`, `储量年报`, `工业指标`, `外推距离`, `矿权价款`, `工程网度`, and `储量核实报告`.
+- Added canonical terms, intent labels, domains, positive expansions, negative terms, evidence-required patterns, priorities, status, and audit timestamps for every new entry.
+- Added deterministic query aliases for `工程网度`, `外推距离`, `储量备案`, and `共伴生` so they reach the existing engineering-distance, projection, authority, and companion-resource intent routes.
+- Kept positive expansions recall-only: they do not independently trigger other lexicon entries or intent routes. Broad ambiguous expressions such as `矿权`, `矿产`, and `地质` were intentionally not added as standalone entries.
+- Added focused lexicon tests covering schema completeness, uniqueness, expansion behavior, deterministic intent routing, false-trigger prevention, and exclusion of overly broad terms.
+- Verification passed: Python compile check, 57/57 full unit tests, real-SQLite KB hybrid-retrieval regression, API regression, and `git diff --check`.
+Files changed/created:
+- `/home/nalanmading/My-project/my-1st-agent/src/mining_qa/domain_lexicon.json`
+- `/home/nalanmading/My-project/my-1st-agent/src/mining_qa/query_understanding.py`
+- `/home/nalanmading/My-project/my-1st-agent/tests/test_domain_lexicon.py`
+Next:
+- Restart any already-running KB/API service process to clear the in-process `lru_cache` and load the updated lexicon.
+- Continue adding only evidence-backed, low-ambiguity expressions as real user-query samples accumulate.
+Blocked:
+- No blocker.
+Questions:
+- None newly raised.

@@ -33,11 +33,12 @@ class Settings(BaseSettings):
     embedding_batch_size: int = Field(default=10, alias="EMBEDDING_BATCH_SIZE")
     query_planner_enabled: bool = Field(default=True, alias="QUERY_PLANNER_ENABLED")
     evidence_reranker_enabled: bool = Field(default=True, alias="EVIDENCE_RERANKER_ENABLED")
-    query_planner_max_tokens: int = Field(default=900, alias="QUERY_PLANNER_MAX_TOKENS")
-    evidence_reranker_max_tokens: int = Field(default=2000, alias="EVIDENCE_RERANKER_MAX_TOKENS")
-    answer_max_tokens: int = Field(default=1800, alias="ANSWER_MAX_TOKENS")
+    query_planner_max_tokens: int = Field(default=600, alias="QUERY_PLANNER_MAX_TOKENS")
+    evidence_reranker_max_tokens: int = Field(default=800, alias="EVIDENCE_RERANKER_MAX_TOKENS")
+    answer_max_tokens: int = Field(default=1000, alias="ANSWER_MAX_TOKENS")
     max_retrieval_rounds: int = Field(default=2, alias="MAX_RETRIEVAL_ROUNDS")
     ann_search_enabled: bool = Field(default=True, alias="ANN_SEARCH_ENABLED")
+    vector_fallback_scan_limit: int = Field(default=100, alias="VECTOR_FALLBACK_SCAN_LIMIT")
     ann_index_path: str = Field(
         default=str(PROJECT_ROOT / "data" / "knowledge_base" / "indexes" / "dense.usearch"),
         alias="ANN_INDEX_PATH",

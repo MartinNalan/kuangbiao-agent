@@ -111,7 +111,7 @@ class EvidenceReranker:
                     "clause": hit.get("clause_no") or hit.get("section_path"),
                     "document_type": hit.get("document_type"),
                     "retrieval_routes": hit.get("hit_type") or [],
-                    "text": str(hit.get("evidence_text") or hit.get("quote") or "")[:600],
+                    "text": str(hit.get("evidence_text") or hit.get("quote") or "")[:450],
                 }
             )
 
@@ -130,9 +130,7 @@ class EvidenceReranker:
                     "应准确保留‘经评审备案的矿产资源储量报告’这一前提。"
                     "模型常识不能作为证据；所有结论必须能由候选原文直接推出。"
                     "若证据不足，给出一条更适合搜索本地标准库的 refined_query 和短语列表。"
-                    "若证据充分，同时生成 grounded_answer：直接回答问题，逐项写明文件、条款、具体差异、"
-                    "适用条件和一至三句最相关原文；不得引用未选中的候选，不得附加模型记忆。"
-                    "最多选择4份代表性文件，grounded_answer控制在1000个汉字以内。"
+                    "只负责筛选证据，不生成最终回答。最多选择4份代表性文件。"
                     "只返回 JSON。"
                 ),
             },
@@ -141,7 +139,7 @@ class EvidenceReranker:
                 "content": json.dumps(
                     {
                         "question": question,
-                        "retrieval_plan": plan.to_payload(),
+                        "retrieval_plan": plan.to_llm_payload(),
                         "candidates": compact_candidates,
                         "output_schema": {
                             "selected_indices": [1],
@@ -150,7 +148,6 @@ class EvidenceReranker:
                             "missing_evidence_groups": ["缺失的关系或条件"],
                             "refined_query": "证据不足时使用的检索问题",
                             "refined_terms": ["检索短语"],
-                            "grounded_answer": "证据充分时生成的中文回答；证据不足时留空",
                             "confidence": 0.0,
                         },
                     },
@@ -171,16 +168,13 @@ class EvidenceReranker:
 
         selected_indices = self._valid_indices(decision.selected_indices, len(candidates))
         direct_indices = self._valid_indices(decision.direct_evidence_indices, len(candidates))
-        guard_removed_indices = False
         if plan.intent in STRUCTURAL_GUARD_INTENTS:
             structurally_direct = {
                 index
                 for index, hit in enumerate(candidates, start=1)
                 if self._matches_all_groups(hit, plan.required_evidence_groups)
             }
-            original_direct_indices = list(direct_indices)
             direct_indices = [index for index in direct_indices if index in structurally_direct]
-            guard_removed_indices = direct_indices != original_direct_indices
             if plan.intent == "exploration_to_mining_eligibility":
                 limiting_indices = [
                     index
@@ -225,11 +219,7 @@ class EvidenceReranker:
             refined_terms=tuple(self._clean_terms(decision.refined_terms)),
             missing_evidence_groups=tuple(self._clean_terms(decision.missing_evidence_groups)),
             facts=facts,
-            grounded_answer=(
-                decision.grounded_answer.strip()
-                if sufficient and not guard_removed_indices
-                else ""
-            ),
+            grounded_answer="",
             confidence=decision.confidence,
         )
 
@@ -244,21 +234,24 @@ class EvidenceReranker:
             direct = list(hits)
         selected: list[dict[str, Any]] = []
         seen: set[tuple[str, str]] = set()
+        comparison = plan.search_mode in {"comparison", "exhaustive"} or plan.intent in {
+            "projection_comparison",
+            "clause_comparison",
+        }
         for hit in direct:
+            document_id = str(hit.get("document_id") or "")
             key = (
-                str(hit.get("document_id") or ""),
-                str(hit.get("clause_no") or hit.get("section_path") or hit.get("chunk_id") or ""),
+                document_id,
+                "" if comparison else str(
+                    hit.get("clause_no") or hit.get("section_path") or hit.get("chunk_id") or ""
+                ),
             )
             if key in seen:
                 continue
             seen.add(key)
             selected.append(hit)
-            if len(selected) >= 8:
+            if len(selected) >= 4:
                 break
-        comparison = plan.search_mode in {"comparison", "exhaustive"} or plan.intent in {
-            "projection_comparison",
-            "clause_comparison",
-        }
         distinct_documents = {str(hit.get("document_id") or "") for hit in selected}
         sufficient = bool(selected) and (not comparison or len(distinct_documents) >= 2)
         return RerankResult(

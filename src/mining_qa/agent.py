@@ -34,6 +34,7 @@ DETERMINISTIC_FAST_INTENTS = {
     "companion_resource_type",
     "exploration_type_factors",
     "basic_analysis_items",
+    "projection_comparison",
 }
 SYSTEM_PROMPT = """你是矿产资源标准知识问答 agent。
 
@@ -47,6 +48,7 @@ SYSTEM_PROMPT = """你是矿产资源标准知识问答 agent。
 7. 如果同一问题的高置信证据集中在某一个标准，不要引用低相关度的其他标准。
 8. 如果用户询问“应使用哪个标准/适用哪个规范/采用哪个标准”，可以根据标准标题、标准号和目录证据回答，不强制要求条款号。
 9. 必须区分勘查程度、报告名称和行政许可条件；不得把“达到详查程度”改写成任何名为“详查报告”的文件都满足转采条件。
+10. 回答通常控制在600个汉字以内；比较类问题只保留代表性差异和直接相关短引文。
 """
 
 
@@ -64,6 +66,9 @@ class MiningQAAgent:
             settings.retrieval_trace_path,
             enabled=settings.retrieval_trace_enabled,
         )
+
+    async def aclose(self) -> None:
+        await self.llm.aclose()
 
     async def ask(self, request: AskRequest) -> AskResponse:
         started = perf_counter()
@@ -494,7 +499,7 @@ class MiningQAAgent:
             [
                 f"用户问题：{question}",
                 "检索计划：",
-                json.dumps((plan or understand_query(question)).to_payload(), ensure_ascii=False),
+                json.dumps((plan or understand_query(question)).to_llm_payload(), ensure_ascii=False),
                 "证据：",
                 "\n\n".join(evidence_lines) if evidence_lines else "无",
                 "证据审查提取事实：",
@@ -615,6 +620,22 @@ class MiningQAAgent:
         strict_validator = strict_validators.get(effective_plan.intent)
         if strict_validator:
             matched = [hit for hit in hits if strict_validator(self._source_from_hit(hit))]
+            if (
+                effective_plan.intent in {"service_materials", "service_procedure_basis", "service_time_limit"}
+                and effective_plan.candidate_title_terms
+                and any(
+                    term in effective_plan.normalized_query
+                    for term in ("压矿", "压覆审批", "压覆矿产资源")
+                )
+            ):
+                matched = [
+                    hit
+                    for hit in matched
+                    if any(
+                        term in str(hit.get("title") or "")
+                        for term in effective_plan.candidate_title_terms
+                    )
+                ]
             if effective_plan.intent == "service_materials":
                 attachment_hits = [
                     hit
@@ -1124,14 +1145,19 @@ class MiningQAAgent:
                     ]
                 )
                 return "\n".join(lines)
-            guide_source = next(
-                (
-                    item
-                    for item in sources
-                    if "服务指南" in item.title
-                    and "申请材料" in f"{item.chapter or ''} {item.quote or ''}"
+            guide_sources = [
+                item
+                for item in sources
+                if "服务指南" in item.title
+                and "申请材料" in f"{item.chapter or ''} {item.quote or ''}"
+            ]
+            guide_source = max(
+                guide_sources,
+                key=lambda item: (
+                    ">" in (item.chapter or ""),
+                    len(item.quote or ""),
                 ),
-                None,
+                default=None,
             )
             if guide_source:
                 return "\n".join(
@@ -1332,6 +1358,7 @@ class MiningQAAgent:
             groups: dict[str, list[tuple[Source, str]]] = {
                 "按推断资源量工程间距与实际工程间距分情形": [],
                 "按理论工程间距与实际间距分情形": [],
+                "以拟推资源量类型的经验工程间距为外推依据": [],
                 "以推断资源量工程间距为外推依据": [],
                 "以理论工程间距为外推依据": [],
                 "以基本工程间距为外推依据": [],
@@ -1429,6 +1456,8 @@ class MiningQAAgent:
         return None
 
     def _projection_distance_bucket(self, quote: str) -> str:
+        if "经验工程间距" in quote:
+            return "以拟推资源量类型的经验工程间距为外推依据"
         if "理论工程" in quote or "理论工程间距" in quote:
             if "实际间距" in quote or "实际工程间距" in quote:
                 return "按理论工程间距与实际间距分情形"

@@ -55,6 +55,8 @@ MODEL_PLANNING_INTENTS = {
     "related_documents",
 }
 
+PLANNER_BYPASS_INTENTS = PROTECTED_QUERY_INTENTS | {"projection_comparison"}
+
 
 @dataclass(frozen=True)
 class PlannerResult:
@@ -74,7 +76,7 @@ class RetrievalPlanner:
         if (
             not self.settings.query_planner_enabled
             or not self.llm.enabled
-            or base_plan.intent in PROTECTED_QUERY_INTENTS
+            or base_plan.intent in PLANNER_BYPASS_INTENTS
             or (base_plan.intent not in MODEL_PLANNING_INTENTS and not base_plan.exhaustive_search)
         ):
             return PlannerResult(

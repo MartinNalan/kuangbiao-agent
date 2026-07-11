@@ -1,4 +1,15 @@
-# geowiki v1.0.1
+# geowiki v1.0.2
+
+## v1.0.2 Retrieval Performance Scope
+
+- Extended the governed domain lexicon from 9 to 23 low-ambiguity entries and routed `工程网度`, `外推距离`, `储量备案`, `共伴生`, `探转采`, and `压矿审批` into deterministic paths where evidence rules are available.
+- Reduced retrieval output to 10 normal results and 20 comparison results, with separate internal recall budgets for scoped, normal, comparison, and complete material-list queries.
+- Reduced planner/reranker/answer output budgets to 600/800/1000 tokens and disabled reasoning only for structured JSON planning/reranking calls.
+- Reused one HTTP connection across LLM stages within a request and sent compact retrieval-plan payloads.
+- Limited exact JSON-vector and local hash-vector fallback scans to 100 scoped rows.
+- Confirmed `chunk_embeddings` already has a leading `chunk_id` index through its composite primary key; no redundant index was added.
+- Cached ANN manifest validation and forced KG joins to start from a materialized named-entity candidate set instead of scanning clause-text entities.
+- Local real-KB benchmark reduced deterministic retrieval from about 83 ms to 27 ms and representative projection-comparison retrieval from about 713 ms to 397 ms. End-to-end projection comparison fell from about 20.7 s to 1.7 s in the verified DeepSeek run.
 
 ## v1.0.1 Bugfix Scope
 

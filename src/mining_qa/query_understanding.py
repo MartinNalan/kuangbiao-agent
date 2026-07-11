@@ -20,8 +20,8 @@ EXPLORATION_TYPE_LABELS = {
 }
 
 COMPARISON_TERMS = ("不一致", "差异", "不同", "比较", "列举", "哪些标准", "哪些规范", "哪些规程")
-ENGINEERING_DISTANCE_TERMS = ("工程间距", "基本工程间距", "勘查工程间距", "工程距离")
-PROJECTION_TERMS = ("矿体外推", "有限外推", "无限外推", "尖推", "平推")
+ENGINEERING_DISTANCE_TERMS = ("工程间距", "基本工程间距", "勘查工程间距", "工程距离", "工程网度")
+PROJECTION_TERMS = ("矿体外推", "有限外推", "无限外推", "外推距离", "尖推", "平推")
 PROJECTION_RATIO_TERMS = ("1/2", "1/4", "二分之一", "四分之一", "一半")
 LICENSE_TERMS = ("采矿证", "采矿许可证", "采矿权")
 SERVICE_MATERIAL_TERMS = (
@@ -46,12 +46,12 @@ SERVICE_PROCEDURE_TERMS = (
 )
 SERVICE_TIME_LIMIT_TERMS = ("办结时限", "办理时限", "需要多久", "多久办结", "多少个工作日", "时限是多久")
 AUTHORITY_INTENT_TERMS = ("哪个机构", "去哪个机构", "谁负责", "哪一级部门", "哪个部门", "权限归属")
-AUTHORITY_TOPIC_TERMS = ("储量评审", "储量报告评审", "评审备案", "矿产资源储量评审备案")
+AUTHORITY_TOPIC_TERMS = ("储量评审", "储量报告评审", "储量备案", "评审备案", "矿产资源储量评审备案")
 AUTHENTICITY_TERMS = ("真实性", "真实准确", "弄虚作假", "真实性负责")
 RESERVE_REPORT_TERMS = ("资源储量报告", "矿产资源储量报告", "储量报告")
 EXPLORATION_STAGE_TERMS = ("详查", "勘探", "普查", "勘查程度", "勘查阶段")
-MINING_CONVERSION_TERMS = ("转采", "探矿权转采矿权", "申请采矿权", "采矿权新立")
-COMPANION_MINERAL_TERMS = ("伴生矿产", "伴生矿", "伴生资源")
+MINING_CONVERSION_TERMS = ("转采", "探转采", "探矿权转采矿权", "申请采矿权", "采矿权新立")
+COMPANION_MINERAL_TERMS = ("共伴生", "伴生矿产", "伴生矿", "伴生资源")
 RESOURCE_TYPE_TERMS = ("资源量类型", "资源储量类型", "类型如何确定", "类型怎么确定", "类型划分")
 EXPLORATION_FACTOR_TERMS = ("划分因素", "因素表格", "因素表", "划分表格", "划分表")
 BASIC_ANALYSIS_TERMS = ("基本分析项目", "基本分析的项目", "基本分析")
@@ -144,6 +144,25 @@ class QueryPlan:
 
     def to_payload(self) -> dict[str, Any]:
         return asdict(self)
+
+    def to_llm_payload(self) -> dict[str, Any]:
+        return {
+            "normalized_query": self.normalized_query,
+            "intent": self.intent,
+            "target_exploration_type": self.target_exploration_type,
+            "candidate_title_terms": self.candidate_title_terms,
+            "standard_numbers": self.standard_numbers,
+            "document_types": self.document_types,
+            "subject_terms": self.subject_terms,
+            "required_terms": self.required_terms,
+            "alternative_terms": self.alternative_terms,
+            "negative_terms": self.negative_terms,
+            "required_evidence_groups": self.required_evidence_groups,
+            "search_mode": self.search_mode,
+            "comparison_dimensions": self.comparison_dimensions,
+            "output_mode": self.output_mode,
+            "exhaustive_search": self.exhaustive_search,
+        }
 
 
 DEFAULT_EVIDENCE_GROUPS: dict[str, tuple[tuple[str, ...], ...]] = {
@@ -493,7 +512,9 @@ def contextualize_follow_up(query: str, previous_user_question: str | None) -> s
 
 def service_guide_title_terms(query: str) -> tuple[str, ...]:
     terms: list[str] = []
-    if "探矿权首次登记" in query:
+    if any(term in query for term in ("压矿", "压覆审批", "压覆矿产资源")) and "审批" in query:
+        terms.extend(["建设项目压覆矿产资源审批", "压覆重要矿产资源审批"])
+    elif "探矿权首次登记" in query:
         terms.append("探矿权首次登记")
     elif "采矿许可" in query and "开采方式" in query:
         terms.append("采矿许可变更（开采方式）")
@@ -538,8 +559,10 @@ def understand_query(query: str) -> QueryPlan:
     has_authenticity = any(term in normalized for term in AUTHENTICITY_TERMS) and any(
         term in normalized for term in RESERVE_REPORT_TERMS
     )
-    has_exploration_to_mining = any(term in normalized for term in EXPLORATION_STAGE_TERMS) and any(
-        term in normalized for term in MINING_CONVERSION_TERMS
+    has_mining_conversion = any(term in normalized for term in MINING_CONVERSION_TERMS)
+    has_exploration_to_mining = has_mining_conversion and (
+        any(term in normalized for term in EXPLORATION_STAGE_TERMS)
+        or "探转采" in normalized
     )
     has_companion_resource_type = any(term in normalized for term in COMPANION_MINERAL_TERMS) and any(
         term in normalized for term in RESOURCE_TYPE_TERMS

@@ -372,6 +372,26 @@ class EvidenceRerankerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.direct_evidence_count, 2)
         self.assertEqual({hit["document_id"] for hit in result.hits}, {"geometry", "rock-gold"})
 
+    async def test_deterministic_comparison_fallback_keeps_four_documents(self) -> None:
+        question = "关于矿体无限外推所依据的间距，不同标准有什么差异"
+        plan = apply_semantic_plan(understand_query(question), None)
+        hits = [
+            {
+                "document_id": f"doc-{index}",
+                "title": f"标准{index}",
+                "standard_no": f"DZ/T 000{index}-2020",
+                "clause_no": "1.1",
+                "quote": "无限外推按工程间距的1/2尖推。",
+            }
+            for index in range(6)
+        ]
+
+        result = await EvidenceReranker(Settings(OPENAI_API_KEY="")).judge(question, plan, hits)
+
+        self.assertTrue(result.sufficient)
+        self.assertEqual(len(result.hits), 4)
+        self.assertEqual(len({hit["document_id"] for hit in result.hits}), 4)
+
 
 class PlannerFallbackTests(unittest.IsolatedAsyncioTestCase):
     async def test_planner_failure_preserves_a_safe_deterministic_plan(self) -> None:
@@ -381,13 +401,13 @@ class PlannerFallbackTests(unittest.IsolatedAsyncioTestCase):
             async def complete_json(self, messages, **kwargs):  # noqa: ANN001
                 raise RuntimeError("provider unavailable")
 
-        question = "关于矿体无限外推所依据的间距，不同标准是否有不同规定？"
+        question = "矿体外推通常应遵循什么原则？"
         base = understand_query(question)
         settings = Settings(OPENAI_API_KEY="configured", QUERY_PLANNER_ENABLED=True)
         result = await RetrievalPlanner(settings, BrokenLLM()).plan(question, base)  # type: ignore[arg-type]
 
         self.assertFalse(result.used)
-        self.assertEqual(result.plan.intent, "projection_comparison")
+        self.assertEqual(result.plan.intent, "projection_rule")
         self.assertTrue(result.plan.required_evidence_groups)
         self.assertEqual(result.error, "RuntimeError")
 
@@ -410,6 +430,26 @@ class PlannerFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.used)
         self.assertEqual(llm.calls, 0)
         self.assertEqual(result.plan.intent, "exploration_to_mining_eligibility")
+
+    async def test_projection_comparison_skips_model_planning(self) -> None:
+        class CountingLLM:
+            enabled = True
+
+            def __init__(self):
+                self.calls = 0
+
+            async def complete_json(self, messages, **kwargs):  # noqa: ANN001
+                self.calls += 1
+                raise AssertionError("deterministic projection comparison must not call planner")
+
+        question = "关于矿体无限外推所依据的间距，不同标准有什么差异"
+        llm = CountingLLM()
+        settings = Settings(OPENAI_API_KEY="configured", QUERY_PLANNER_ENABLED=True)
+        result = await RetrievalPlanner(settings, llm).plan(question, understand_query(question))  # type: ignore[arg-type]
+
+        self.assertFalse(result.used)
+        self.assertEqual(llm.calls, 0)
+        self.assertEqual(result.plan.intent, "projection_comparison")
 
     async def test_protected_transfer_intent_skips_model_reranking(self) -> None:
         plan = understand_query("哪些标准、制度规定了详查报告就可以转采")
@@ -455,6 +495,14 @@ class FastAnswerTests(unittest.TestCase):
         self.assertIn("1/2 尖推", answer)
         self.assertIn("不是 1/4 平推", answer)
         self.assertIn("6.2.2.1", answer)
+
+    def test_projection_comparison_classifies_experience_spacing(self) -> None:
+        agent = object.__new__(MiningQAAgent)
+
+        self.assertEqual(
+            agent._projection_distance_bucket("按拟推资源量类型的经验工程间距1/2尖推"),
+            "以拟推资源量类型的经验工程间距为外推依据",
+        )
 
     def test_authenticity_answer_names_mining_right_holder(self) -> None:
         agent = object.__new__(MiningQAAgent)
@@ -603,6 +651,25 @@ class FastAnswerTests(unittest.TestCase):
         selected = agent._select_evidence_hits(hits, question, plan)
 
         self.assertEqual([item["standard_no"] for item in selected], ["DZ/T 0200-2020"])
+
+    def test_scoped_service_material_question_drops_unrelated_guides(self) -> None:
+        agent = object.__new__(MiningQAAgent)
+        question = "压矿审批需要提交什么材料"
+        plan = understand_query(question)
+        hits = [
+            {
+                "document_id": "unrelated-guide",
+                "title": "勘查许可变更申请临时服务指南",
+                "section_path": "申请材料",
+                "quote": "申请材料目录。",
+                "document_type": "service_guide",
+                "source_role": "service_guide",
+            }
+        ]
+
+        selected = agent._select_evidence_hits(hits, question, plan)
+
+        self.assertEqual(selected, [])
 
 
 if __name__ == "__main__":

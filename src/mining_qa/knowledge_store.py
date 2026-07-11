@@ -34,6 +34,24 @@ QUOTE_LIMIT = 260
 VECTOR_DIM = 512
 RRF_K = 60
 ROUTE_WEIGHTS = {"full_text": 1.15, "graph": 0.9, "vector": 1.0, "reference": 1.2}
+ANN_VALIDATION_CACHE_SECONDS = 60.0
+GRAPH_FUZZY_ENTITY_TYPES = (
+    "Attachment",
+    "AttachmentSection",
+    "Duration",
+    "GuideSection",
+    "Material",
+    "MaterialRequirement",
+    "Matter",
+    "Mineral",
+    "Organization",
+    "Policy",
+    "Responsibility",
+    "ServiceGuide",
+    "Standard",
+    "StandardCode",
+    "Table",
+)
 
 
 @dataclass(frozen=True)
@@ -184,6 +202,24 @@ def init_db(db_path: Path = DEFAULT_DB_PATH) -> None:
             )
         ensure_document_source_columns(conn)
         hydrate_official_urls(conn)
+        ensure_optional_retrieval_indexes(conn)
+
+
+def ensure_optional_retrieval_indexes(conn: sqlite3.Connection) -> None:
+    tables = {
+        str(row["name"])
+        for row in conn.execute(
+            "select name from sqlite_master where type = 'table' and name in ('kg_entities', 'kg_relations')"
+        ).fetchall()
+    }
+    if "kg_entities" in tables:
+        conn.execute(
+            "create index if not exists idx_kg_entities_normalized_name on kg_entities(normalized_name)"
+        )
+    if "kg_relations" in tables:
+        conn.execute(
+            "create index if not exists idx_kg_rel_evidence_chunk on kg_relations(evidence_chunk_id)"
+        )
 
 
 def reset_db(db_path: Path = DEFAULT_DB_PATH) -> None:
@@ -1491,9 +1527,32 @@ def table_count(conn: sqlite3.Connection, table_name: str) -> int:
     return int(conn.execute(f"select count(*) from {table_name}").fetchone()[0])
 
 
+def column_has_leading_index(conn: sqlite3.Connection, table_name: str, column_name: str) -> bool:
+    try:
+        indexes = conn.execute(f"pragma index_list({table_name})").fetchall()
+        for index in indexes:
+            columns = conn.execute(f"pragma index_info({index['name']})").fetchall()
+            if columns and str(columns[0]["name"]) == column_name:
+                return True
+    except sqlite3.OperationalError:
+        return False
+    return False
+
+
+def retrieval_recall_limit(plan: QueryPlan, top_k: int) -> int:
+    if plan.exhaustive_search or plan.search_mode in {"comparison", "exhaustive"}:
+        return min(160, max(top_k * 4, 80))
+    if plan.intent == "service_materials":
+        return min(120, max(top_k * 6, 60))
+    if plan.has_hard_candidate_scope:
+        return min(80, max(top_k * 3, 30))
+    return min(120, max(top_k * 4, 40))
+
+
 class KnowledgeStore:
     def __init__(self, db_path: Path = DEFAULT_DB_PATH):
         self.db_path = db_path
+        self._ann_validation_cache: tuple[tuple[Any, ...], bool, float] | None = None
         init_db(db_path)
 
     def health(self) -> dict[str, Any]:
@@ -1503,6 +1562,11 @@ class KnowledgeStore:
             candidate_count = conn.execute("select count(*) from candidates").fetchone()[0]
             vector_count = table_count(conn, "chunk_vectors")
             embedding_count = table_count(conn, "chunk_embeddings")
+            embedding_chunk_id_indexed = column_has_leading_index(
+                conn,
+                "chunk_embeddings",
+                "chunk_id",
+            )
             kg_entity_count = table_count(conn, "kg_entities")
             kg_relation_count = table_count(conn, "kg_relations")
         settings = get_settings()
@@ -1521,6 +1585,7 @@ class KnowledgeStore:
             "candidate_count": candidate_count,
             "vector_count": vector_count,
             "embedding_count": embedding_count,
+            "embedding_chunk_id_indexed": embedding_chunk_id_indexed,
             "kg_entity_count": kg_entity_count,
             "kg_relation_count": kg_relation_count,
             "ann_available": bool(ann_manifest),
@@ -1538,7 +1603,7 @@ class KnowledgeStore:
         options = payload.get("options") or {}
         top_k = int(options.get("top_k") or 10)
         top_k = max(1, min(top_k, 50))
-        recall_limit = min(240, max(top_k * 4, 60))
+        recall_limit = retrieval_recall_limit(plan, top_k)
         include_full_text = bool(options.get("include_full_text"))
         retrieval_round = max(1, int(options.get("retrieval_round") or 1))
 
@@ -1794,6 +1859,7 @@ class KnowledgeStore:
                 "candidate_count": len(candidates),
                 "ann_used": int(vector_result.route == "ann"),
                 "vector_route": vector_result.route,
+                "vector_error": vector_result.error,
                 "retrieval_round": retrieval_round,
                 "timings_ms": {
                     "lexical_graph": round(lexical_graph_ms, 3),
@@ -1947,8 +2013,9 @@ class KnowledgeStore:
         ):
             bm25_rank = float(row["rank"] or 0.0)
             self._add_candidate(candidate_rows, row, "full_text", rank, 1.0 / (1.0 + abs(bm25_rank)))
+        graph_limit = min(recall_limit, 40)
         for rank, (row, score) in enumerate(
-            self._graph_candidates(conn, query, plan, where, params, recall_limit),
+            self._graph_candidates(conn, query, plan, where, params, graph_limit),
             start=1,
         ):
             self._add_candidate(candidate_rows, row, "graph", rank, score)
@@ -2130,6 +2197,13 @@ class KnowledgeStore:
             )
         if not self._has_narrow_sql_scope(where):
             return dense
+        if not self._vector_scope_within_limit(conn, "chunk_vectors", where, params):
+            return VectorCandidateResult(
+                route="none",
+                embedding_ms=dense.embedding_ms,
+                search_ms=dense.search_ms,
+                error="local_hash_scope_too_large",
+            )
         started = perf_counter()
         local = self._local_hash_vector_candidates(conn, query, plan, where, params, limit)
         return VectorCandidateResult(
@@ -2226,6 +2300,19 @@ class KnowledgeStore:
                 search_ms=(perf_counter() - search_started) * 1000,
                 error=locals().get("ann_error", "ann_unavailable"),
             )
+        if not self._vector_scope_within_limit(
+            conn,
+            "chunk_embeddings",
+            where,
+            params,
+            vector_model=config.model,
+        ):
+            return VectorCandidateResult(
+                route="none",
+                embedding_ms=embedding_ms,
+                search_ms=(perf_counter() - search_started) * 1000,
+                error="exact_dense_scope_too_large",
+            )
         try:
             rows = conn.execute(
                 f"""
@@ -2261,8 +2348,8 @@ class KnowledgeStore:
     def _has_narrow_sql_scope(where: list[str]) -> bool:
         return any("d.document_id in" in clause or "d.standard_no =" in clause for clause in where)
 
-    @staticmethod
     def _ann_manifest_matches(
+        self,
         conn: sqlite3.Connection,
         manifest: AnnManifest,
         model: str,
@@ -2270,6 +2357,24 @@ class KnowledgeStore:
     ) -> bool:
         if manifest.model != model or manifest.dimensions != dimensions:
             return False
+        try:
+            db_stat = self.db_path.stat()
+            db_signature = (db_stat.st_mtime_ns, db_stat.st_size)
+        except OSError:
+            db_signature = (0, 0)
+        cache_key = (
+            manifest.model,
+            manifest.dimensions,
+            manifest.count,
+            manifest.max_updated_at,
+            model,
+            dimensions,
+            *db_signature,
+        )
+        now = perf_counter()
+        cached = self._ann_validation_cache
+        if cached and cached[0] == cache_key and now - cached[2] < ANN_VALIDATION_CACHE_SECONDS:
+            return cached[1]
         row = conn.execute(
             """
             select count(*) as count, min(dimensions) as min_dimensions,
@@ -2279,13 +2384,50 @@ class KnowledgeStore:
             """,
             (model,),
         ).fetchone()
-        return bool(
+        valid = bool(
             row
             and int(row["count"] or 0) == manifest.count
             and int(row["min_dimensions"] or 0) == manifest.dimensions
             and int(row["max_dimensions"] or 0) == manifest.dimensions
             and str(row["max_updated_at"] or "") == manifest.max_updated_at
         )
+        self._ann_validation_cache = (cache_key, valid, now)
+        return valid
+
+    @staticmethod
+    def _vector_scope_within_limit(
+        conn: sqlite3.Connection | None,
+        table_name: str,
+        where: list[str],
+        params: list[Any],
+        *,
+        vector_model: str | None = None,
+    ) -> bool:
+        if conn is None:
+            return True
+        limit = max(0, int(get_settings().vector_fallback_scan_limit))
+        if limit <= 0:
+            return False
+        if table_name not in {"chunk_embeddings", "chunk_vectors"}:
+            return False
+        alias = "e" if table_name == "chunk_embeddings" else "v"
+        model_where = "e.vector_model = ? and " if vector_model else ""
+        query_params = [vector_model, *params, limit + 1] if vector_model else [*params, limit + 1]
+        try:
+            rows = conn.execute(
+                f"""
+                select c.chunk_id
+                from {table_name} {alias}
+                join chunks c on c.chunk_id = {alias}.chunk_id
+                join documents d on d.document_id = c.document_id
+                where {model_where}{' and '.join(where)}
+                limit ?
+                """,
+                query_params,
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return False
+        return len(rows) <= limit
 
     def _local_hash_vector_candidates(
         self,
@@ -2343,8 +2485,10 @@ class KnowledgeStore:
         ][:12]
         if not terms:
             return []
-        term_where = " or ".join("e.name like ?" for _ in terms)
-        term_params = [f"%{term}%" for term in terms]
+        normalized_terms = [
+            re.sub(r"\s+", "", term.upper().replace("—", "-").replace("－", "-").replace("–", "-"))
+            for term in terms
+        ]
         relation_map = {
             "authority_responsibility": ("RESPONSIBLE_FOR", "STATES_RESPONSIBILITY"),
             "legal_responsibility": ("RESPONSIBLE_FOR", "STATES_RESPONSIBILITY"),
@@ -2361,29 +2505,74 @@ class KnowledgeStore:
             placeholders = ",".join("?" for _ in relation_types)
             relation_where = f" and r.relation_type in ({placeholders})"
             relation_params.extend(relation_types)
-        def run_graph(extra_where: str, extra_params: list[Any]) -> list[sqlite3.Row]:
+        def run_graph(
+            entity_where: str,
+            entity_params: list[Any],
+            extra_where: str,
+            extra_params: list[Any],
+            entity_limit: int,
+        ) -> list[sqlite3.Row]:
             try:
                 return conn.execute(
                     f"""
                     select c.*, d.document_type, d.status, d.official_url, d.source_platform, 0.0 as rank,
                            max(r.confidence) as graph_score
-                    from kg_entities e
-                    join kg_relations r on r.target_entity_id = e.entity_id or r.source_entity_id = e.entity_id
+                    from (
+                      select e.entity_id
+                      from kg_entities e
+                      where {entity_where}
+                      limit ?
+                    ) matched_entities
+                    join kg_relations r on r.target_entity_id = matched_entities.entity_id
+                                       or r.source_entity_id = matched_entities.entity_id
                     join chunks c on c.chunk_id = r.evidence_chunk_id
                     join documents d on d.document_id = c.document_id
-                    where ({term_where}){extra_where} and {' and '.join(where)}
+                    where 1 = 1{extra_where} and {' and '.join(where)}
                     group by c.chunk_id
                     order by graph_score desc
                     limit ?
                     """,
-                    [*term_params, *extra_params, *params, limit],
+                    [*entity_params, entity_limit, *extra_params, *params, limit],
                 ).fetchall()
             except sqlite3.OperationalError:
                 return []
 
-        rows = run_graph(relation_where, relation_params)
+        exact_placeholders = ",".join("?" for _ in normalized_terms)
+        rows = run_graph(
+            f"e.normalized_name in ({exact_placeholders})",
+            normalized_terms,
+            relation_where,
+            relation_params,
+            max(80, limit * 2),
+        )
+        if rows:
+            return [(row, float(row["graph_score"] or 0.5)) for row in rows]
+
+        fuzzy_terms = terms[:8]
+        fuzzy_name_where = " or ".join("e.name like ?" for _ in fuzzy_terms)
+        fuzzy_type_placeholders = ",".join("?" for _ in GRAPH_FUZZY_ENTITY_TYPES)
+        fuzzy_where = (
+            f"({fuzzy_name_where}) and e.entity_type in ({fuzzy_type_placeholders})"
+        )
+        fuzzy_params = [
+            *(f"%{term}%" for term in fuzzy_terms),
+            *GRAPH_FUZZY_ENTITY_TYPES,
+        ]
+        rows = run_graph(
+            fuzzy_where,
+            fuzzy_params,
+            relation_where,
+            relation_params,
+            max(120, limit * 3),
+        )
         if not rows and relation_types:
-            rows = run_graph("", [])
+            rows = run_graph(
+                fuzzy_where,
+                fuzzy_params,
+                "",
+                [],
+                max(120, limit * 3),
+            )
         return [(row, float(row["graph_score"] or 0.5)) for row in rows]
 
     def standards(self, params: dict[str, Any]) -> dict[str, Any]:
