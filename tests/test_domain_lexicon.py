@@ -1,5 +1,6 @@
 import unittest
 
+from mining_qa.domain_gate import DomainGate, governed_domain_terms
 from mining_qa.knowledge_store import domain_lexicon, lexicon_query_expansions, matched_lexicon_entries
 from mining_qa.query_understanding import understand_query
 
@@ -24,6 +25,7 @@ class DomainLexiconTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         domain_lexicon.cache_clear()
+        governed_domain_terms.cache_clear()
 
     def test_active_entries_have_complete_unique_schema(self) -> None:
         entries = domain_lexicon()
@@ -72,6 +74,12 @@ class DomainLexiconTests(unittest.TestCase):
         self.assertNotIn("矿权", expressions)
         self.assertNotIn("矿产", expressions)
         self.assertNotIn("地质", expressions)
+
+    def test_governed_colloquial_term_passes_domain_gate(self) -> None:
+        decision = DomainGate().check("探转采需要达到什么条件")
+
+        self.assertTrue(decision.in_scope)
+        self.assertIn("探转采", decision.matched_terms)
 
 
 if __name__ == "__main__":

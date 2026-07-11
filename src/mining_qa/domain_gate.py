@@ -1,8 +1,12 @@
+import json
 import re
 from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
 
 
 STANDARD_NO_RE = re.compile(r"\b(?:GB|GB/T|DZ/T|DZ|NB/T|HJ|YS/T)\s*\d{3,6}(?:\.\d+)?[-－]\d{4}\b", re.I)
+DOMAIN_LEXICON_PATH = Path(__file__).with_name("domain_lexicon.json")
 
 DOMAIN_KEYWORDS = {
     "矿",
@@ -41,6 +45,25 @@ ABUSE_KEYWORDS = {
 }
 
 
+@lru_cache(maxsize=1)
+def governed_domain_terms() -> tuple[str, ...]:
+    try:
+        payload = json.loads(DOMAIN_LEXICON_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ()
+    if not isinstance(payload, list):
+        return ()
+    return tuple(
+        dict.fromkeys(
+            str(entry.get("user_expression") or "").strip()
+            for entry in payload
+            if isinstance(entry, dict)
+            and entry.get("status") == "active"
+            and str(entry.get("user_expression") or "").strip()
+        )
+    )
+
+
 @dataclass(frozen=True)
 class DomainDecision:
     in_scope: bool
@@ -59,7 +82,7 @@ class DomainGate:
         if abuse_terms:
             return DomainDecision(False, "abuse_or_prompt_injection", abuse_terms)
 
-        matched_terms = [term for term in DOMAIN_KEYWORDS if term in text]
+        matched_terms = [term for term in (*DOMAIN_KEYWORDS, *governed_domain_terms()) if term in text]
         if STANDARD_NO_RE.search(text):
             matched_terms.append("standard_no")
 

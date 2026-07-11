@@ -1,4 +1,10 @@
-# geowiki v1.0.2
+# geowiki v1.0.3
+
+## v1.0.3 Domain Gate Fix
+
+- The domain gate now reads active `user_expression` values from the governed lexicon before rejecting a question.
+- Low-ambiguity terms such as `探转采` can reach their deterministic retrieval intent instead of being rejected as out of scope.
+- Only governed user expressions are admitted; positive expansions and broad generic vocabulary do not automatically widen the gate.
 
 ## v1.0.2 Retrieval Performance Scope
 
