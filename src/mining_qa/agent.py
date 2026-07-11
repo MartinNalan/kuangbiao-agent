@@ -841,7 +841,7 @@ class MiningQAAgent:
         if "服务指南" in title and "申请材料" in f"{source.chapter or ''} {quote}":
             return True
         if source.source_role == "policy_attachment":
-            return title == "采矿权申请资料清单及要求" and "材料" in (source.chapter or "")
+            return title == "采矿权申请资料清单及要求" and (source.chapter or "").startswith("附件4")
         if "采矿权" in title and "延续" in f"{title} {source.chapter or ''} {quote}":
             if any(term in f"{source.chapter or ''} {quote}" for term in ("申请材料", "申请资料", "材料清单")):
                 return True
@@ -1119,13 +1119,10 @@ class MiningQAAgent:
                 and item.title == "采矿权申请资料清单及要求"
             ]
             if attachment_sources:
-                def material_sequence(item: Source) -> int:
-                    match = re.search(r"材料\s*(\d+)", item.chapter or "")
-                    return int(match.group(1)) if match else 999
-
-                attachment_sources.sort(key=material_sequence)
-                application_label = "延续"
-                if "注销" in effective_plan.normalized_query:
+                application_label = None
+                if any(term in effective_plan.normalized_query for term in ("延续", "续期")):
+                    application_label = "延续"
+                elif "注销" in effective_plan.normalized_query:
                     application_label = "注销"
                 elif any(term in effective_plan.normalized_query for term in ("首次", "新立")):
                     application_label = "新立"
@@ -1133,6 +1130,48 @@ class MiningQAAgent:
                     term in effective_plan.normalized_query for term in ("转让", "转移")
                 ):
                     application_label = "变更"
+
+                if application_label is None:
+                    overview = next(
+                        (item for item in attachment_sources if "适用类型" in (item.chapter or "")),
+                        None,
+                    )
+                    section_sources = {
+                        label: next(
+                            (
+                                item
+                                for item in attachment_sources
+                                if (item.chapter or "") == f"附件4 > {label}"
+                            ),
+                            None,
+                        )
+                        for label in ("新立", "延续", "变更", "注销")
+                    }
+                    lines = [
+                        "**附件4已经完整、结构化入库；但采矿权申请不是一套统一要件。**",
+                        "",
+                    ]
+                    if overview and overview.quote:
+                        lines.append(f"- **申请类型**：{overview.quote}")
+                    for label, source in section_sources.items():
+                        if not source or not source.quote:
+                            continue
+                        summary = re.split(r"\s*注[:：]", source.quote, maxsplit=1)[0].strip()
+                        if summary:
+                            lines.append(f"- **{label}**：{summary}")
+                    lines.extend(
+                        [
+                            "- **前置条件**：应结合对应申请类型的自然资源部办事指南判断，不能把新立、延续、变更和注销的条件合并为一套通用条件。",
+                            "- **需要补充**：请说明办理类型；变更申请还应说明扩大或缩小矿区范围、变更矿种/开采方式、采矿权人名称或转让。明确后即可列出附件4中的逐项材料。",
+                        ]
+                    )
+                    return "\n".join(lines)
+
+                def material_sequence(item: Source) -> int:
+                    match = re.search(r"材料\s*(\d+)", item.chapter or "")
+                    return int(match.group(1)) if match else 999
+
+                attachment_sources.sort(key=material_sequence)
                 lines = [
                     f"采矿权{application_label}申请应按 **自然资规〔2023〕4号附件4《采矿权申请资料清单及要求》** 提交以下材料：",
                     "",
@@ -1177,7 +1216,7 @@ class MiningQAAgent:
                         f"- **依据文件**：{source.standard_no or '自然资规〔2023〕4号'}《{source.title}》",
                         f"- **依据条款**：{source.chapter or '三、精简矿业权申请资料'}",
                         f"- **直接依据**：{source.quote}",
-                        "- **当前限制**：现有证据只明确了应适用的附件，附件4逐项材料尚未结构化入库，因此暂不凭推测列出材料清单。",
+                        "- **当前限制**：本次检索只命中了父政策中的附件指引，未召回附件4的结构化材料记录；不能据此推断附件内容不存在。",
                     ]
                 )
 

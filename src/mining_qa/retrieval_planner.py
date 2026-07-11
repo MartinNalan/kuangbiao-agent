@@ -98,6 +98,8 @@ class RetrievalPlanner:
                     "如果用户问哪些制度允许详查报告用于探矿权转采矿权，应识别为 exploration_to_mining_eligibility，"
                     "检索政策中的转采条件、勘查程度要求和技术标准中的报告类型限制；"
                     "必须区分行政上的探矿权转采矿权与技术上的矿山设计开采依据。"
+                    "行政申请语境中的‘要件、必备资料、所需资料’应理解为申请材料；"
+                    "政策正文引用附件清单时，document_types 必须包含 policy_attachment，不能只检索父政策正文。"
                     "required_evidence_groups 是 AND 关系，每个子数组内部是 OR 关系。"
                     "普通工程间距表不能作为矿体外推规则证据；仅出现同一个词但没有目标关系的内容应放入 negative_terms。"
                     "candidate_titles 和 standard_numbers 只有在问题明确给出或你高度确信时填写。"

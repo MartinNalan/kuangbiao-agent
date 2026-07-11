@@ -33,6 +33,11 @@ SERVICE_MATERIAL_TERMS = (
     "申请资料",
     "资料清单",
     "材料清单",
+    "要件",
+    "必备材料",
+    "必备资料",
+    "所需材料",
+    "所需资料",
 )
 SERVICE_PROCEDURE_TERMS = (
     "怎么办理",
@@ -611,11 +616,10 @@ def understand_query(query: str) -> QueryPlan:
             candidate_titles.extend(guide_titles)
             retrieval_terms.extend([*guide_titles, "申请材料", "申请材料目录"])
         else:
-            candidate_titles.extend(["采矿权延续", "矿产资源勘查开采登记管理"])
+            candidate_titles.extend(["采矿权申请资料清单及要求", "矿产资源勘查开采登记管理"])
             standards.append("自然资规〔2023〕4号")
             retrieval_terms.extend(
                 [
-                    "采矿权延续登记",
                     "采矿权申请资料清单及要求",
                     "附件4",
                     "申请材料",

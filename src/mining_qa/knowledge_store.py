@@ -1125,13 +1125,13 @@ def row_has_service_material_evidence(row: sqlite3.Row, plan: QueryPlan) -> bool
         )
     if row["document_type"] == "policy_attachment":
         section_terms = service_application_section_terms(plan)
-        return (
-            row["validation_status"] != "empty_source_section"
-            and row_matches_candidate_title(row, plan)
-            and row["chunk_type"] == "application_material_row"
-            and bool(section_terms)
-            and any(section.startswith(term) for term in section_terms)
-        )
+        if row["validation_status"] == "empty_source_section" or not row_matches_candidate_title(row, plan):
+            return False
+        if section_terms:
+            return row["chunk_type"] == "application_material_row" and any(
+                section.startswith(term) for term in section_terms
+            )
+        return row["chunk_type"] in {"attachment_overview", "application_material_section"}
     return (
         "自然资规〔2023〕4号" in standard_no
         and "采矿权申请资料清单" in context
@@ -1323,6 +1323,11 @@ def query_plan_score(row: sqlite3.Row, plan: QueryPlan) -> float:
     elif plan.intent == "service_materials":
         if row["document_type"] == "policy_attachment":
             score += 18.0
+            if not service_application_section_terms(plan) and row["chunk_type"] in {
+                "attachment_overview",
+                "application_material_section",
+            }:
+                score += 18.0
         if row["document_type"] in {"service_guide", "administrative_service_guide"}:
             score += 10.0
         if "自然资规〔2023〕4号" in (row["standard_no"] or ""):
@@ -1675,6 +1680,14 @@ class KnowledgeStore:
                     recall_limit,
                 )
                 lexical_graph_ms += (perf_counter() - lexical_started) * 1000
+
+            self._add_service_material_overview_candidates(
+                conn,
+                candidate_rows,
+                plan,
+                where,
+                params,
+            )
 
             if not self._evidence_sufficient_without_vectors(candidate_rows, plan, scope_applied):
                 vector_ran = True
@@ -2109,6 +2122,33 @@ class KnowledgeStore:
                 *sorted(target_document_ids),
                 *(f"%表{reference}%" for reference in references),
             ],
+        ).fetchall()
+        for rank, row in enumerate(rows, start=1):
+            self._add_candidate(candidate_rows, row, "reference", rank, 1.0)
+
+    def _add_service_material_overview_candidates(
+        self,
+        conn: sqlite3.Connection,
+        candidate_rows: dict[str, dict[str, Any]],
+        plan: QueryPlan,
+        where: list[str],
+        params: list[Any],
+    ) -> None:
+        if plan.intent != "service_materials" or service_application_section_terms(plan):
+            return
+        rows = conn.execute(
+            f"""
+            select c.*, d.document_type, d.status, d.official_url, d.source_platform, 0.0 as rank
+            from chunks c
+            join documents d on d.document_id = c.document_id
+            where {' and '.join(where)}
+              and d.document_type = 'policy_attachment'
+              and d.standard_no = '自然资规〔2023〕4号附件4'
+              and c.chunk_type in ('attachment_overview', 'application_material_section')
+            order by case c.chunk_type when 'attachment_overview' then 0 else 1 end,
+                     c.section_path
+            """,
+            params,
         ).fetchall()
         for rank, row in enumerate(rows, start=1):
             self._add_candidate(candidate_rows, row, "reference", rank, 1.0)

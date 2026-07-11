@@ -451,6 +451,32 @@ def assert_t018_search() -> None:
     assert_true(result.get("retrieval", {}).get("graph_hits", 0) > 0, f"{query}: no graph evidence")
     assert_true(result.get("coverage", {}).get("has_clause_level_evidence") is True, f"{query}: evidence rejected")
 
+    overview_query = "采矿权申请的前置条件及要件有哪些"
+    overview = post_json(
+        f"{KB_URL}/knowledge/search",
+        {"query": overview_query, "options": {"top_k": 10, "include_full_text": False}},
+    )
+    overview_hits = overview.get("results") or []
+    assert_true(bool(overview_hits), f"{overview_query}: no evidence")
+    assert_true(
+        all(hit.get("source_role") == "policy_attachment" for hit in overview_hits),
+        f"{overview_query}: parent-only or unrelated evidence leaked: {overview_hits}",
+    )
+    assert_true(
+        any("附件4 > 适用类型" in (hit.get("section_path") or "") for hit in overview_hits),
+        f"{overview_query}: attachment overview missing",
+    )
+    assert_true(
+        {"附件4 > 新立", "附件4 > 延续", "附件4 > 变更", "附件4 > 注销"}.issubset(
+            {hit.get("section_path") for hit in overview_hits}
+        ),
+        f"{overview_query}: application-type summaries incomplete",
+    )
+    assert_true(
+        overview.get("coverage", {}).get("has_clause_level_evidence") is True,
+        f"{overview_query}: overview evidence rejected",
+    )
+
     basis_query = "采矿证办理应该依据哪个文件？"
     basis = post_json(
         f"{KB_URL}/knowledge/search",
@@ -517,6 +543,25 @@ def assert_api() -> None:
     assert_true(
         all(source.get("url") == "https://f.mnr.gov.cn/202305/P020230512660474974800.doc" for source in extension_sources),
         "T018 API sources should expose the official attachment URL",
+    )
+    overview_question = "采矿权申请的前置条件及要件有哪些"
+    overview = post_json(f"{API_URL}/api/ask", {"question": overview_question}, headers=headers)
+    assert_true(overview.get("status") == "answered", "T018 generic requirements should be answered")
+    assert_true(
+        "附件4已经完整、结构化入库" in overview.get("answer", ""),
+        "T018 generic answer still treats the attachment as unavailable",
+    )
+    assert_true(
+        all(label in overview.get("answer", "") for label in ("**新立**", "**延续**", "**变更**", "**注销**")),
+        "T018 generic answer should explain all application types",
+    )
+    assert_true(
+        overview.get("retrieval", {}).get("planner_used") is False,
+        "T018 generic requirements should use deterministic intent routing",
+    )
+    assert_true(
+        all(source.get("source_role") == "policy_attachment" for source in overview.get("sources") or []),
+        "T018 generic requirements should cite attachment evidence",
     )
     basis_question = "采矿证办理应该依据哪个文件？"
     basis = post_json(f"{API_URL}/api/ask", {"question": basis_question}, headers=headers)

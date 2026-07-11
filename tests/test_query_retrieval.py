@@ -174,6 +174,7 @@ class QueryUnderstandingTests(unittest.TestCase):
     def test_high_value_policy_and_numeric_intents_are_separate(self) -> None:
         cases = {
             "采矿证延续需要提交什么材料？": ("service_materials", "自然资规〔2023〕4号"),
+            "采矿权申请的前置条件及要件有哪些": ("service_materials", "自然资规〔2023〕4号"),
             "采矿证办理应该依据哪个文件": ("service_procedure_basis", "自然资规〔2023〕4号"),
             "资源量估算中，无限外推是推1/2还是1/4": ("projection_numeric_rule", "DZ/T 0338.1-2020"),
             "根据矿产资源法实施条例，资源储量报告的真实性由谁负责": ("legal_responsibility", "国令第839号"),
@@ -184,6 +185,17 @@ class QueryUnderstandingTests(unittest.TestCase):
                 plan = understand_query(question)
                 self.assertEqual(plan.intent, intent)
                 self.assertIn(document_no, plan.standard_numbers)
+
+    def test_generic_mining_right_requirements_include_policy_attachment(self) -> None:
+        plan = apply_semantic_plan(
+            understand_query("采矿权申请的前置条件及要件有哪些"),
+            None,
+        )
+
+        self.assertEqual(plan.intent, "service_materials")
+        self.assertIn("采矿权申请资料清单及要求", plan.candidate_title_terms)
+        self.assertIn("policy_attachment", plan.document_types)
+        self.assertNotIn("采矿权延续", plan.candidate_title_terms)
 
     def test_context_dependent_follow_up_is_rewritten_with_previous_question(self) -> None:
         rewritten = contextualize_follow_up(
@@ -458,6 +470,44 @@ class PlannerFallbackTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastAnswerTests(unittest.TestCase):
+    def test_generic_mining_right_requirements_use_attachment_overview(self) -> None:
+        agent = object.__new__(MiningQAAgent)
+        sources = [
+            Source(
+                title="采矿权申请资料清单及要求",
+                standard_no="自然资规〔2023〕4号附件4",
+                chapter="附件4 > 适用类型",
+                quote="自然资规〔2023〕4号附件4将采矿权申请资料分为新立、延续、变更、注销4种类型。",
+                source_type="official_fulltext",
+                text_access="pdf_text",
+                source_role="policy_attachment",
+            ),
+            *[
+                Source(
+                    title="采矿权申请资料清单及要求",
+                    standard_no="自然资规〔2023〕4号附件4",
+                    chapter=f"附件4 > {label}",
+                    quote=f"采矿权{label}申请表中共有{count}项带▲材料；要求栏的特殊规定优先于表中标记。",
+                    source_type="official_fulltext",
+                    text_access="pdf_text",
+                    source_role="policy_attachment",
+                )
+                for label, count in (("新立", 14), ("延续", 10), ("变更", 50), ("注销", 6))
+            ],
+        ]
+
+        answer = agent._fast_answer(
+            "采矿权申请的前置条件及要件有哪些",
+            sources,
+            understand_query("采矿权申请的前置条件及要件有哪些"),
+        ) or ""
+
+        self.assertIn("附件4已经完整、结构化入库", answer)
+        for label in ("新立", "延续", "变更", "注销"):
+            self.assertIn(f"**{label}**", answer)
+        self.assertIn("请说明办理类型", answer)
+        self.assertNotIn("附件4逐项材料尚未结构化入库", answer)
+
     def test_equivalent_questions_produce_identical_structured_answer(self) -> None:
         agent = object.__new__(MiningQAAgent)
         source = Source(

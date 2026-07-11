@@ -1,4 +1,11 @@
-# geowiki v1.0.3
+# geowiki v1.0.4
+
+## v1.0.4 Policy Attachment Retrieval Fix
+
+- Application terms such as `要件`, `必备资料`, and `所需资料` now route to governed application-material evidence.
+- Generic mining-right application questions retrieve the structured attachment overview and all four top-level application types instead of only the parent policy clause.
+- The answer no longer claims attachment 4 is unavailable when the structured attachment exists; it asks the user to specify new establishment, extension, change subtype, or cancellation before listing detailed materials.
+- Generic attachment retrieval stays deterministic and skips planner, embedding, ANN, reranker, and answer-model calls.
 
 ## v1.0.3 Domain Gate Fix
 
