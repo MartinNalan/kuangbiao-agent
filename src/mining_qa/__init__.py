@@ -1,2 +1,1 @@
-"""Mining Knowledge QA application package."""
-
+"""geowiki application package."""

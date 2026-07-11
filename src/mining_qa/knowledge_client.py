@@ -3,6 +3,7 @@ from typing import Any
 import httpx
 
 from .config import Settings
+from .query_understanding import understand_query
 from .schemas import KnowledgeSearchResponse, StandardsResponse
 
 
@@ -24,11 +25,12 @@ class KnowledgeClient:
                 }
             )
 
+        plan = understand_query(question)
         payload = {
             "query": question,
             "filters": filters,
             "options": {
-                "top_k": 10,
+                "top_k": 30 if plan.exhaustive_search else 10,
                 "include_full_text": False,
                 "allow_web_supplement": True,
             },

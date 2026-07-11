@@ -39,11 +39,13 @@ Date: 2026-07-10 08:45 +0800
 - Standard/specification clause chunks: 20,910.
 - Empty standard/specification clause numbers reduced from 2,359/18,516 (12.74%) to 1,792/20,910 (8.57%).
 - Policy documents with zero chunks: 0.
+- MNR policy documents with official URLs: 307/307.
 - Local hashed vectors: 24,219.
 - SQLite KG entities: 25,307.
 - SQLite KG relations: 45,919.
+- Domain lexicon: JSON-backed first stage at `src/mining_qa/domain_lexicon.json`, seeded with high-value intent entries from requirements section 6.8.
 - Added high-value policy authority KG relations for `自然资规〔2023〕6号` 第十条: `自然资源部 RESPONSIBLE_FOR 本级已颁发勘查许可证或采矿许可证的矿产资源储量评审备案` and `省级自然资源主管部门 RESPONSIBLE_FOR 其他矿产资源储量评审备案`.
-- Regression command passed: `PYTHONPATH=src .venv/bin/python scripts/run_kb_regression.py`.
+- Regression commands passed: `KB_URL=http://127.0.0.1:18181 API_URL=http://127.0.0.1:18180 PYTHONPATH=src .venv/bin/python scripts/run_kb_regression.py` and `KB_URL=http://127.0.0.1:18181 API_URL=http://127.0.0.1:18180 PYTHONPATH=src .venv/bin/python scripts/run_api_regression.py`.
 
 ## Current Policy Source
 
@@ -78,3 +80,4 @@ The category page reports 310 items and `countPage=21`, while the crawler parsed
 - Keep existing page/table chunks as fallback. Clause chunks are added, not used as replacements.
 - Vector MVP can use deterministic local hashed character n-gram vectors to avoid external embedding dependencies. This is a replaceable adapter and not the final embedding model.
 - Graph MVP uses SQLite tables first. Neo4j remains a later upgrade.
+- `domain_lexicon` currently uses a versionable JSON config. Intent matching should use user expressions and canonical terms; positive expansions are retrieval recall terms and should not by themselves trigger an intent.

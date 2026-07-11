@@ -198,17 +198,18 @@ async def search(payload: dict[str, Any]) -> dict[str, Any]:
             "results": [
                 {
                     "document_id": "mock-gold-001",
-                    "title": "固体矿产地质勘查规范总则",
-                    "standard_no": "GB/T 13908-2020",
-                    "clause_no": "附录 B",
-                    "page": 42,
-                    "quote": "示例条款片段：金矿勘查工程间距应结合矿体规模、形态复杂程度和勘查阶段确定。",
+                    "title": "矿产地质勘查规范 岩金",
+                    "standard_no": "DZ/T 0205-2020",
+                    "clause_no": "表 F.1",
+                    "section_path": "附录F 岩金矿勘查工程间距",
+                    "page": 25,
+                    "quote": "表 F.1 参考基本勘查工程间距。Ⅱ类型：坑探-穿脉 80～100 m；坑探-沿脉 40～50 m；钻探-走向 80～100 m；钻探-倾斜 80～100 m。",
                     "score": 0.93,
                     "source_type": "local_kb",
                     "text_access": "ocr_text",
                     "validation_status": "verified",
                     "source_platform": "Mock KB",
-                    "url": "mock://standards/gbt-13908-2020",
+                    "url": "mock://standards/dzt-0205-2020",
                 }
             ],
             "retrieval": {

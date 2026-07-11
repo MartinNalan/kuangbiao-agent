@@ -1,6 +1,6 @@
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field, PrivateAttr
 
 
 SourceType = Literal[
@@ -31,6 +31,22 @@ class AskRequest(BaseModel):
     question: str
     session_id: str | None = None
     filters: AskFilters = Field(default_factory=AskFilters)
+    _retrieval_question: str | None = PrivateAttr(default=None)
+
+    @property
+    def retrieval_question(self) -> str:
+        return self._retrieval_question or self.question
+
+
+class QuotaInfo(BaseModel):
+    date: str
+    daily_limit: int
+    bonus: int
+    effective_limit: int
+    used: int
+    reserved: int
+    remaining: int
+    consumed: bool = False
 
 
 class KnowledgeGapTask(BaseModel):
@@ -51,6 +67,7 @@ class Source(BaseModel):
     text_access: TextAccess = "unavailable"
     url: str | None = None
     source_platform: str | None = None
+    source_role: str | None = None
     validation_status: str | None = None
 
 
@@ -69,16 +86,19 @@ class Limitations(BaseModel):
 class AskResponse(BaseModel):
     answer: str
     session_id: str
+    request_id: str | None = None
     status: Literal["answered", "insufficient_evidence", "out_of_scope", "queued_for_enrichment"] = "answered"
     sources: list[Source] = Field(default_factory=list)
     retrieval: RetrievalStats = Field(default_factory=RetrievalStats)
     limitations: Limitations = Field(default_factory=Limitations)
     knowledge_gap_task: KnowledgeGapTask | None = None
     confidence: Literal["low", "medium", "high"] = "low"
+    quota: QuotaInfo | None = None
 
 
 class FeedbackRequest(BaseModel):
     session_id: str
+    request_id: str | None = None
     rating: Literal["satisfied", "unsatisfied"]
     question: str | None = None
     comment: str | None = None
@@ -96,6 +116,14 @@ class FeedbackRequest(BaseModel):
 class FeedbackResponse(BaseModel):
     ok: bool = True
     message: str = "feedback recorded"
+    feedback_id: str | None = None
+    review_lane: Literal["no_action", "product", "kb_review", "manual_review"] | None = None
+    status: Literal["open", "in_progress", "kb_review", "resolved", "dismissed", "closed"] | None = None
+
+
+class FeedbackStatusUpdateRequest(BaseModel):
+    status: Literal["open", "in_progress", "kb_review", "resolved", "dismissed", "closed"]
+    resolution_note: str | None = Field(default=None, max_length=1000)
 
 
 class StandardItem(BaseModel):
@@ -136,3 +164,51 @@ class KnowledgeSearchResponse(BaseModel):
     results: list[dict[str, Any]] = Field(default_factory=list)
     retrieval: dict[str, int] = Field(default_factory=dict)
     coverage: dict[str, Any] = Field(default_factory=dict)
+
+
+class EmailCodeRequest(BaseModel):
+    email: EmailStr
+    invite_code: str = Field(min_length=6, max_length=64)
+
+
+class RegisterRequest(BaseModel):
+    email: EmailStr
+    display_name: str = Field(min_length=1, max_length=40)
+    password: str = Field(min_length=8, max_length=128)
+    invite_code: str = Field(min_length=6, max_length=64)
+    email_code: str = Field(min_length=6, max_length=6, pattern=r"^\d{6}$")
+
+
+class LoginRequest(BaseModel):
+    account: str = Field(min_length=3, max_length=64)
+    password: str = Field(min_length=8, max_length=128)
+
+
+class PasswordChangeRequest(BaseModel):
+    current_password: str = Field(min_length=8, max_length=128)
+    new_password: str = Field(min_length=8, max_length=128)
+
+
+class ApiKeyCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
+
+class InvitationCreateRequest(BaseModel):
+    label: str = Field(min_length=1, max_length=80)
+    max_uses: int = Field(default=1, ge=1, le=100)
+    expires_in_days: int | None = Field(default=30, ge=1, le=365)
+
+
+class DailyLimitUpdateRequest(BaseModel):
+    daily_limit: int = Field(ge=1, le=100_000)
+    reason: str = Field(min_length=2, max_length=200)
+
+
+class DailyQuotaAdjustmentRequest(BaseModel):
+    extra_requests: int = Field(ge=1, le=100_000)
+    reason: str = Field(min_length=2, max_length=200)
+    date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+
+class UserStatusRequest(BaseModel):
+    status: Literal["active", "suspended"]

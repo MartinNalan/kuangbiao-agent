@@ -1,3 +1,4 @@
+import json
 import re
 from uuid import uuid4
 
@@ -6,6 +7,7 @@ from .domain_gate import DomainGate
 from .gap_tasks import KnowledgeGapTaskStore
 from .knowledge_client import KnowledgeClient
 from .llm_client import LLMClient
+from .query_understanding import QueryPlan, understand_query
 from .schemas import AskRequest, AskResponse, Limitations, RetrievalStats, Source
 from .web_supplement import WebSupplement
 
@@ -14,19 +16,6 @@ ANSWER_CACHE_ENABLED = False
 ANSWER_CACHE: dict[str, AskResponse] = {}
 CACHEABLE_COMPARISON_TERMS = ("不一致", "差异", "不同", "比较", "列举", "哪些标准", "哪些规范")
 PROJECTION_DISTANCE_TERMS = ("外推所依据的距离", "外推依据", "外推距离", "依据的距离")
-POLICY_AUTHORITY_INTENT_TERMS = ("哪个机构", "去哪个机构", "谁负责", "哪一级部门", "哪个部门", "权限", "负责")
-POLICY_AUTHORITY_TOPIC_TERMS = (
-    "储量评审",
-    "储量报告评审",
-    "储量报告",
-    "评审备案",
-    "采矿证",
-    "采矿许可证",
-    "勘查许可证",
-    "矿产资源储量",
-)
-
-
 SYSTEM_PROMPT = """你是矿产资源标准知识问答 agent。
 
 必须遵守：
@@ -52,13 +41,14 @@ class MiningQAAgent:
 
     async def ask(self, request: AskRequest) -> AskResponse:
         session_id = request.session_id or str(uuid4())
-        cache_key = self._cache_key(request.question)
+        question = request.retrieval_question
+        cache_key = self._cache_key(question)
         if ANSWER_CACHE_ENABLED and cache_key in ANSWER_CACHE:
             cached = ANSWER_CACHE[cache_key].model_copy(deep=True)
             cached.session_id = session_id
             return cached
 
-        domain_decision = self.domain_gate.check(request.question)
+        domain_decision = self.domain_gate.check(question)
         if not domain_decision.in_scope:
             limitations = Limitations(
                 has_clause_level_evidence=False,
@@ -73,35 +63,49 @@ class MiningQAAgent:
             )
 
         filters = request.filters.model_dump(exclude_none=True)
-        kb_result = await self.knowledge.search(request.question, filters)
+        kb_result = await self.knowledge.search(question, filters)
 
-        evidence_hits = self._select_evidence_hits(kb_result.results, request.question)
+        evidence_hits = self._select_evidence_hits(kb_result.results, question)
         sources = [self._source_from_hit(hit) for hit in evidence_hits]
-        sources = self._trim_source_quotes(request.question, sources)
+        sources = self._trim_source_quotes(question, sources)
+        has_usable_evidence, has_clause_evidence = self._evaluate_evidence(question, kb_result.coverage, sources)
+        notes = list(kb_result.coverage.get("notes", []))
+
+        if not has_usable_evidence:
+            rewritten_query = await self._fallback_retrieval_query(question)
+            if rewritten_query and self._cache_key(rewritten_query) != self._cache_key(question):
+                rewritten_result = await self.knowledge.search(rewritten_query, filters)
+                rewritten_hits = self._select_evidence_hits(rewritten_result.results, question)
+                rewritten_sources = [self._source_from_hit(hit) for hit in rewritten_hits]
+                rewritten_sources = self._trim_source_quotes(question, rewritten_sources)
+                rewritten_usable, rewritten_clause = self._evaluate_evidence(
+                    question,
+                    rewritten_result.coverage,
+                    rewritten_sources,
+                )
+                if rewritten_usable:
+                    kb_result = rewritten_result
+                    evidence_hits = rewritten_hits
+                    sources = rewritten_sources
+                    has_usable_evidence = rewritten_usable
+                    has_clause_evidence = rewritten_clause
+                    notes = list(rewritten_result.coverage.get("notes", []))
+                    notes.append("首次检索证据不足，已使用一次低置信度查询改写后重新检索。")
+
         retrieval = RetrievalStats(
             full_text_hits=len(evidence_hits),
             vector_hits=kb_result.retrieval.get("vector_hits", 0),
             graph_hits=kb_result.retrieval.get("graph_hits", 0),
             web_hits=kb_result.retrieval.get("web_hits", 0),
         )
-        has_clause_evidence = bool(kb_result.coverage.get("has_clause_level_evidence", False))
-        has_catalog_evidence = self._is_standard_selection_question(request.question) and bool(sources)
-        has_usable_evidence = has_clause_evidence or has_catalog_evidence
-        notes = list(kb_result.coverage.get("notes", []))
-        if self._is_policy_authority_question(request.question):
-            has_authority_evidence = any(self._is_policy_authority_source(source) for source in sources)
-            has_usable_evidence = has_authority_evidence
-            has_clause_evidence = has_authority_evidence
-            if not has_authority_evidence:
-                notes.append("已识别为职责/权限归属问题，但当前证据未包含明确负责主体，不能给出确定结论。")
         if kb_result.coverage.get("needs_web_supplement") and self.settings.enable_sync_web_supplement:
             notes.append("本地知识库证据不足，建议补充官方元数据、全文入口或 OCR 任务。")
-            web_result = await self.web.search(request.question)
+            web_result = await self.web.search(question)
             sources.extend(web_result.sources)
             retrieval.web_hits = len(web_result.sources)
             notes.extend(web_result.notes)
             staged_count = await self.knowledge.create_candidates(
-                request.question,
+                question,
                 [source.model_dump(exclude_none=True) for source in web_result.sources],
             )
             if staged_count:
@@ -112,7 +116,7 @@ class MiningQAAgent:
         limitations = Limitations(has_clause_level_evidence=has_usable_evidence, notes=notes)
 
         if not has_usable_evidence:
-            gap_task = self.gap_tasks.create(request.question, domain_decision, len(sources))
+            gap_task = self.gap_tasks.create(question, domain_decision, len(sources))
             return AskResponse(
                 answer=self._insufficient_answer(request.question, notes),
                 session_id=session_id,
@@ -124,9 +128,9 @@ class MiningQAAgent:
                 confidence="low",
             )
 
-        answer = self._fast_answer(request.question, sources)
+        answer = self._fast_answer(question, sources)
         if answer is None:
-            answer = await self.llm.complete(self._messages(request.question, sources, limitations))
+            answer = await self.llm.complete(self._messages(question, sources, limitations))
         answer = self._append_source_links(answer, sources)
         response = AskResponse(
             answer=answer,
@@ -137,9 +141,64 @@ class MiningQAAgent:
             limitations=limitations,
             confidence="medium" if sources else "low",
         )
-        if ANSWER_CACHE_ENABLED and self._is_cacheable_question(request.question):
+        if ANSWER_CACHE_ENABLED and self._is_cacheable_question(question):
             ANSWER_CACHE[cache_key] = response.model_copy(deep=True)
         return response
+
+    def _evaluate_evidence(
+        self,
+        question: str,
+        coverage: dict,
+        sources: list[Source],
+    ) -> tuple[bool, bool]:
+        plan = understand_query(question)
+        if plan.intent == "standard_selection":
+            found = bool(sources)
+            return found, found
+
+        validators = {
+            "engineering_distance_lookup": self._is_engineering_distance_source,
+            "authority_responsibility": self._is_policy_authority_source,
+            "service_materials": self._is_service_material_source,
+            "service_procedure_basis": self._is_service_procedure_source,
+            "service_time_limit": self._is_service_time_limit_source,
+            "projection_numeric_rule": self._is_projection_numeric_source,
+            "legal_responsibility": self._is_legal_responsibility_source,
+        }
+        validator = validators.get(plan.intent)
+        if validator:
+            found = any(validator(source) for source in sources)
+            return found, found
+
+        has_clause = bool(coverage.get("has_clause_level_evidence", False)) and bool(sources)
+        return has_clause, has_clause
+
+    async def _fallback_retrieval_query(self, question: str) -> str | None:
+        if not self.llm.enabled:
+            return None
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你只负责把矿产资源、地质勘查、矿业权管理或标准规范问题改写为检索查询，"
+                    "不得回答问题。保留矿种、文号、条款号、数值、办理事项和责任主体。"
+                    "返回JSON：{\"rewritten_query\":\"...\",\"keywords\":[\"...\"]}。"
+                ),
+            },
+            {"role": "user", "content": question},
+        ]
+        try:
+            payload = json.loads(await self.llm.complete_json(messages))
+        except (json.JSONDecodeError, TypeError, ValueError, OSError):
+            return None
+        except Exception:
+            return None
+        rewritten = str(payload.get("rewritten_query") or "").strip()
+        keywords = payload.get("keywords") or []
+        if not rewritten or len(rewritten) > 300:
+            return None
+        clean_keywords = [str(item).strip() for item in keywords if str(item).strip()][:8]
+        return " ".join(dict.fromkeys([rewritten, *clean_keywords]))
 
     def _messages(self, question: str, sources: list[Source], limitations: Limitations) -> list[dict[str, str]]:
         evidence_lines = []
@@ -153,6 +212,7 @@ class MiningQAAgent:
                         f"章节/条款: {source.chapter or '未知'}",
                         f"页码: {source.page if source.page is not None else '未知'}",
                         f"来源类型: {source.source_type}",
+                        f"证据角色: {source.source_role or '未标注'}",
                         f"正文访问: {source.text_access}",
                         f"官方链接: {source.url or '无'}",
                         f"原文片段: {quote or '无'}",
@@ -177,10 +237,47 @@ class MiningQAAgent:
     def _select_evidence_hits(self, hits: list[dict], question: str) -> list[dict]:
         if not hits:
             return []
+        plan = understand_query(question)
+        if plan.intent == "engineering_distance_lookup" and plan.target_exploration_type:
+            required_labels = ("坑探-穿脉", "坑探-沿脉", "钻探-走向", "钻探-倾斜")
+            for hit in hits:
+                quote = hit.get("quote") or ""
+                title = hit.get("title") or ""
+                title_matches = not plan.candidate_title_terms or any(
+                    term in title for term in plan.candidate_title_terms
+                )
+                if (
+                    title_matches
+                    and f"{plan.target_exploration_type}类型" in quote
+                    and all(label in quote for label in required_labels)
+                ):
+                    return [hit]
         if self._is_standard_selection_question(question):
             catalog_hits = [hit for hit in hits if "catalog" in (hit.get("hit_type") or [])]
             if catalog_hits:
                 return catalog_hits[:1]
+
+        strict_validators = {
+            "service_materials": self._is_service_material_source,
+            "service_procedure_basis": self._is_service_procedure_source,
+            "service_time_limit": self._is_service_time_limit_source,
+            "projection_numeric_rule": self._is_projection_numeric_source,
+            "legal_responsibility": self._is_legal_responsibility_source,
+        }
+        strict_validator = strict_validators.get(plan.intent)
+        if strict_validator:
+            matched = [hit for hit in hits if strict_validator(self._source_from_hit(hit))]
+            if plan.intent == "service_materials":
+                attachment_hits = [
+                    hit
+                    for hit in matched
+                    if hit.get("source_role") == "policy_attachment"
+                ]
+                if attachment_hits:
+                    return attachment_hits[:20]
+            if plan.intent in {"projection_numeric_rule", "legal_responsibility"}:
+                return matched[:1]
+            return matched[:3]
         if self._is_projection_distance_question(question):
             selected = []
             seen_documents: set[str | None] = set()
@@ -222,10 +319,28 @@ class MiningQAAgent:
             if selected:
                 return selected
 
+        if plan.intent == "related_documents" and plan.focus_terms:
+            anchor = max(plan.focus_terms, key=len)
+            selected = []
+            seen_documents: set[str | None] = set()
+            for hit in hits:
+                context = " ".join(
+                    str(hit.get(key) or "")
+                    for key in ("title", "section_path", "clause_no", "quote", "text")
+                )
+                if anchor not in context or hit.get("document_id") in seen_documents:
+                    continue
+                selected.append(hit)
+                seen_documents.add(hit.get("document_id"))
+                if len(selected) >= 5:
+                    break
+            if selected:
+                return selected
+
         top = hits[0]
         top_score = float(top.get("score") or 0)
         top_document_id = top.get("document_id")
-        is_comparison_question = self._is_comparison_question(question)
+        is_comparison_question = self._is_comparison_question(question) or plan.exhaustive_search
         focused_terms = ("金矿", "岩金")
         has_focused_title_match = any(term in question for term in focused_terms) and "岩金" in str(top.get("title") or "")
 
@@ -286,8 +401,73 @@ class MiningQAAgent:
         return "矿体外推" in question and any(term in question for term in PROJECTION_DISTANCE_TERMS)
 
     def _is_policy_authority_question(self, question: str) -> bool:
-        return any(term in question for term in POLICY_AUTHORITY_INTENT_TERMS) and any(
-            term in question for term in POLICY_AUTHORITY_TOPIC_TERMS
+        return understand_query(question).intent == "authority_responsibility"
+
+    def _is_engineering_distance_source(self, source: Source) -> bool:
+        quote = source.quote or ""
+        if all(label in quote for label in ("坑探-穿脉", "坑探-沿脉", "钻探-走向", "钻探-倾斜")):
+            return True
+        context = f"{source.title} {source.chapter or ''} {quote}"
+        return (
+            "岩金" in source.title
+            and any(term in context for term in ("表 F.1", "表F.1", "参考基本勘查工程间距"))
+            and "工程间距" in context
+        )
+
+    def _is_service_material_source(self, source: Source) -> bool:
+        quote = source.quote or ""
+        title = source.title or ""
+        if "服务指南" in title and "申请材料" in f"{source.chapter or ''} {quote}":
+            return True
+        if source.source_role == "policy_attachment":
+            return title == "采矿权申请资料清单及要求" and "材料" in (source.chapter or "")
+        if "采矿权" in title and "延续" in f"{title} {source.chapter or ''} {quote}":
+            if any(term in f"{source.chapter or ''} {quote}" for term in ("申请材料", "申请资料", "材料清单")):
+                return True
+        return (
+            "自然资规〔2023〕4号" in (source.standard_no or "")
+            and "采矿权申请资料清单" in quote
+            and "附件4" in quote
+        )
+
+    def _is_service_procedure_source(self, source: Source) -> bool:
+        context = f"{source.title} {source.chapter or ''} {source.quote or ''}"
+        if "服务指南" in source.title and any(
+            term in context for term in ("办理基本流程", "办理方式", "申请材料提交")
+        ):
+            return True
+        if "采矿权" in source.title and any(term in context for term in ("审批依据", "办理流程", "申请材料")):
+            return True
+        return (
+            "自然资规〔2023〕4号" in (source.standard_no or "")
+            and "矿产资源勘查开采登记管理" in source.title
+            and "采矿权" in context
+            and any(term in context for term in ("申请资料", "登记管理", "附件4"))
+        )
+
+    def _is_service_time_limit_source(self, source: Source) -> bool:
+        context = f"{source.title} {source.chapter or ''} {source.quote or ''}"
+        return "服务指南" in source.title and "办结时限" in context and any(
+            term in context for term in ("工作日", "日内", "即时办结")
+        )
+
+    def _is_projection_numeric_source(self, source: Source) -> bool:
+        quote = re.sub(r"\s+", "", source.quote or "")
+        return (
+            (source.standard_no or "").replace(" ", "").upper() == "DZ/T0338.1-2020"
+            and (source.chapter == "6.2.2.1" or "6.2.2.1" in quote or "无限外推" in quote)
+            and "无限外推" in quote
+            and "经验工程间距1/2尖推" in quote
+        )
+
+    def _is_legal_responsibility_source(self, source: Source) -> bool:
+        quote = re.sub(r"\s+", "", source.quote or "")
+        return (
+            "国令第839号" in (source.standard_no or "")
+            and (source.chapter == "第四十三条" or "第四十三条" in quote)
+            and "矿业权人" in quote
+            and "储量报告的真实性负责" in quote
+            and "不得弄虚作假" in quote
         )
 
     def _is_policy_authority_source(self, source: Source) -> bool:
@@ -299,17 +479,57 @@ class MiningQAAgent:
         )
 
     def _trim_source_quotes(self, question: str, sources: list[Source]) -> list[Source]:
-        if not self._is_projection_distance_question(question) and not self._is_policy_authority_question(question):
+        plan = understand_query(question)
+        if (
+            not self._is_projection_distance_question(question)
+            and not self._is_policy_authority_question(question)
+            and plan.intent not in {"projection_numeric_rule", "legal_responsibility", "service_materials"}
+        ):
             return sources
         trimmed = []
         for source in sources:
             item = source.model_copy()
             if self._is_policy_authority_question(question):
                 item.quote = self._direct_policy_authority_quote(source.quote or "")
+            elif plan.intent == "projection_numeric_rule":
+                item.quote = self._direct_infinite_projection_quote(source.quote or "")
+            elif plan.intent == "legal_responsibility":
+                item.quote = self._direct_legal_responsibility_quote(source.quote or "")
+            elif plan.intent == "service_materials":
+                item.quote = self._direct_service_material_quote(source.quote or "")
             else:
                 item.quote = self._evidence_quote_for_prompt(question, source.quote)
             trimmed.append(item)
         return trimmed
+
+    def _direct_infinite_projection_quote(self, text: str) -> str:
+        clean = re.sub(r"\s+", " ", text).strip()
+        infinite_match = re.search(r"(b\)\s*无限外推：.*?经验工程间距\s*1/2\s*尖推。)", clean)
+        if infinite_match:
+            finite_match = re.search(r"(普查阶段.*?实际工程间距\s*的\s*1/4\s*平推处理。)", clean)
+            return "".join(
+                match.group(1).strip()
+                for match in (finite_match, infinite_match)
+                if match is not None
+            )
+        return clean[:260] + ("..." if len(clean) > 260 else "")
+
+    def _direct_legal_responsibility_quote(self, text: str) -> str:
+        clean = re.sub(r"\s+", " ", text).strip()
+        match = re.search(r"(矿业权人应当对其报送的储量报告的真实性负责，不得弄虚作假。)", clean)
+        if match:
+            return match.group(1)
+        return clean[:260] + ("..." if len(clean) > 260 else "")
+
+    def _direct_service_material_quote(self, text: str) -> str:
+        clean = re.sub(r"\s+", " ", text).strip()
+        match = re.search(
+            r"(自然资源部负责的矿业权.*?按照本通知附件2探矿权申请资料清单及要求、附件4采矿权申请资料清单及要求执行。)",
+            clean,
+        )
+        if match:
+            return match.group(1)
+        return clean[:260] + ("..." if len(clean) > 260 else "")
 
     def _direct_policy_authority_quote(self, text: str) -> str:
         clean = re.sub(r"\s+", " ", text).strip()
@@ -401,6 +621,135 @@ class MiningQAAgent:
         )
 
     def _fast_answer(self, question: str, sources: list[Source]) -> str | None:
+        plan = understand_query(question)
+        engineering_answer = self._engineering_distance_answer(plan, sources)
+        if engineering_answer:
+            return engineering_answer
+
+        if plan.intent == "projection_numeric_rule":
+            source = next((item for item in sources if self._is_projection_numeric_source(item)), None)
+            if source:
+                return "\n".join(
+                    [
+                        "**结论：无限外推采用经验工程间距的 1/2 尖推，不是 1/4 平推。**",
+                        "",
+                        f"- **依据文件**：{source.standard_no or '未知标准号'}《{source.title}》",
+                        f"- **依据条款**：{source.chapter or '6.2.2.1'}",
+                        f"- **直接依据**：{source.quote}",
+                    ]
+                )
+
+        if plan.intent == "legal_responsibility":
+            source = next((item for item in sources if self._is_legal_responsibility_source(item)), None)
+            if source:
+                return "\n".join(
+                    [
+                        "**资源储量报告的真实性由报送该报告的矿业权人负责。**",
+                        "",
+                        f"- **依据文件**：{source.standard_no or '未知文号'}《{source.title}》",
+                        f"- **依据条款**：{source.chapter or '第四十三条'}",
+                        f"- **直接依据**：{source.quote}",
+                    ]
+                )
+
+        if plan.intent == "service_materials":
+            attachment_sources = [
+                item
+                for item in sources
+                if item.source_role == "policy_attachment"
+                and item.title == "采矿权申请资料清单及要求"
+            ]
+            if attachment_sources:
+                def material_sequence(item: Source) -> int:
+                    match = re.search(r"材料\s*(\d+)", item.chapter or "")
+                    return int(match.group(1)) if match else 999
+
+                attachment_sources.sort(key=material_sequence)
+                application_label = "延续"
+                if "注销" in plan.normalized_query:
+                    application_label = "注销"
+                elif any(term in plan.normalized_query for term in ("首次", "新立")):
+                    application_label = "新立"
+                elif "变更" in plan.normalized_query or any(
+                    term in plan.normalized_query for term in ("转让", "转移")
+                ):
+                    application_label = "变更"
+                lines = [
+                    f"采矿权{application_label}申请应按 **自然资规〔2023〕4号附件4《采矿权申请资料清单及要求》** 提交以下材料：",
+                    "",
+                ]
+                lines.extend(f"- {item.quote}" for item in attachment_sources)
+                lines.extend(
+                    [
+                        "",
+                        "表中“要求”栏的特殊规定优先于▲/—标记；部分材料还区分油气、非油气或由主管部门通过系统报送。",
+                    ]
+                )
+                return "\n".join(lines)
+            guide_source = next(
+                (
+                    item
+                    for item in sources
+                    if "服务指南" in item.title
+                    and "申请材料" in f"{item.chapter or ''} {item.quote or ''}"
+                ),
+                None,
+            )
+            if guide_source:
+                return "\n".join(
+                    [
+                        f"应按《{guide_source.title}》的申请材料目录提交材料。",
+                        "",
+                        f"- **申请材料**：{guide_source.quote}",
+                        f"- **官方来源**：{guide_source.url or '未提供'}",
+                    ]
+                )
+            source = next((item for item in sources if self._is_service_material_source(item)), None)
+            if source:
+                return "\n".join(
+                    [
+                        "采矿权延续登记的申请资料应按 **自然资规〔2023〕4号附件4《采矿权申请资料清单及要求》** 执行。",
+                        "",
+                        f"- **依据文件**：{source.standard_no or '自然资规〔2023〕4号'}《{source.title}》",
+                        f"- **依据条款**：{source.chapter or '三、精简矿业权申请资料'}",
+                        f"- **直接依据**：{source.quote}",
+                        "- **当前限制**：现有证据只明确了应适用的附件，附件4逐项材料尚未结构化入库，因此暂不凭推测列出材料清单。",
+                    ]
+                )
+
+        if plan.intent == "service_procedure_basis":
+            source = next((item for item in sources if self._is_service_procedure_source(item)), None)
+            if source:
+                if "服务指南" in source.title:
+                    return "\n".join(
+                        [
+                            f"《{source.title}》规定的办理要求如下：",
+                            "",
+                            f"- **{source.chapter or '办理流程'}**：{source.quote}",
+                            f"- **官方来源**：{source.url or '未提供'}",
+                        ]
+                    )
+                return "\n".join(
+                    [
+                        "采矿权登记办理应首先依据 **自然资规〔2023〕4号《自然资源部关于进一步完善矿产资源勘查开采登记管理的通知》**。",
+                        "",
+                        f"- **依据条款**：{source.chapter or '相关条款'}",
+                        f"- **直接依据**：{source.quote}",
+                        "- **说明**：具体办理类型还应结合附件4的申请资料清单及对应办事指南确定。",
+                    ]
+                )
+
+        if plan.intent == "service_time_limit":
+            source = next((item for item in sources if self._is_service_time_limit_source(item)), None)
+            if source:
+                return "\n".join(
+                    [
+                        f"《{source.title}》的办结时限为：{source.quote}",
+                        "",
+                        f"- **官方来源**：{source.url or '未提供'}",
+                    ]
+                )
+
         if self._is_policy_authority_question(question) and sources:
             authority_source = next((source for source in sources if self._is_policy_authority_source(source)), None)
             if authority_source:
@@ -505,6 +854,42 @@ class MiningQAAgent:
 
         return None
 
+    def _engineering_distance_answer(self, plan: QueryPlan, sources: list[Source]) -> str | None:
+        if plan.intent != "engineering_distance_lookup" or not plan.target_exploration_type:
+            return None
+        labels = {
+            "坑探-穿脉": "穿脉",
+            "坑探-沿脉": "沿脉",
+            "钻探-走向": "走向",
+            "钻探-倾斜": "倾斜",
+        }
+        distance_pattern = r"(\d+(?:\.\d+)?\s*[~～-]\s*\d+(?:\.\d+)?)\s*m?"
+        for source in sources:
+            quote = source.quote or ""
+            if f"{plan.target_exploration_type}类型" not in quote:
+                continue
+            values: dict[str, str] = {}
+            for evidence_label, display_label in labels.items():
+                match = re.search(rf"{re.escape(evidence_label)}\s*{distance_pattern}", quote)
+                if match:
+                    values[display_label] = re.sub(r"\s*[~～-]\s*", "～", match.group(1))
+            if len(values) != len(labels):
+                continue
+
+            chapter = source.chapter or "附录F表F.1"
+            return "\n".join(
+                [
+                    f"根据 **{source.standard_no or '未知标准号'}《{source.title}》**（{chapter}），"
+                    f"金矿（岩金）勘查 **{plan.target_exploration_type}类型**的参考基本勘查工程间距为：",
+                    "",
+                    f"- **坑探**：穿脉 {values['穿脉']} m；沿脉 {values['沿脉']} m",
+                    f"- **钻探**：走向 {values['走向']} m；倾斜 {values['倾斜']} m",
+                    "",
+                    "该表给出的是控制资源量勘查工程间距的参考值。",
+                ]
+            )
+        return None
+
     def _projection_distance_bucket(self, quote: str) -> str:
         if "理论工程" in quote or "理论工程间距" in quote:
             if "实际间距" in quote or "实际工程间距" in quote:
@@ -535,6 +920,7 @@ class MiningQAAgent:
             url=hit.get("url") or hit.get("source_url"),
             validation_status=hit.get("validation_status"),
             source_platform=hit.get("source_platform"),
+            source_role=hit.get("source_role"),
         )
 
     def _append_source_links(self, answer: str, sources: list[Source]) -> str:

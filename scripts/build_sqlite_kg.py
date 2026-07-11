@@ -64,7 +64,16 @@ def norm(value: str) -> str:
 
 
 def entity_id(entity_type: str, name: str, source_id: str | None = None) -> str:
-    return stable_id(entity_type, norm(name), source_id if entity_type in {"Clause", "Table"} else "", prefix="kg")
+    source_scoped_types = {
+        "Clause",
+        "Table",
+        "GuideSection",
+        "ServiceGuide",
+        "Attachment",
+        "AttachmentSection",
+        "MaterialRequirement",
+    }
+    return stable_id(entity_type, norm(name), source_id if entity_type in source_scoped_types else "", prefix="kg")
 
 
 def add_entity(conn, entity_type: str, name: str, source_id: str | None, metadata: dict[str, Any], now: str) -> str:
@@ -161,17 +170,211 @@ def add_authority_relations(conn, chunk, ceid: str, now: str) -> None:
         )
 
 
+def guide_matter_name(title: str) -> str:
+    return re.sub(r"(?:临时)?服务指南$", "", title or "").strip() or title
+
+
+def material_name_from_row(row: dict[str, Any], headers: list[str]) -> str:
+    for key, value in row.items():
+        clean_key = re.sub(r"\s+|\*", "", str(key))
+        if any(marker in clean_key for marker in ("材料名称", "提交材料名称", "申请材料")):
+            return str(value or "").strip()
+    for key in headers[1:]:
+        value = str(row.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def add_service_guide_relations(conn, chunk, guide_eid: str, section_eid: str, now: str) -> None:
+    section = chunk["section_path"] or ""
+    text = (chunk["text"] or "").strip()
+    common = {
+        "document_id": chunk["document_id"],
+        "section_path": section,
+        "source_url": chunk["source_ref"],
+    }
+
+    if chunk["chunk_type"] == "service_guide_section":
+        add_relation(conn, guide_eid, "HAS_SECTION", section_eid, chunk["chunk_id"], 1.0, common, now)
+
+    if section == "适用范围" and text:
+        matter = guide_matter_name(chunk["title"] or "")
+        matter_eid = add_entity(conn, "Matter", matter, None, {**common, "scope": text}, now)
+        add_relation(conn, guide_eid, "APPLIES_TO", matter_eid, chunk["chunk_id"], 1.0, common, now)
+    elif section == "受理机构" and text:
+        organization = text.rstrip("。；; ")
+        org_eid = add_entity(conn, "Organization", organization, None, common, now)
+        add_relation(conn, guide_eid, "ACCEPTED_BY", org_eid, chunk["chunk_id"], 1.0, common, now)
+    elif section == "决定机构" and text:
+        organization = text.rstrip("。；; ")
+        org_eid = add_entity(conn, "Organization", organization, None, common, now)
+        add_relation(conn, guide_eid, "DECIDED_BY", org_eid, chunk["chunk_id"], 1.0, common, now)
+    elif section == "办结时限" and text:
+        duration_eid = add_entity(conn, "Duration", text, None, common, now)
+        add_relation(conn, guide_eid, "HAS_TIME_LIMIT", duration_eid, chunk["chunk_id"], 1.0, common, now)
+
+    if chunk["chunk_type"] != "table" or not chunk["table_json"]:
+        return
+    try:
+        table = json.loads(chunk["table_json"])
+    except json.JSONDecodeError:
+        return
+    headers = [str(header) for header in (table.get("headers") or [])]
+    for row in table.get("rows") or []:
+        if not isinstance(row, dict):
+            continue
+        material = material_name_from_row(row, headers)
+        if not material:
+            continue
+        material_eid = add_entity(conn, "Material", material, None, common, now)
+        add_relation(
+            conn,
+            guide_eid,
+            "REQUIRES_MATERIAL",
+            material_eid,
+            chunk["chunk_id"],
+            1.0,
+            {**common, "row": row},
+            now,
+        )
+
+
+def add_policy_attachment_material_relation(conn, chunk, attachment_eid: str, requirement_eid: str, now: str) -> None:
+    if chunk["chunk_type"] != "application_material_row" or not chunk["table_json"]:
+        return
+    try:
+        data = json.loads(chunk["table_json"])
+    except json.JSONDecodeError:
+        return
+    material = str(data.get("material_name") or "").strip()
+    if not material:
+        return
+    metadata = {
+        "document_id": chunk["document_id"],
+        "application_key": data.get("application_key"),
+        "application_type": data.get("section_path"),
+        "sequence": data.get("sequence"),
+        "marker": data.get("marker"),
+        "requirement": data.get("requirement"),
+        "source_url": chunk["source_ref"],
+    }
+    material_eid = add_entity(conn, "Material", material, None, metadata, now)
+    add_relation(
+        conn,
+        attachment_eid,
+        "REQUIRES_MATERIAL",
+        material_eid,
+        chunk["chunk_id"],
+        1.0,
+        metadata,
+        now,
+    )
+    add_relation(
+        conn,
+        requirement_eid,
+        "SPECIFIES_MATERIAL",
+        material_eid,
+        chunk["chunk_id"],
+        1.0,
+        metadata,
+        now,
+    )
+
+
+def add_policy_attachment_document_relations(conn, docs, doc_entities: dict[str, str], now: str) -> None:
+    for doc in docs:
+        if doc["document_type"] != "policy_attachment":
+            continue
+        attachment_eid = doc_entities.get(doc["document_id"])
+        if not attachment_eid:
+            continue
+        try:
+            trace = json.loads(doc["source_trace_json"] or "{}")
+        except json.JSONDecodeError:
+            trace = {}
+        parent_document_id = str(trace.get("parent_document_id") or "")
+        parent_eid = doc_entities.get(parent_document_id)
+        relationship_metadata = {
+            "attachment_url": doc["official_url"],
+            "parent_document_id": parent_document_id,
+            "parent_standard_no": trace.get("parent_standard_no"),
+            "parent_url": trace.get("parent_url"),
+        }
+        if parent_eid:
+            add_relation(
+                conn,
+                attachment_eid,
+                "ATTACHMENT_OF",
+                parent_eid,
+                None,
+                1.0,
+                relationship_metadata,
+                now,
+            )
+        matter_eid = add_entity(
+            conn,
+            "Matter",
+            "采矿权新立、延续、变更、注销申请资料",
+            None,
+            relationship_metadata,
+            now,
+        )
+        add_relation(
+            conn,
+            attachment_eid,
+            "IMPLEMENTS_MATERIAL_LIST_FOR",
+            matter_eid,
+            None,
+            1.0,
+            relationship_metadata,
+            now,
+        )
+        for link in trace.get("service_guide_links") or []:
+            if not isinstance(link, dict):
+                continue
+            guide_eid = doc_entities.get(str(link.get("document_id") or ""))
+            if not guide_eid:
+                continue
+            add_relation(
+                conn,
+                attachment_eid,
+                "SUPPORTS_GUIDE",
+                guide_eid,
+                None,
+                0.95,
+                {
+                    **relationship_metadata,
+                    "guide_title": link.get("title"),
+                    "guide_url": link.get("source_url"),
+                    "guide_url_date": link.get("url_date"),
+                    "application_key": link.get("application_key"),
+                    "application_section": link.get("application_section"),
+                    "relationship_scope": link.get("relationship_scope"),
+                    "conflict_policy": link.get("conflict_policy"),
+                },
+                now,
+            )
+
+
 def build_kg(db_path: Path) -> dict[str, int]:
     now = utc_now()
     with connect(db_path) as conn:
         init_kg(conn)
         docs = conn.execute("select * from documents").fetchall()
         doc_entities: dict[str, str] = {}
+        document_types: dict[str, str] = {}
         standard_code_entities: dict[str, str] = {}
         for doc in docs:
-            dtype = "Policy" if doc["source_type"] == "official_fulltext" else "Standard"
+            if doc["document_type"] == "policy_attachment":
+                dtype = "Attachment"
+            elif doc["document_type"] in {"service_guide", "administrative_service_guide"}:
+                dtype = "ServiceGuide"
+            else:
+                dtype = "Policy" if doc["source_type"] == "official_fulltext" else "Standard"
             eid = add_entity(conn, dtype, doc["title"], doc["document_id"], dict(doc), now)
             doc_entities[doc["document_id"]] = eid
+            document_types[doc["document_id"]] = doc["document_type"]
             if doc["standard_no"]:
                 code_eid = add_entity(conn, "StandardCode", doc["standard_no"], None, {"document_id": doc["document_id"]}, now)
                 standard_code_entities[norm(doc["standard_no"])] = code_eid
@@ -191,23 +394,64 @@ def build_kg(db_path: Path) -> dict[str, int]:
 
         chunks = conn.execute(
             """
-            select chunk_id, document_id, chunk_type, title, standard_no, section_path, clause_no, text, source_ref
+            select chunk_id, document_id, chunk_type, title, standard_no, section_path, clause_no,
+                   text, table_json, source_ref, validation_status
             from chunks
-            where chunk_type in ('clause', 'policy_clause', 'table')
+            where chunk_type in (
+              'clause', 'policy_clause', 'service_guide_section', 'attachment_overview',
+              'application_material_section', 'application_material_row', 'table'
+            )
+              and validation_status != 'empty_source_section'
             """
         ).fetchall()
         for chunk in chunks:
             doc_eid = doc_entities.get(chunk["document_id"])
             if not doc_eid:
                 continue
+            is_service_guide = document_types.get(chunk["document_id"]) in {
+                "service_guide",
+                "administrative_service_guide",
+            }
+            is_policy_attachment = document_types.get(chunk["document_id"]) == "policy_attachment"
             if chunk["chunk_type"] == "table":
                 name = chunk["section_path"] or chunk["text"][:80]
                 ceid = add_entity(conn, "Table", name, chunk["chunk_id"], {"document_id": chunk["document_id"]}, now)
                 add_relation(conn, doc_eid, "HAS_TABLE", ceid, chunk["chunk_id"], 1.0, {}, now)
+            elif is_service_guide:
+                name = chunk["section_path"] or chunk["text"][:80]
+                ceid = add_entity(
+                    conn,
+                    "GuideSection",
+                    name,
+                    chunk["chunk_id"],
+                    {"document_id": chunk["document_id"]},
+                    now,
+                )
+            elif is_policy_attachment:
+                name = chunk["section_path"] or chunk["text"][:80]
+                entity_type = (
+                    "MaterialRequirement"
+                    if chunk["chunk_type"] == "application_material_row"
+                    else "AttachmentSection"
+                )
+                ceid = add_entity(
+                    conn,
+                    entity_type,
+                    name,
+                    chunk["chunk_id"],
+                    {"document_id": chunk["document_id"]},
+                    now,
+                )
+                relation_type = "HAS_REQUIREMENT" if entity_type == "MaterialRequirement" else "HAS_SECTION"
+                add_relation(conn, doc_eid, relation_type, ceid, chunk["chunk_id"], 1.0, {}, now)
             else:
                 name = chunk["clause_no"] or chunk["section_path"] or chunk["text"][:80]
                 ceid = add_entity(conn, "Clause", name, chunk["chunk_id"], {"document_id": chunk["document_id"]}, now)
                 add_relation(conn, doc_eid, "HAS_CLAUSE", ceid, chunk["chunk_id"], 1.0, {}, now)
+            if is_service_guide:
+                add_service_guide_relations(conn, chunk, doc_eid, ceid, now)
+            if is_policy_attachment:
+                add_policy_attachment_material_relation(conn, chunk, doc_eid, ceid, now)
             text = chunk["text"] or ""
             for mineral in MINERAL_TERMS:
                 if mineral in text:
@@ -221,6 +465,8 @@ def build_kg(db_path: Path) -> dict[str, int]:
                 ref_eid = add_entity(conn, "StandardCode", code, None, {}, now)
                 add_relation(conn, doc_eid, "REFERENCES_STANDARD", ref_eid, chunk["chunk_id"], 0.75, {}, now)
             add_authority_relations(conn, chunk, ceid, now)
+
+        add_policy_attachment_document_relations(conn, docs, doc_entities, now)
 
         ecount = conn.execute("select count(*) from kg_entities").fetchone()[0]
         rcount = conn.execute("select count(*) from kg_relations").fetchone()[0]

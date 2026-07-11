@@ -20,6 +20,11 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from mining_qa.kb_build_utils import document_type_from_policy_level, split_clause_like_text, stable_id  # noqa: E402
 from mining_qa.knowledge_store import DEFAULT_DB_PATH, connect, utc_now  # noqa: E402
+from mining_qa.mnr_policy_allowlist import (  # noqa: E402
+    DEFAULT_ALLOWLIST_ARTIFACT,
+    load_allowlist_artifact,
+    policy_is_allowed,
+)
 
 
 CATEGORY_URL = "https://f.mnr.gov.cn/579/585/index_3553.html"
@@ -219,9 +224,9 @@ def insert_policy(conn, entry: dict[str, Any], detail_text: str, attachments: li
           document_id,title,standard_no,document_type,status,source_type,text_access,
           validation_status,visibility,review_status,publish_date,implementation_date,
           ingestion_time,updated_at,source_priority,source_trace_json,bibliographic_json,
-          quality_json,page_count,chunk_count,table_count,can_answer
+          quality_json,page_count,chunk_count,table_count,can_answer,official_url,source_platform
         ) values (?, ?, ?, ?, ?, 'official_fulltext', 'html_text', 'parsed',
-          'internal', 'approved_for_service', ?, ?, ?, ?, 120, ?, ?, ?, 0, ?, ?, ?)
+          'internal', 'approved_for_service', ?, ?, ?, ?, 120, ?, ?, ?, 0, ?, ?, ?, ?, ?)
         """,
         (
             doc_id,
@@ -239,6 +244,8 @@ def insert_policy(conn, entry: dict[str, Any], detail_text: str, attachments: li
             len(clause_chunks),
             len(attachments),
             1 if clause_chunks else 0,
+            url,
+            "自然资源部政策法规库",
         ),
     )
     rows = []
@@ -291,7 +298,14 @@ def main() -> int:
     parser.add_argument("--db", default=str(DEFAULT_DB_PATH))
     parser.add_argument("--limit", type=int, default=0, help="Limit documents for testing; 0 means all.")
     parser.add_argument("--no-attachments", action="store_true", help="Do not download attachments.")
+    parser.add_argument(
+        "--allowlist-artifact",
+        type=Path,
+        default=DEFAULT_ALLOWLIST_ARTIFACT,
+        help="Workbook-derived pre-2026 MNR valid-document allowlist artifact.",
+    )
     args = parser.parse_args()
+    allowlist_artifact = load_allowlist_artifact(args.allowlist_artifact)
 
     RAW_DIR.mkdir(parents=True, exist_ok=True)
     ATTACH_DIR.mkdir(parents=True, exist_ok=True)
@@ -324,9 +338,29 @@ def main() -> int:
     entries = deduped[: args.limit] if args.limit else deduped
 
     manifest_rows = []
+    skipped_rows = []
     now = utc_now()
     with connect(Path(args.db)) as conn:
         for idx, entry in enumerate(entries, 1):
+            meta = entry["metadata"]
+            allowed, governance_reason = policy_is_allowed(
+                meta.get("文号"),
+                meta.get("成文时间") or meta.get("发布日期"),
+                allowlist_artifact,
+            )
+            if not allowed:
+                skipped_rows.append(
+                    {
+                        "index": idx,
+                        "title": entry["title"],
+                        "url": entry["url"],
+                        "file_no": meta.get("文号", ""),
+                        "published_or_formed": meta.get("成文时间") or meta.get("发布日期") or "",
+                        "governance_reason": governance_reason,
+                    }
+                )
+                print(f"[{idx}/{len(entries)}] SKIP {entry['title']} reason={governance_reason}")
+                continue
             doc_id = stable_id("mnr_policy", entry["url"], prefix="policy")
             detail_data, detail_headers = fetch(entry["url"])
             detail_text_raw = decode_html(detail_data, detail_headers)
@@ -373,12 +407,17 @@ def main() -> int:
             writer.writerows(manifest_rows)
     manifest_json = MANIFEST_DIR / "mnr_mineral_policy_manifest.json"
     manifest_json.write_text(json.dumps(manifest_rows, ensure_ascii=False, indent=2), encoding="utf-8")
+    skipped_json = MANIFEST_DIR / "mnr_mineral_policy_skipped_by_allowlist.json"
+    skipped_json.write_text(json.dumps(skipped_rows, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     summary = {
         "category_url": CATEGORY_URL,
         "page_total": page_total,
         "document_count": len(manifest_rows),
         "manifest_csv": str(manifest_csv),
         "manifest_json": str(manifest_json),
+        "skipped_manifest_json": str(skipped_json),
+        "skipped_by_allowlist_count": len(skipped_rows),
+        "allowlist_artifact": str(args.allowlist_artifact),
         "raw_dir": str(RAW_DIR),
     }
     (LOG_DIR / "mnr_policy_ingest_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

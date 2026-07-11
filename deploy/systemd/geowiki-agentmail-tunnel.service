@@ -1,0 +1,30 @@
+[Unit]
+Description=geowiki AgentMail SSH SOCKS tunnel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=geowiki-tunnel
+Group=geowiki-tunnel
+EnvironmentFile=/etc/geowiki-agentmail-tunnel/tunnel.env
+ExecStart=/usr/bin/ssh -N -D ${LOCAL_SOCKS_BIND} -i /var/lib/geowiki-agentmail-tunnel/id_ed25519 -p ${OVERSEAS_SSH_PORT} -o AddressFamily=inet -o BatchMode=yes -o IdentitiesOnly=yes -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o TCPKeepAlive=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/var/lib/geowiki-agentmail-tunnel/known_hosts ${OVERSEAS_USER}@${OVERSEAS_HOST}
+Restart=always
+RestartSec=5
+TimeoutStopSec=10
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET
+LockPersonality=true
+MemoryMax=32M
+TasksMax=16
+
+[Install]
+WantedBy=multi-user.target

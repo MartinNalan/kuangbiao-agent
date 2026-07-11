@@ -4,17 +4,170 @@ KB agent should append progress updates here.
 
 ## Latest Status
 
-Date: 2026-07-10 08:45:30 +0800
+Date: 2026-07-11 14:18:50 +0800
 Role: KB agent
 Status: completed
 Summary:
-- Completed T011, T012, and T013 from `coordination/task_board.md`.
-- Added policy-authority retrieval intent expansion for `储量评审备案权限/负责机构` questions, including `采矿证 -> 采矿许可证` and `去哪个机构/谁负责 -> 自然资源主管部门负责` style mappings.
-- Added two high-value KG `RESPONSIBLE_FOR` relations from `自然资规〔2023〕6号` 第十条 with evidence chunk `chunk-d773de5f6908f935`.
-- Regression now checks that `我的采矿证是自然资源部颁发的，我的储量评审应该去哪个机构` ranks `自然资规〔2023〕6号` 第十条 in top 3 with the required quote.
-- Current real KB state: 388 documents, 28,104 chunks, 24,219 vectors, 25,307 KG entities, 45,919 KG relations.
-- `PYTHONPATH=src .venv/bin/python scripts/run_kb_regression.py` and `API_URL=http://127.0.0.1:18180 KB_URL=http://127.0.0.1:18181 PYTHONPATH=src .venv/bin/python scripts/run_api_regression.py` both passed.
-- Detailed completion record is appended below at `Date: 2026-07-10 08:45:30 +0800`.
+- Completed T018 after the T016/T017 dependencies and marked it `done` on `coordination/task_board.md`.
+- Parsed `自然资规〔2023〕4号` attachment 4 from its authoritative legacy DOC into one governed attachment document with 4 top-level application types, 8 leaf application tables, and 80 isolated required-material rows.
+- `采矿证延续需要提交什么材料？` now returns all 10 extension rows from attachment 4 without mixing new-establishment, change, or cancellation evidence; `采矿证办理应该依据哪个文件？` still ranks the parent policy first.
+- Final KB state: 155 documents, 26,752 chunks, 26,663 FTS rows, 22,778 local vectors, 22,778 dense embeddings, 23,514 KG entities, and 42,523 KG relations.
+- T018/T017/T016 validation, KB regression, and API regression all passed. `cloud_sync_required=true`; no cloud deployment was performed.
+
+Date: 2026-07-11 14:18:50 +0800
+Role: KB agent
+Status: completed
+Task: T018
+Summary:
+- Converted the authoritative 60 KiB legacy Word attachment with LibreOffice `24.2.7.2`, then parsed the converted OOXML table grid directly without OCR or model inference. Source SHA-256: `04d0dfa4e9ee8e00859b8ad6553adf932b99ad656854f066ba5dda5199791340`.
+- Reconstructed 2 cross-page physical Word tables as 1 logical table with 21 source material rows, 13 merge events, and 3 global submission rules. Unreadable fields: 0; ambiguous merged cells: 0; parser repairs: 0.
+- Preserved the four parent-policy application types: new establishment, extension, change, and cancellation. Change remains split into five source subtypes: expanded mining area, reduced mining area, main mineral/mining method, mining-right-holder name, and transfer.
+- Required rows by leaf type: new establishment 14; extension 10; cancellation 6; change-expanded area 13; change-reduced area 8; change-mineral/method 10; change-holder name 7; change-transfer 12. Total required row chunks: 80.
+- Inserted stable attachment document `attachment-05559e77efb3a35b` with 1 overview chunk, 4 top-level section chunks, 8 structured application tables, and 80 row-level material chunks: 93 chunks/FTS rows in total. All 93 chunks have local vectors and Aliyun `text-embedding-v4` embeddings.
+- Added explicit source roles to retrieval/API output: attachment evidence is `policy_attachment`, the parent document is `parent_policy`, and matching T017 sources remain `service_guide`.
+- Added graph links: `ATTACHMENT_OF=1`, `IMPLEMENTS_MATERIAL_LIST_FOR=1`, `SUPPORTS_GUIDE=17`, and attachment-level `REQUIRES_MATERIAL=80`, plus 94 T018 source entities and 389 evidence relations. The attachment links to parent document `policy-d4869b5b5bf8804f` and 17 matching mining-right service guides.
+- Compared all 17 linked 2025-07-29 service-guide pages against the 2023 attachment. Every pair has material-name/count differences; both sources are preserved by date and scope, with no row merging or silent overwrite. Detailed differences are in the JSON manifest and a human-readable Markdown summary.
+- Before/after counts: documents `154 -> 155`; chunks `26,659 -> 26,752`; FTS `26,570 -> 26,663`; local vectors `22,685 -> 22,778`; dense embeddings `22,685 -> 22,778`; KG entities `23,403 -> 23,514`; KG relations `42,114 -> 42,523`.
+Files changed/created:
+- `/home/nalanmading/My-project/my-1st-agent/scripts/ingest_mnr_mining_right_attachment.py`
+- `/home/nalanmading/My-project/my-1st-agent/src/mining_qa/query_understanding.py`
+- `/home/nalanmading/My-project/my-1st-agent/src/mining_qa/knowledge_store.py`
+- `/home/nalanmading/My-project/my-1st-agent/src/mining_qa/agent.py`
+- `/home/nalanmading/My-project/my-1st-agent/src/mining_qa/schemas.py`
+- `/home/nalanmading/My-project/my-1st-agent/scripts/build_chunk_vectors.py`
+- `/home/nalanmading/My-project/my-1st-agent/scripts/build_chunk_embeddings.py`
+- `/home/nalanmading/My-project/my-1st-agent/scripts/build_sqlite_kg.py`
+- `/home/nalanmading/My-project/my-1st-agent/scripts/run_kb_regression.py`
+- `/home/nalanmading/My-project/my-1st-agent/data/knowledge_base/processed/mnr_policy_attachments/policy-d4869b5b5bf8804f/采矿权申请资料清单及要求.docx`
+- `/home/nalanmading/My-project/my-1st-agent/data/knowledge_base/manifests/mnr_mining_right_attachment_materials.json`
+- `/home/nalanmading/My-project/my-1st-agent/data/knowledge_base/manifests/mnr_mining_right_attachment_materials.csv`
+- `/home/nalanmading/My-project/my-1st-agent/data/knowledge_base/manifests/t018_service_guide_comparison.json`
+- `/home/nalanmading/My-project/my-1st-agent/data/knowledge_base/manifests/t018_service_guide_comparison.md`
+- `/home/nalanmading/My-project/my-1st-agent/data/knowledge_base/logs/t018_mining_right_attachment_ingest_summary.json`
+Rollback backup:
+- `/home/nalanmading/My-project/my-1st-agent/data/private_backups/knowledge_base/knowledge_base.sqlite.pre_t018_20260711-141229.bak`
+Verification:
+- `PYTHONPATH=src .venv/bin/python -m compileall -q src scripts` passed; targeted `git diff --check` passed.
+- `PYTHONPATH=src .venv/bin/python scripts/ingest_mnr_mining_right_attachment.py --validate --require-indexes` passed with `PRAGMA integrity_check=ok` and exact T018 structure/index/relation counts.
+- `PYTHONPATH=src .venv/bin/python scripts/ingest_mnr_service_guides.py --validate --require-indexes` passed after the final T018 rebuild.
+- `PYTHONPATH=src /home/nalanmading/.venvs/codex/bin/python scripts/govern_mnr_policy_allowlist.py --validate --validation-ids data/knowledge_base/governance/t016_deleted_ids_20260711-131251.json` passed with zero residuals.
+- `KB_URL=http://127.0.0.1:18181 API_URL=http://127.0.0.1:18180 PYTHONPATH=src .venv/bin/python scripts/run_kb_regression.py` passed, including the complete 10-row extension answer, source-role assertions, parent-policy routing, and all earlier T016/T017 cases.
+- `KB_URL=http://127.0.0.1:18181 API_URL=http://127.0.0.1:18180 PYTHONPATH=src .venv/bin/python scripts/run_api_regression.py` passed.
+Cloud:
+- `cloud_sync_required=true`; no cloud deployment was performed.
+Next:
+- Continue retrieval tuning with additional real mining-right application questions.
+Blocked:
+- None.
+Questions:
+- None newly raised.
+
+Date: 2026-07-11 13:45:05 +0800
+Role: KB agent
+Status: completed
+Task: T017
+Summary:
+- Ingested the governed source directory `/home/nalanmading/下载/2. geowiki`: 41 Markdown files inspected, exactly 40 numbered guides accepted, and `_INDEX.md` rejected as an answer document while retained as the local corpus catalog.
+- Preserved 920 official sections, including 89 explicit empty-source sections. Inserted 920 section chunks plus 40 structured GFM application-material table chunks; only 831 non-empty sections and 40 tables entered FTS, local vectors, dense embeddings, and KG evidence indexes.
+- Reconciled source totals exactly: 40 application-material tables, 46 attachment links, 40 flowchart links, 4 declared corrected links, and 22 declared corrected text URLs. Metadata/parser repairs: 0; duplicate source URLs: 0; duplicate source page IDs: 0; asserted publication dates from URL dates: 0.
+- Added 40 documents, 960 chunks, 871 FTS rows, 871 local vectors, and 871 `text-embedding-v4`/Aliyun dense embeddings. Combined post-T016/T017 deltas were KG entities `22,380 -> 23,403` (+1,023) and KG relations `40,188 -> 42,114` (+1,926); 911 entities and 1,923 evidence relations are directly sourced from T017 chunks.
+- Added service-guide graph evidence: 40 `APPLIES_TO`, 40 `ACCEPTED_BY`, 40 `DECIDED_BY`, 183 `REQUIRES_MATERIAL`, and 40 `HAS_TIME_LIMIT` relations, plus guide sections, tables, standards, and mineral mentions. Empty-source sections have zero FTS, vector, embedding, or KG evidence records.
+- Added strict service-guide retrieval for application materials,办理流程, and办结时限. The four contract questions rank only the matching guide and relevant section/table evidence, with clickable `https://www.mnr.gov.cn/` URLs and source platform `自然资源部政务服务办事指南`.
+- T017 documents remain outside T016 allowlist scope: they use `document_type='service_guide'` and the separate service-guide source platform; the post-rebuild T016 validation still reports zero deleted-ID residuals and 33 remaining in-scope policy documents.
+Files changed/created:
+- `/home/nalanmading/My-project/my-1st-agent/scripts/ingest_mnr_service_guides.py`
+- `/home/nalanmading/My-project/my-1st-agent/src/mining_qa/query_understanding.py`
+- `/home/nalanmading/My-project/my-1st-agent/src/mining_qa/knowledge_store.py`
+- `/home/nalanmading/My-project/my-1st-agent/src/mining_qa/agent.py`
+- `/home/nalanmading/My-project/my-1st-agent/scripts/build_chunk_vectors.py`
+- `/home/nalanmading/My-project/my-1st-agent/scripts/build_chunk_embeddings.py`
+- `/home/nalanmading/My-project/my-1st-agent/scripts/build_sqlite_kg.py`
+- `/home/nalanmading/My-project/my-1st-agent/scripts/run_kb_regression.py`
+- `/home/nalanmading/My-project/my-1st-agent/data/knowledge_base/manifests/mnr_service_guide_manifest.json`
+- `/home/nalanmading/My-project/my-1st-agent/data/knowledge_base/manifests/mnr_service_guide_manifest.csv`
+- `/home/nalanmading/My-project/my-1st-agent/data/knowledge_base/logs/mnr_service_guide_ingest_summary.json`
+- `/home/nalanmading/My-project/my-1st-agent/data/knowledge_base/raw/mnr_service_guides/`
+Verification:
+- `PYTHONPATH=src .venv/bin/python -m compileall -q src scripts` passed.
+- `PYTHONPATH=src .venv/bin/python scripts/ingest_mnr_service_guides.py --validate --require-indexes` passed with `PRAGMA integrity_check=ok` and all expected source/index counts.
+- `PYTHONPATH=src /home/nalanmading/.venvs/codex/bin/python scripts/govern_mnr_policy_allowlist.py --validate --validation-ids data/knowledge_base/governance/t016_deleted_ids_20260711-131251.json` passed after the final rebuild.
+- `KB_URL=http://127.0.0.1:18181 API_URL=http://127.0.0.1:18180 PYTHONPATH=src .venv/bin/python scripts/run_kb_regression.py` passed, including all four T017 search and `/api/ask` questions.
+- `KB_URL=http://127.0.0.1:18181 API_URL=http://127.0.0.1:18180 PYTHONPATH=src .venv/bin/python scripts/run_api_regression.py` passed.
+Cloud:
+- `cloud_sync_required=true`; no cloud deployment was performed.
+Next:
+- T018 may now start against the stable post-T016/T017 database state.
+Blocked:
+- None.
+Questions:
+- None newly raised.
+
+Date: 2026-07-11 13:21:31 +0800
+Role: KB agent
+Status: completed
+Task: T016
+Summary:
+- Used `/home/nalanmading/下载/0. 继续有效文件.xls`, `Sheet1`, header row 3 as the authoritative pre-2026 allowlist. Read 222 non-empty rows and produced 222 unique normalized document numbers; workbook duplicate count was 0.
+- Audited 307 in-scope `official_fulltext` MNR policy documents. Retained 31 pre-2026 allowlisted documents, deleted 274 excluded documents, and left 2 documents published in 2026 untouched. Recovered or explicitly resolved all 14 blank-number records, repaired 1 retained malformed document number, and recorded 0 ambiguous classifications.
+- Recorded 9 duplicate document-number groups and 2 title conflicts as diagnostics; exact normalized document-number matching remained authoritative.
+- Deleted 2,405 chunks, 2,405 FTS rows, 2,405 local vectors, 2,405 dense embeddings, and all deleted-document KG evidence/source references. Removed 274 exclusive raw HTML files and 64 exclusive attachments; no shared-reference file was deleted, and 21 shared crawl-list pages were retained.
+- Before/after counts: documents `388 -> 114`; chunks `28,104 -> 25,699`; FTS `28,104 -> 25,699`; local vectors `24,219 -> 21,814`; dense embeddings `24,219 -> 21,814`; KG entities `25,307 -> 22,380`; KG relations `45,919 -> 40,188`.
+- Updated active MNR manifests from 307 to 33 rows and added workbook-derived allowlist enforcement to future MNR policy ingestion before detail attachments or DB insertion.
+Files changed/created:
+- `/home/nalanmading/My-project/my-1st-agent/src/mining_qa/mnr_policy_allowlist.py`
+- `/home/nalanmading/My-project/my-1st-agent/scripts/govern_mnr_policy_allowlist.py`
+- `/home/nalanmading/My-project/my-1st-agent/scripts/ingest_mnr_mineral_policies.py`
+- `/home/nalanmading/My-project/my-1st-agent/data/knowledge_base/governance/mnr_valid_document_allowlist.json`
+- `/home/nalanmading/My-project/my-1st-agent/data/knowledge_base/manifests/t016_policy_cleanup_dry_run_20260711-131251.json`
+- `/home/nalanmading/My-project/my-1st-agent/data/knowledge_base/manifests/t016_deleted_documents_20260711-131251.csv`
+- `/home/nalanmading/My-project/my-1st-agent/data/knowledge_base/manifests/t016_policy_cleanup_report_20260711-131251.json`
+- `/home/nalanmading/My-project/my-1st-agent/data/knowledge_base/governance/t016_deleted_ids_20260711-131251.json`
+Rollback backup:
+- `/home/nalanmading/My-project/my-1st-agent/data/private_backups/knowledge_base/knowledge_base.sqlite.pre_t016_20260711-131251.bak`
+Verification:
+- `PRAGMA integrity_check`: `ok`.
+- T016 validation reported zero residual documents, chunks, FTS rows, local vectors, dense embeddings, KG evidence relations, or KG source entities for deleted IDs.
+- `自然资规〔2023〕6号` remains active and the policy-authority tenth-section regression passed.
+- `PYTHONPATH=src /home/nalanmading/.venvs/codex/bin/python scripts/govern_mnr_policy_allowlist.py --validate --validation-ids data/knowledge_base/governance/t016_deleted_ids_20260711-131251.json` passed.
+- `KB_URL=http://127.0.0.1:18181 API_URL=http://127.0.0.1:18180 PYTHONPATH=src .venv/bin/python scripts/run_kb_regression.py` passed.
+- `KB_URL=http://127.0.0.1:18181 API_URL=http://127.0.0.1:18180 PYTHONPATH=src .venv/bin/python scripts/run_api_regression.py` passed.
+Cloud:
+- `cloud_sync_required=true`; no cloud deployment was performed.
+Next:
+- Execute T017 service-guide ingestion, then rebuild all indexes coherently and rerun T016 validation.
+Blocked:
+- None.
+Questions:
+- None newly raised.
+
+Date: 2026-07-10 13:01:19 +0800
+Role: KB agent
+Status: completed
+Summary:
+- Claimed, reviewed, and completed T015 from `coordination/task_board.md`.
+- No requirement blocker found. The chosen first-stage implementation is a versionable static JSON artifact at `src/mining_qa/domain_lexicon.json`, which matches the PRD/requirements allowance for static config before a later admin-maintained table.
+- Added active lexicon entries preserving `user_expression`, `canonical_term`, `intent_label`, `domain`, `positive_expansions`, `negative_terms`, `evidence_required_patterns`, `priority`, and `status`, plus stable IDs and timestamps.
+- Integrated lexicon loading and matching into `src/mining_qa/knowledge_store.py`: query expansion now adds canonical terms and positive expansions, authority questions can route through lexicon intent, and negative terms such as `油气`/`煤层气` are downranked when they are unrelated to solid-mineral authority questions.
+- Found and fixed one ranking bug during regression: matching `positive_expansions` for intent made `哪个标准规定了金矿基本工程间距？` look like a policy-authority query because `金矿` was an expansion for `大型金矿`. Intent matching now uses only `user_expression` and `canonical_term`; expansions remain recall terms only.
+- Updated `scripts/run_kb_regression.py` so isolated service ports follow `KB_URL`/`API_URL`, and added assertions that `大型金矿` authority retrieval is not polluted by unrelated oil/gas or coalbed methane evidence.
+Files changed/created:
+- `/home/nalanmading/My-project/my-1st-agent/src/mining_qa/domain_lexicon.json`
+- `/home/nalanmading/My-project/my-1st-agent/src/mining_qa/knowledge_store.py`
+- `/home/nalanmading/My-project/my-1st-agent/scripts/run_kb_regression.py`
+- `/home/nalanmading/My-project/my-1st-agent/docs/KB_BUILD_TASKS_20260709.md`
+- `/home/nalanmading/My-project/my-1st-agent/docs/KNOWLEDGE_BASE_MVP_RUNBOOK.md`
+- `/home/nalanmading/My-project/my-1st-agent/coordination/task_board.md`
+- `/home/nalanmading/My-project/my-1st-agent/coordination/kb_agent_status.md`
+Verification:
+- `PYTHONPATH=src .venv/bin/python -m compileall src scripts`
+- `KB_URL=http://127.0.0.1:18181 API_URL=http://127.0.0.1:18180 PYTHONPATH=src .venv/bin/python scripts/run_kb_regression.py`
+- `KB_URL=http://127.0.0.1:18181 API_URL=http://127.0.0.1:18180 PYTHONPATH=src .venv/bin/python scripts/run_api_regression.py`
+Next:
+- When lexicon entries grow, migrate the same schema from JSON to a managed SQLite table or admin import flow without changing retrieval semantics.
+Blocked:
+- No blocker.
+Questions:
+- None newly raised.
 
 Date: 2026-07-08
 Role: KB agent
@@ -142,6 +295,38 @@ Files changed/created:
 Next:
 - Extend the same authority-relation pattern to additional high-value policy clauses as real questions reveal them.
 - If policy authority questions grow, move the synonym/intent map from inline code into a small config file to simplify maintenance.
+Blocked:
+- No blocker.
+Questions:
+- None newly raised.
+
+Date: 2026-07-10 12:50:44 +0800
+Role: KB agent
+Status: completed
+Summary:
+- Claimed, reviewed, and completed T014 from `coordination/task_board.md`.
+- No requirement blocker found. The issue was confirmed as a hydration gap: MNR policy documents already stored stable official URLs in `source_trace_json.source_url` and chunk `source_ref`, but `documents.official_url` and `source_platform` were empty, so `/knowledge/search` and `/api/ask` could not render clickable policy source links.
+- Updated KB initialization/link hydration so `official_fulltext` MNR policy documents get `official_url=source_trace_json.source_url` and `source_platform=自然资源部政策法规库`.
+- Updated MNR policy ingest so future policy inserts write `official_url` and `source_platform` directly.
+- Updated manual hydration script and hydrated the existing SQLite DB: all 307 MNR `official_fulltext` documents now have official URLs; missing policy URL count is 0.
+- Added regression assertions for policy-authority search so the target `自然资规〔2023〕6号` hit must include an MNR official URL and source platform.
+- Verified the main QA API policy-authority answer renders a clickable source link for `自然资规〔2023〕6号`.
+Files changed/created:
+- `/home/nalanmading/My-project/my-1st-agent/src/mining_qa/knowledge_store.py`
+- `/home/nalanmading/My-project/my-1st-agent/scripts/ingest_mnr_mineral_policies.py`
+- `/home/nalanmading/My-project/my-1st-agent/scripts/hydrate_official_links.py`
+- `/home/nalanmading/My-project/my-1st-agent/scripts/run_kb_regression.py`
+- `/home/nalanmading/My-project/my-1st-agent/data/knowledge_base/` (ignored local DB hydrated)
+- `/home/nalanmading/My-project/my-1st-agent/coordination/task_board.md`
+- `/home/nalanmading/My-project/my-1st-agent/coordination/kb_agent_status.md`
+Verification:
+- `PYTHONPATH=src .venv/bin/python -m compileall src scripts`
+- `PYTHONPATH=src .venv/bin/python scripts/hydrate_official_links.py --sleep 0 --limit 0`
+- `PYTHONPATH=src .venv/bin/python scripts/run_kb_regression.py`
+- `API_URL=http://127.0.0.1:18180 KB_URL=http://127.0.0.1:18181 PYTHONPATH=src .venv/bin/python scripts/run_api_regression.py`
+- Manual API check: `我的采矿证是自然资源部颁发的，我的储量评审应该去哪个机构` returns source URL `https://f.mnr.gov.cn/202307/t20230728_2795789.html`.
+Next:
+- Keep future policy ingests using direct `official_url` writes so this does not regress.
 Blocked:
 - No blocker.
 Questions:

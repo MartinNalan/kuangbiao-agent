@@ -1,0 +1,25 @@
+[Unit]
+Description=geowiki public QA API and web application
+After=network-online.target redis-server.service kuangbiao-kb.service
+Wants=network-online.target redis-server.service kuangbiao-kb.service
+
+[Service]
+Type=simple
+User=kuangbiao
+Group=kuangbiao
+WorkingDirectory=/opt/kuangbiao-agent
+EnvironmentFile=/opt/kuangbiao-agent/.env
+Environment=PYTHONPATH=/opt/kuangbiao-agent/src
+ExecStart=/opt/kuangbiao-agent/.venv/bin/uvicorn mining_qa.api:app --host 127.0.0.1 --port 18080
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/kuangbiao-agent/data
+
+[Install]
+WantedBy=multi-user.target

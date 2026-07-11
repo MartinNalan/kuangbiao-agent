@@ -17,7 +17,15 @@ from mining_qa.knowledge_store import DEFAULT_DB_PATH, connect, utc_now  # noqa:
 
 
 VECTOR_DIM = 512
-CHUNK_TYPES = ("clause", "policy_clause", "table")
+CHUNK_TYPES = (
+    "clause",
+    "policy_clause",
+    "service_guide_section",
+    "attachment_overview",
+    "application_material_section",
+    "application_material_row",
+    "table",
+)
 
 
 def tokens(text: str) -> list[str]:
@@ -64,7 +72,12 @@ def main() -> int:
         )
         conn.execute("delete from chunk_vectors")
         rows = conn.execute(
-            "select chunk_id, title, standard_no, section_path, text from chunks where chunk_type in ({})".format(
+            """
+            select chunk_id, title, standard_no, section_path, text
+            from chunks
+            where chunk_type in ({})
+              and validation_status != 'empty_source_section'
+            """.format(
                 ",".join("?" for _ in CHUNK_TYPES)
             ),
             CHUNK_TYPES,

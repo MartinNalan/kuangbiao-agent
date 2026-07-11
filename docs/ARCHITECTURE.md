@@ -6,8 +6,14 @@
 Browser
   -> Frontend Web App
   -> Backend API
-  -> API Client / Customer System
-  -> Knowledge Retrieval Service
+External Agent / Customer System
+  -> Public Backend API
+Backend API
+  -> Application Database
+       -> Users / Sessions / Invitations / Email Verification
+       -> API Keys / Daily Usage / Quota Adjustments
+       -> Conversations / Request Records
+  -> Private Knowledge Retrieval Service
        -> Full-text Search
        -> Vector Search
        -> Knowledge Graph Query
@@ -23,14 +29,17 @@ Browser
 - 展示答案、引用、检索依据和反馈入口
 - 管理会话状态
 - 调用后端 API
-- 管理员后续使用前端处理 API Key、用量、补库任务和候选审核
+- 提供邀请码注册、登录和账号状态展示
+- 管理用户 API Key、每日配额、调整记录和调用示例
+- 管理员处理邀请码、用户状态和每日配额，后续扩展补库任务和候选审核
 
 ## 3. 后端
 
 职责：
 
 - 接收用户问题
-- 校验 API Key、限流和调用范围
+- 校验浏览器会话或用户 API Key、限流和调用范围
+- 原子预留、结算或退回每日问答次数
 - 判断问题是否属于矿产资源标准规范相关领域
 - 调用知识库检索接口
 - 组织检索结果
@@ -43,17 +52,37 @@ Browser
 
 ```text
 Request
-  -> Authentication / rate limit
+  -> Session or API Key authentication / rate limit
+  -> Reserve one account request for the current Asia/Shanghai day
   -> Domain relevance gate
-       -> If irrelevant: fixed refusal, no KB/LLM/OCR/web supplement
+       -> If irrelevant: fixed refusal, no KB/LLM/OCR/web supplement, consume one request
   -> Local KB retrieval
        -> If clause evidence exists: answer with citations
        -> If no clause evidence: return insufficient evidence
   -> Optional web metadata supplement
   -> Optional knowledge-gap task queued for background processing
+  -> Consume one request for every normal result; refund only on system error
 ```
 
 领域相关性判断应尽量低成本。优先使用规则、关键词和短分类模型；只有通过初筛后，才进入检索、联网、OCR、多模态或长上下文推理。
+
+### 3.1 应用数据库与每日配额
+
+用户系统使用独立应用数据库，不与私有知识库数据库混用。当前单机内测采用 SQLite WAL；当需要多 API 进程、多节点或更高写并发时迁移 PostgreSQL。
+
+应用数据库包含：
+
+- 用户、密码哈希、角色和账号状态。
+- 邀请码哈希、可用次数和有效期。
+- 邮箱验证码哈希、有效期、尝试次数、发送冷却和日发送上限。
+- 浏览器会话哈希和过期时间。
+- 用户 API Key 哈希、前缀和吊销状态。
+- 用户长期日上限、当日使用量、预留量和管理员追加次数。
+- 配额调整审计记录、会话消息、请求 ID、调用渠道和最终消费状态。
+
+密码采用 `scrypt`；会话令牌、邀请码、邮箱验证码和 API Key 均不保存明文。问答前以 SQLite `BEGIN IMMEDIATE` 原子预留 1 次，正常返回的回答、拒答、证据不足和补库排队都会消费该次数，只有系统异常退回。网页会话和账号下全部 API Key 共用配额，日期按 `Asia/Shanghai` 计算。旧 `API_KEYS` 和 JSON registry 仅作为内部兼容通道，不属于公开用户体系。
+
+AgentMail 可以通过 `AGENTMAIL_PROXY_URL` 使用独立 SOCKS/HTTP 代理。该配置只传给邮件客户端，禁止设置系统级全局代理；DeepSeek、DashScope、知识库和其他请求保持直连。部署可使用受 systemd 管理的 SSH SOCKS 隧道，海外出口仅需 OpenSSH，不与已有代理服务共享配置。
 
 ## 4. 知识库服务
 
@@ -75,17 +104,43 @@ MVP 当前实现：
 - clause-level chunks：标准、规范和政策文件的条款级证据。
 - SQLite KG：轻量知识图谱实体和关系。
 - SQLite local vector：确定性 hash 字符 n-gram 向量，作为可替换的 MVP 向量召回层。
-- Hybrid retrieval：全文、向量和图谱候选合并排序。
+- API-backed dense embedding：可选使用阿里云百炼/DashScope `text-embedding-v4` 写入独立 `chunk_embeddings` 表；缺失或失败时回退到 SQLite local vector。
+- Cascaded hybrid retrieval：全文、结构化字段和图谱优先，证据不足时再启动向量召回并统一排序。
+- Intent-aware retrieval：通过领域术语归一、查询扩展和证据可回答性校验，优先处理权限归属、标准适用、表格数值和条款差异类问题。
+- Query plan：本地确定性规则统一 `1/I/Ⅰ/一类型` 等写法，并输出候选标准范围、目标表格行和是否需要全量检索。
+- Conversation resolver：仅对包含代词、承接词或“其他文件”等标记的追问拼接上一轮用户问题；保存原问题，检索使用补全后的问题。
+- Low-confidence rewrite：首次检索未通过意图对应的证据门槛时，最多调用一次 LLM 生成检索改写，不让 LLM 先回答，也不默认运行 HyDE。
+- Vector fallback：稠密向量成功时不重复运行本地 hash；稠密向量不可用、目标文档无向量或调用失败时才回退。
 
-Elasticsearch/OpenSearch、ChromaDB/FAISS 和 Neo4j 仍是后续规模化或质量升级方向。Embedding Provider 必须可配置，不使用 `deepseek-v4-flash` 作为 embedding 模型。
+Elasticsearch/OpenSearch、ChromaDB/FAISS 和 Neo4j 仍是后续规模化或质量升级方向。Embedding Provider 必须可配置，不使用 `deepseek-v4-flash` 作为 embedding 模型；当前在线 embedding 默认适配阿里云百炼 OpenAI 兼容接口。
 
 接受的知识库架构分三层：
 
 - 最低兼容：结构化元数据 + 全文检索 + 标准目录查询 + 证据检索接口。
 - 推荐 MVP：关系型数据库或 SQLite + FTS5 + 本地/对象存储 + 后台 OCR/解析任务 + Knowledge API。
-- 增强架构：ChromaDB + 可配置 Embedding Provider + Neo4j + 混合检索。
+- 增强架构：ChromaDB + 可配置 Embedding Provider + Neo4j + reranker + 混合检索。
 
 外部知识库可以通过适配器接入，但必须转换为本项目的证据格式；缺少条款、页码、来源和质量状态时，问答模块应降级回答。
+
+意图增强检索流程：
+
+```text
+User question
+  -> conversation-dependent follow-up resolution
+  -> domain relevance check
+  -> domain_lexicon normalization
+  -> intent routing
+  -> schema candidate-standard routing
+  -> scoped full-text / structured-field / KG retrieval
+  -> answerability early exit, or dense-vector fallback
+  -> global fallback when scoped evidence is insufficient
+  -> one retrieval-only LLM rewrite when evidence remains insufficient
+  -> negative-term filtering and reranking
+  -> answerability check
+  -> answer generation or insufficient-evidence response
+```
+
+`domain_lexicon` 可以先由静态配置或 SQLite 表实现，后续迁移为管理员可维护的词库。字段至少包含用户表达、规范术语、意图标签、正向扩展、负面降权词、证据要求和优先级。
 
 ## 5. OCR 与版面解析
 
@@ -186,9 +241,13 @@ Question
 
 ## 8. 部署草案
 
-- 前端：静态资源或 Node 服务
-- 后端：Python API 服务
-- 知识库：独立服务
+- 前端：由公开 FastAPI 服务提供静态 SPA 资源
+- 后端：Python API 服务，仅由 Nginx 反向代理公开
+- 应用数据库：独立 SQLite，后续可迁移 PostgreSQL
+- 知识库：独立服务，仅监听 `127.0.0.1`
+- Redis：限流和后续任务队列
 - 域名：指向云服务器入口
 - HTTPS：通过 Nginx + 证书管理
-- 商业形态：API-first，前端主要用于内测、演示和管理
+- 开放形态：API-first，前端主要用于内测、调试和管理
+
+无域名内测时可通过服务器 IP 的 80 端口访问，但只允许邀请码用户参与。涉及真实账号和 API Key 的公开测试应尽快启用 HTTPS；启用 HTTPS 后将 `SESSION_COOKIE_SECURE=true`。

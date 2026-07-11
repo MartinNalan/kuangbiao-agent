@@ -11,6 +11,7 @@ It uses:
 - Local deterministic hashed Chinese character n-gram vectors for MVP vector retrieval.
 - SQLite `kg_entities` and `kg_relations` tables for the lightweight graph MVP.
 - Hybrid full-text + vector + graph ranking in `mining_qa.knowledge_store`.
+- JSON-backed `domain_lexicon` for query normalization, intent-aware retrieval, and negative evidence downranking.
 - A standalone FastAPI service under `/knowledge/*`.
 - Governed standard JSON outputs from `/home/nalanmading/My-project/ore_expert/knowledge_governance`.
 - MNR policy/law HTML and attachments downloaded from the official policy/law database category `矿产资源管理`.
@@ -29,6 +30,7 @@ data/knowledge_base/
   manifests/mnr_mineral_policy_manifest.json
   manifests/governed_standards_ingest_manifest.csv
   manifests/governed_standards_ingest_manifest.json
+src/mining_qa/domain_lexicon.json
 ```
 
 ## Rebuild The KB
@@ -42,6 +44,18 @@ PYTHONPATH=src .venv/bin/python scripts/build_sqlite_kg.py
 PYTHONPATH=src .venv/bin/python scripts/build_chunk_vectors.py
 ```
 
+Optional API-backed embedding:
+
+```bash
+# Smoke test a small paid batch first.
+PYTHONPATH=src .venv/bin/python scripts/build_chunk_embeddings.py --limit 20
+
+# Full rebuild after cost/range confirmation.
+PYTHONPATH=src .venv/bin/python scripts/build_chunk_embeddings.py --reset
+```
+
+This writes dense vectors to `chunk_embeddings` and keeps local hash vectors as fallback.
+
 Current expanded KB result:
 
 - Documents: 388
@@ -51,11 +65,13 @@ Current expanded KB result:
 - Standard/specification clause chunks: 20,910
 - Manual table chunks: 716
 - Policy documents with zero chunks: 0
+- MNR policy documents with official URLs: 307/307
 - Empty standard/specification clause numbers: 1,792/20,910 (8.57%)
 - Local hashed vectors: 24,219
 - SQLite KG entities: 25,307
 - SQLite KG relations: 45,919
 - High-value policy authority relations: `自然资规〔2023〕6号` 第十条 contains two `RESPONSIBLE_FOR` relations for `自然资源部` and `省级自然资源主管部门`.
+- Domain lexicon: first-stage JSON config seeded for `authority_responsibility`, `standard_selection`, `numeric_table_lookup`, and `clause_comparison` intents.
 
 ## Verify The KB
 
@@ -71,6 +87,7 @@ The regression covers:
 - Regulation-oriented hybrid search: `矿产资源法实施条例 战略性矿产资源目录`.
 - Standard-oriented hybrid search: `哪个标准规定了金矿基本工程间距？`.
 - Policy authority hybrid search: `我的采矿证是自然资源部颁发的，我的储量评审应该去哪个机构`.
+- Solid-mineral policy authority ranking: `我是一个大型的金矿，我的储量报告评审应该去哪个机构`, including downranking unrelated oil/gas and coalbed methane evidence.
 - `GET /knowledge/standards` policy catalog lookup.
 - Main QA API `/api/ask` end-to-end with KB retrieval stats.
 

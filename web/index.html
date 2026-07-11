@@ -3,118 +3,388 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>矿标智询</title>
+    <meta name="description" content="geowiki，一款专注地质领域的百科全搜" />
+    <title>geowiki</title>
+    <link rel="icon" href="data:," />
     <link rel="stylesheet" href="/static/styles.css" />
+    <script defer src="/static/vendor/lucide.min.js"></script>
+    <script defer src="/static/app.js"></script>
   </head>
   <body>
-    <div class="app-shell">
-      <aside class="sidebar">
-        <div class="brand">
-          <div class="brand-mark">矿</div>
+    <div id="toastRegion" class="toast-region" aria-live="polite"></div>
+
+    <section id="authScreen" class="auth-screen">
+      <div class="auth-context" aria-hidden="true">
+        <div class="strata strata-a"></div>
+        <div class="strata strata-b"></div>
+        <div class="strata strata-c"></div>
+        <div class="strata strata-d"></div>
+        <div class="auth-brand-lockup">
+          <div class="brand-symbol">G</div>
           <div>
-            <h1>矿标智询</h1>
-            <p>Mining Knowledge QA</p>
+            <strong>geowiki</strong>
+            <span>一款专注地质领域的百科全搜</span>
           </div>
         </div>
+        <div class="auth-context-copy">
+          <p class="auth-kicker">标准 · 规范 · 政策</p>
+          <h1>地质百科全搜</h1>
+          <p>内测服务</p>
+        </div>
+        <div class="core-index" aria-hidden="true">
+          <span>01</span><span>02</span><span>03</span><span>04</span><span>05</span>
+        </div>
+      </div>
 
-        <nav class="nav-tabs" aria-label="主视图">
-          <button class="nav-tab active" data-view="ask" type="button">问答</button>
-          <button class="nav-tab" data-view="standards" type="button">标准目录</button>
-        </nav>
+      <div class="auth-form-area">
+        <div class="auth-mobile-brand">
+          <div class="brand-symbol">G</div>
+          <div><strong>geowiki</strong><span>一款专注地质领域的百科全搜</span></div>
+        </div>
 
-        <section class="side-section">
-          <h2>最近问题</h2>
-          <div id="historyList" class="history-list"></div>
-        </section>
-      </aside>
-
-      <main class="workspace">
-        <section class="topbar">
-          <div>
-            <h2 id="viewTitle">专业问答</h2>
-            <p id="statusLine">本地知识库优先，证据不足时降级回答。</p>
+        <div class="auth-panel">
+          <div class="auth-heading">
+            <p class="eyebrow">INVITE-ONLY BETA</p>
+            <h2 id="authTitle">登录</h2>
+            <p id="authSubtitle">进入专业问答与开发者控制台</p>
           </div>
-          <a class="docs-link" href="/docs" target="_blank" rel="noreferrer">API Docs</a>
-        </section>
 
-        <section id="askView" class="view active">
-          <form id="askForm" class="query-panel">
-            <textarea id="questionInput" rows="4" placeholder="输入矿产资源、地质勘查、标准条款相关问题"></textarea>
-            <div class="query-actions">
-              <button id="askButton" type="submit">提交问题</button>
-            </div>
+          <div id="authModeControl" class="segmented-control" role="tablist" aria-label="登录或注册">
+            <button id="loginTab" class="segment active" type="button" role="tab" aria-selected="true">登录</button>
+            <button id="registerTab" class="segment" type="button" role="tab" aria-selected="false">邀请码注册</button>
+          </div>
+
+          <form id="loginForm" class="auth-form">
+            <label>
+              <span>账号</span>
+              <span class="input-shell"><i data-lucide="user-round"></i><input id="loginAccount" autocomplete="username" required placeholder="账号或邮箱" /></span>
+            </label>
+            <label>
+              <span>密码</span>
+              <span class="input-shell"><i data-lucide="lock-keyhole"></i><input id="loginPassword" type="password" autocomplete="current-password" minlength="8" required placeholder="至少 8 位" /></span>
+            </label>
+            <button id="loginButton" class="primary-command full-width" type="submit">
+              <span>登录</span><i data-lucide="arrow-right"></i>
+            </button>
           </form>
 
-          <section class="result-grid">
-            <article class="answer-panel">
-              <div class="panel-header">
-                <h3>答案</h3>
-                <span id="confidenceBadge" class="badge muted">未查询</span>
-              </div>
-              <div id="answerText" class="answer-text">等待提问。</div>
-              <div id="feedbackPanel" class="feedback-panel hidden">
-                <div class="feedback-actions" aria-label="回答反馈">
-                  <button id="satisfiedButton" class="secondary-button" type="button">满意</button>
-                  <button id="unsatisfiedButton" class="secondary-button" type="button">不满意</button>
-                </div>
-                <div id="feedbackDetail" class="feedback-detail hidden">
-                  <select id="feedbackReason">
-                    <option value="answer_too_vague">回答太笼统</option>
-                    <option value="wrong_standard">引用标准不对</option>
-                    <option value="wrong_clause">引用条款不对</option>
-                    <option value="missing_evidence">证据不足</option>
-                    <option value="quote_too_long">引用太长</option>
-                    <option value="format_issue">格式问题</option>
-                    <option value="other">其他</option>
-                  </select>
-                  <input id="feedbackComment" type="text" placeholder="补充说明，可选" />
-                  <button id="sendFeedbackButton" type="button">提交反馈</button>
-                </div>
-                <div id="feedbackStatus" class="feedback-status"></div>
-              </div>
-            </article>
-
-            <article class="meta-panel">
-              <div class="panel-header">
-                <h3>检索概况</h3>
-              </div>
-              <dl id="retrievalStats" class="stats">
-                <div><dt>全文</dt><dd>0</dd></div>
-                <div><dt>向量</dt><dd>0</dd></div>
-                <div><dt>图谱</dt><dd>0</dd></div>
-                <div><dt>联网</dt><dd>0</dd></div>
-              </dl>
-              <div id="limitations" class="limitations"></div>
-            </article>
-          </section>
-
-          <section class="sources-panel">
-            <div class="panel-header">
-              <h3>引用来源</h3>
+          <form id="registerForm" class="auth-form hidden">
+            <div class="form-row two-columns">
+              <label>
+                <span>邮箱</span>
+                <span class="input-shell"><i data-lucide="mail"></i><input id="registerEmail" type="email" autocomplete="email" required placeholder="name@example.com" /></span>
+              </label>
+              <label>
+                <span>称呼</span>
+                <span class="input-shell"><i data-lucide="badge-check"></i><input id="registerName" autocomplete="name" maxlength="40" required placeholder="显示名称" /></span>
+              </label>
             </div>
-            <div id="sourcesList" class="sources-list empty">暂无引用来源。</div>
-          </section>
+            <label>
+              <span>邀请码</span>
+              <span class="input-shell"><i data-lucide="ticket-check"></i><input id="registerInvite" autocomplete="one-time-code" required placeholder="KB-XXXX-XXXX-XXXX" /></span>
+            </label>
+            <label>
+              <span>邮箱验证码</span>
+              <span class="email-code-row">
+                <span class="input-shell"><i data-lucide="shield-check"></i><input id="registerEmailCode" autocomplete="one-time-code" inputmode="numeric" minlength="6" maxlength="6" pattern="[0-9]{6}" required placeholder="6 位验证码" /></span>
+                <button id="sendEmailCodeButton" class="secondary-command" type="button"><i data-lucide="send"></i><span>发送验证码</span></button>
+              </span>
+            </label>
+            <label>
+              <span>密码</span>
+              <span class="input-shell"><i data-lucide="lock-keyhole"></i><input id="registerPassword" type="password" autocomplete="new-password" minlength="8" required placeholder="至少 8 位" /></span>
+            </label>
+            <button id="registerButton" class="primary-command full-width" type="submit">
+              <span>注册 geowiki</span><i data-lucide="arrow-right"></i>
+            </button>
+          </form>
+
+          <p id="authError" class="form-error" role="alert"></p>
+          <p id="authFootnote" class="auth-footnote">注册需同时验证邀请码与邮箱</p>
+        </div>
+      </div>
+    </section>
+
+    <div id="appShell" class="app-shell hidden">
+      <aside id="sidebar" class="sidebar">
+        <div class="sidebar-brand">
+          <div class="brand-symbol small">G</div>
+          <div><strong>geowiki</strong><span>一款专注地质领域的百科全搜</span></div>
+          <button id="closeSidebarButton" class="icon-button mobile-only" type="button" title="关闭导航" aria-label="关闭导航"><i data-lucide="x"></i></button>
+        </div>
+
+        <button id="newChatButton" class="new-chat-button" type="button">
+          <i data-lucide="square-pen"></i><span>新建问答</span>
+        </button>
+
+        <nav class="primary-nav" aria-label="主要功能">
+          <button class="nav-item active" data-view="chat" type="button"><i data-lucide="message-square-text"></i><span>在线问答</span></button>
+          <button class="nav-item" data-view="standards" type="button"><i data-lucide="library-big"></i><span>标准目录</span></button>
+          <button class="nav-item" data-view="developer" type="button"><i data-lucide="braces"></i><span>开发者</span></button>
+          <button class="nav-item" data-view="usage" type="button"><i data-lucide="chart-no-axes-combined"></i><span>配额与用量</span></button>
+          <button id="adminNavItem" class="nav-item hidden" data-view="admin" type="button"><i data-lucide="shield-check"></i><span>管理后台</span></button>
+        </nav>
+
+        <section class="conversation-section">
+          <div class="section-label-row">
+            <span>最近会话</span>
+            <button id="refreshConversationsButton" class="tiny-icon-button" type="button" title="刷新会话" aria-label="刷新会话"><i data-lucide="refresh-cw"></i></button>
+          </div>
+          <div id="conversationList" class="conversation-list">
+            <p class="sidebar-empty">暂无会话</p>
+          </div>
         </section>
 
-        <section id="standardsView" class="view">
-          <form id="standardsForm" class="catalog-search">
-            <input id="standardQuery" type="search" placeholder="标准号或标准名称" />
-            <input id="standardNo" type="search" placeholder="标准号精确过滤" />
-            <select id="textAccess">
-              <option value="">正文状态</option>
+        <div class="sidebar-account">
+          <button id="accountMenuButton" class="account-button" type="button" aria-expanded="false">
+            <span id="accountAvatar" class="account-avatar">U</span>
+            <span class="account-copy"><strong id="accountName">用户</strong><small id="accountRole">内测用户</small></span>
+            <i data-lucide="chevrons-up-down"></i>
+          </button>
+          <div id="accountMenu" class="account-menu hidden">
+            <button id="changePasswordButton" type="button"><i data-lucide="key-round"></i><span>修改密码</span></button>
+            <button id="logoutButton" type="button"><i data-lucide="log-out"></i><span>退出登录</span></button>
+          </div>
+        </div>
+      </aside>
+
+      <div id="sidebarBackdrop" class="sidebar-backdrop hidden"></div>
+
+      <main class="main-workspace">
+        <header class="topbar">
+          <div class="topbar-title-row">
+            <button id="openSidebarButton" class="icon-button mobile-only" type="button" title="打开导航" aria-label="打开导航"><i data-lucide="menu"></i></button>
+            <div>
+              <h2 id="viewTitle">在线问答</h2>
+              <p id="viewSubtitle">矿产资源标准规范与相关政策</p>
+            </div>
+          </div>
+          <div class="topbar-actions">
+            <button id="quotaButton" class="quota-button" type="button" title="查看今日配额">
+              <i data-lucide="gauge"></i><span>今日剩余</span><strong id="topQuota">-- 次</strong>
+            </button>
+            <a class="icon-button" href="/docs" target="_blank" rel="noreferrer" title="OpenAPI 文档" aria-label="OpenAPI 文档"><i data-lucide="file-json-2"></i></a>
+          </div>
+        </header>
+
+        <section id="chatView" class="workspace-view active">
+          <div id="chatScroll" class="chat-scroll">
+            <div id="chatEmptyState" class="chat-empty-state">
+              <div class="empty-mark"><i data-lucide="scan-search"></i></div>
+              <h1>矿产资源标准与政策问答</h1>
+              <p>请选择一个问题，或直接输入需要核验的标准条款。</p>
+              <div class="suggestion-grid">
+                <button class="suggestion" type="button" data-question="金矿勘查Ⅰ类型的推荐工程间距是多少？"><span>工程间距</span><strong>金矿Ⅰ类型如何布置工程？</strong><i data-lucide="arrow-up-right"></i></button>
+                <button class="suggestion" type="button" data-question="矿体有限外推所依据的距离，在不同标准中有哪些具体差异？"><span>条款比较</span><strong>不同规范的矿体外推原则</strong><i data-lucide="arrow-up-right"></i></button>
+                <button class="suggestion" type="button" data-question="自然资源部颁发采矿许可证的矿山，储量评审备案由哪个部门负责？"><span>政策职责</span><strong>储量评审备案权限</strong><i data-lucide="arrow-up-right"></i></button>
+              </div>
+            </div>
+            <div id="messageList" class="message-list"></div>
+          </div>
+
+          <div class="composer-area">
+            <form id="askForm" class="composer">
+              <textarea id="questionInput" rows="1" maxlength="4000" placeholder="输入矿产资源、地质勘查、标准条款或政策问题" required></textarea>
+              <div class="composer-footer">
+                <span class="composer-scope"><i data-lucide="shield-check"></i>仅处理矿产资源相关问题</span>
+                <button id="askButton" class="send-button" type="submit" title="发送问题" aria-label="发送问题"><i data-lucide="arrow-up"></i></button>
+              </div>
+            </form>
+            <p class="composer-note">回答仅引用必要条款片段；正式业务决策请核验官方原文。</p>
+          </div>
+        </section>
+
+        <section id="standardsView" class="workspace-view content-view">
+          <div class="view-heading">
+            <div><p class="eyebrow">CATALOG</p><h1>标准目录</h1><p>查询当前知识库是否已收录目标标准。</p></div>
+          </div>
+          <form id="standardsForm" class="toolbar-form">
+            <label class="search-field"><i data-lucide="search"></i><input id="standardQuery" type="search" placeholder="标准号或标准名称" /></label>
+            <input id="standardNo" class="compact-input" type="search" placeholder="标准号精确过滤" />
+            <select id="textAccess" class="compact-select" aria-label="正文状态">
+              <option value="">全部正文状态</option>
               <option value="metadata_only">仅元数据</option>
               <option value="pdf_text">PDF 文本</option>
               <option value="ocr_text">OCR 文本</option>
               <option value="image_ocr_required">需要 OCR</option>
               <option value="unavailable">不可用</option>
             </select>
-            <button type="submit">查询</button>
+            <button class="primary-command" type="submit"><i data-lucide="search"></i><span>查询</span></button>
           </form>
-          <div id="standardsList" class="standards-list empty">等待查询。</div>
+          <div id="standardsStatus" class="result-status">输入条件后查询。</div>
+          <div id="standardsList" class="standards-table-wrap"></div>
+        </section>
+
+        <section id="developerView" class="workspace-view content-view">
+          <div class="view-heading with-action">
+            <div><p class="eyebrow">DEVELOPER</p><h1>API 接入</h1><p>通过 API Key 调用与网页一致的专业问答能力。</p></div>
+            <a class="secondary-command" href="/docs" target="_blank" rel="noreferrer"><i data-lucide="external-link"></i><span>OpenAPI</span></a>
+          </div>
+
+          <section class="content-section">
+            <div class="section-heading with-action">
+              <div><h2>API Keys</h2><p>密钥创建后只显示一次，服务端仅保存哈希值。</p></div>
+              <button id="createKeyButton" class="primary-command" type="button"><i data-lucide="plus"></i><span>创建密钥</span></button>
+            </div>
+            <div id="apiKeyList" class="key-list"></div>
+          </section>
+
+          <section class="content-section code-section">
+            <div class="section-heading">
+              <div><h2>快速调用</h2><p>网页问答与该账号创建的全部 API Key 共用每日次数。</p></div>
+            </div>
+            <div class="code-toolbar">
+              <div class="segmented-control compact" role="tablist" aria-label="代码语言">
+                <button class="segment active code-tab" type="button" data-language="curl">cURL</button>
+                <button class="segment code-tab" type="button" data-language="python">Python</button>
+                <button class="segment code-tab" type="button" data-language="javascript">JavaScript</button>
+              </div>
+              <button id="copyCodeButton" class="icon-text-button" type="button"><i data-lucide="copy"></i><span>复制</span></button>
+            </div>
+            <pre class="code-block"><code id="quickstartCode"></code></pre>
+          </section>
+
+          <section class="content-section">
+            <div class="section-heading"><div><h2>接口说明</h2><p>公开接口不会暴露知识库结构或全文资产。</p></div></div>
+            <div class="endpoint-list">
+              <div class="endpoint-row"><span class="method post">POST</span><code>/api/ask</code><p>提交专业问题，返回答案、引用、检索摘要与配额信息。</p></div>
+              <div class="endpoint-row"><span class="method get">GET</span><code>/api/standards</code><p>查询知识库内的标准目录。</p></div>
+              <div class="endpoint-row"><span class="method post">POST</span><code>/api/feedback</code><p>提交满意度和问题类型反馈。</p></div>
+              <div class="endpoint-row"><span class="method get">GET</span><code>/api/usage</code><p>查询账号当日配额和累计调用量。</p></div>
+            </div>
+          </section>
+        </section>
+
+        <section id="usageView" class="workspace-view content-view">
+          <div class="view-heading"><div><p class="eyebrow">USAGE</p><h1>配额与用量</h1><p>网页问答与 API 调用共用账号每日配额。</p></div></div>
+          <div class="metric-strip">
+            <div><span>今日剩余</span><strong id="usageRemaining">--</strong><small>当天未使用的问答次数</small></div>
+            <div><span>今日已用</span><strong id="usageUsed">--</strong><small>所有正常完成的问答</small></div>
+            <div><span>今日可用</span><strong id="usageEffectiveLimit">--</strong><small>基础上限加管理员追加次数</small></div>
+            <div><span>累计请求</span><strong id="usageTotalCalls">--</strong><small>网页与 API 的历史请求总数</small></div>
+          </div>
+          <section class="content-section">
+            <div class="section-heading"><div><h2>配额调整记录</h2><p>管理员修改日上限或追加当日次数时保留操作原因。</p></div></div>
+            <div class="data-table-wrap">
+              <table class="data-table">
+                <thead><tr><th>时间</th><th>类型</th><th>生效日期</th><th>原因</th><th>变化</th></tr></thead>
+                <tbody id="quotaAdjustmentTableBody"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section id="adminView" class="workspace-view content-view">
+          <div class="view-heading"><div><p class="eyebrow">ADMIN</p><h1>管理后台</h1><p>管理内测邀请、用户状态、每日配额和回答反馈。</p></div></div>
+          <section class="content-section">
+            <div class="section-heading with-action">
+              <div><h2>邀请码</h2><p>建议每名测试用户使用独立邀请码。</p></div>
+              <button id="createInviteButton" class="primary-command" type="button"><i data-lucide="ticket-plus"></i><span>创建邀请码</span></button>
+            </div>
+            <div class="data-table-wrap">
+              <table class="data-table">
+                <thead><tr><th>标记</th><th>前缀</th><th>使用情况</th><th>到期时间</th><th>状态</th></tr></thead>
+                <tbody id="invitationTableBody"></tbody>
+              </table>
+            </div>
+          </section>
+          <section class="content-section">
+            <div class="section-heading"><div><h2>用户</h2><p>日上限和追加次数调整均写入审计记录。</p></div></div>
+            <div class="data-table-wrap">
+              <table class="data-table">
+                <thead><tr><th>用户</th><th>日上限</th><th>今日已用</th><th>追加</th><th>剩余</th><th>状态</th><th>操作</th></tr></thead>
+                <tbody id="userTableBody"></tbody>
+              </table>
+            </div>
+          </section>
+          <section class="content-section">
+            <div class="section-heading"><div><h2>回答反馈</h2><p>程序与检索问题可直接处理，证据或知识内容变更需进入知识库审核。</p></div></div>
+            <div class="data-table-wrap">
+              <table class="data-table feedback-table">
+                <thead><tr><th>时间</th><th>问题</th><th>反馈</th><th>处理通道</th><th>用户</th><th>状态</th><th>操作</th></tr></thead>
+                <tbody id="feedbackTableBody"></tbody>
+              </table>
+            </div>
+          </section>
         </section>
       </main>
     </div>
 
-    <script src="/static/app.js"></script>
+    <dialog id="keyDialog" class="app-dialog">
+      <form method="dialog" class="dialog-shell">
+        <div class="dialog-header"><div><p class="eyebrow">API KEY</p><h2 id="keyDialogTitle">创建 API Key</h2></div><button class="icon-button" value="cancel" title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></div>
+        <div id="keyCreateForm" class="dialog-body">
+          <label><span>密钥名称</span><input id="keyNameInput" maxlength="80" placeholder="例如：本地 Agent" /></label>
+        </div>
+        <div id="keySecretPanel" class="dialog-body hidden">
+          <p>请立即保存，关闭后无法再次查看。</p>
+          <div class="secret-value"><code id="newKeyValue"></code><button id="copyKeyButton" class="icon-button" type="button" title="复制密钥" aria-label="复制密钥"><i data-lucide="copy"></i></button></div>
+        </div>
+        <div class="dialog-actions">
+          <button class="secondary-command" value="cancel">关闭</button>
+          <button id="confirmCreateKeyButton" class="primary-command" type="button"><i data-lucide="key-round"></i><span>创建</span></button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="inviteDialog" class="app-dialog">
+      <form method="dialog" class="dialog-shell">
+        <div class="dialog-header"><div><p class="eyebrow">INVITATION</p><h2 id="inviteDialogTitle">创建邀请码</h2></div><button class="icon-button" value="cancel" title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></div>
+        <div id="inviteCreateForm" class="dialog-body">
+          <label><span>标记</span><input id="inviteLabelInput" maxlength="80" placeholder="例如：第一轮内测" /></label>
+          <div class="form-row two-columns">
+            <label><span>可用次数</span><input id="inviteMaxUsesInput" type="number" min="1" max="100" value="1" /></label>
+            <label><span>有效天数</span><input id="inviteDaysInput" type="number" min="1" max="365" value="30" /></label>
+          </div>
+        </div>
+        <div id="inviteSecretPanel" class="dialog-body hidden">
+          <p>邀请码只显示这一次，请发送给对应测试用户。</p>
+          <div class="secret-value"><code id="newInviteValue"></code><button id="copyInviteButton" class="icon-button" type="button" title="复制邀请码" aria-label="复制邀请码"><i data-lucide="copy"></i></button></div>
+        </div>
+        <div class="dialog-actions">
+          <button class="secondary-command" value="cancel">关闭</button>
+          <button id="confirmCreateInviteButton" class="primary-command" type="button"><i data-lucide="ticket-plus"></i><span>创建</span></button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="quotaDialog" class="app-dialog">
+      <form method="dialog" class="dialog-shell">
+        <div class="dialog-header"><div><p class="eyebrow">QUOTA</p><h2>调整用户配额</h2></div><button class="icon-button" value="cancel" title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></div>
+        <div class="dialog-body">
+          <p id="quotaTargetName"></p>
+          <div class="segmented-control quota-mode-control" role="tablist" aria-label="配额调整方式">
+            <button class="segment active quota-mode" type="button" data-mode="limit">修改每日上限</button>
+            <button class="segment quota-mode" type="button" data-mode="bonus">增加今日次数</button>
+          </div>
+          <label><span id="quotaValueLabel">新的每日上限</span><input id="quotaValueInput" type="number" min="1" step="1" placeholder="10" /></label>
+          <label><span>原因</span><input id="quotaReasonInput" maxlength="200" placeholder="例如：扩大专项测试范围" /></label>
+        </div>
+        <div class="dialog-actions"><button class="secondary-command" value="cancel">取消</button><button id="confirmQuotaButton" class="primary-command" type="button"><i data-lucide="save"></i><span>确认调整</span></button></div>
+      </form>
+    </dialog>
+
+    <dialog id="passwordDialog" class="app-dialog">
+      <form method="dialog" class="dialog-shell">
+        <div class="dialog-header"><div><p class="eyebrow">SECURITY</p><h2>修改密码</h2></div><button class="icon-button" value="cancel" title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></div>
+        <div class="dialog-body">
+          <label><span>当前密码</span><input id="currentPasswordInput" type="password" autocomplete="current-password" /></label>
+          <label><span>新密码</span><input id="newPasswordInput" type="password" minlength="8" autocomplete="new-password" /></label>
+        </div>
+        <div class="dialog-actions"><button class="secondary-command" value="cancel">取消</button><button id="confirmPasswordButton" class="primary-command" type="button"><i data-lucide="save"></i><span>保存</span></button></div>
+      </form>
+    </dialog>
+
+    <dialog id="feedbackDialog" class="app-dialog">
+      <form method="dialog" class="dialog-shell">
+        <div class="dialog-header"><div><p class="eyebrow">FEEDBACK</p><h2>处理回答反馈</h2></div><button class="icon-button" value="cancel" title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></div>
+        <div class="dialog-body">
+          <p id="feedbackDialogQuestion" class="dialog-question"></p>
+          <label><span>状态</span><select id="feedbackStatusInput"><option value="open">待处理</option><option value="in_progress">处理中</option><option value="kb_review">待 KB 审核</option><option value="resolved">已解决</option><option value="dismissed">已忽略</option></select></label>
+          <label><span>处理记录</span><textarea id="feedbackResolutionInput" maxlength="1000" rows="4" placeholder="记录定位结果、修改内容或审核结论"></textarea></label>
+        </div>
+        <div class="dialog-actions"><button class="secondary-command" value="cancel">取消</button><button id="confirmFeedbackButton" class="primary-command" type="button"><i data-lucide="save"></i><span>保存</span></button></div>
+      </form>
+    </dialog>
   </body>
 </html>

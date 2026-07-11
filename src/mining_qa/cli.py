@@ -20,7 +20,7 @@ async def run(question: str) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Ask the Mining Knowledge QA agent.")
+    parser = argparse.ArgumentParser(description="Ask geowiki a geology-domain question.")
     parser.add_argument("question", help="Question to ask")
     args = parser.parse_args()
     asyncio.run(run(args.question))

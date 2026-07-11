@@ -6,7 +6,7 @@ Confirmed cross-agent decisions should be recorded here.
 
 ### 2026-07-08
 
-- Product Chinese name is tentatively `矿标智询`; project code remains `Mining Knowledge QA`.
+- Product display name is `geowiki`; the Chinese subtitle is `一款专注地质领域的百科全搜`.
 - MVP knowledge base prioritizes schema, standard catalog query, and Elasticsearch full-text search.
 - ChromaDB vector search and Neo4j graph search are later enhancements.
 - `deepseek-v4-flash` is used for generation, not embedding.
@@ -27,6 +27,11 @@ Confirmed cross-agent decisions should be recorded here.
 - Upload/candidate/review workflows are schema/stub level for MVP; governed standards search and catalog come first.
 - First governed-standard ingestion should include all governed outputs, but mark them `visibility=internal` by default, not externally public cloud content.
 - Knowledge base assets are a protected moat: raw files, OCR text, chunk text, indexes, DB files, catalog internals, and KB APIs must not be publicly exposed. Commercialization exposes only the controlled QA API output.
+
+### 2026-07-11
+
+- `/home/nalanmading/下载/0. 继续有效文件.xls` is the authoritative validity allowlist for previously web-crawled MNR files published before 2026. Pre-2026 crawled files absent from the workbook must be removed from the active knowledge base and all derived retrieval artifacts, and the ingest flow must prevent them from being reintroduced. Files published in 2026 or later are outside this cleanup rule.
+- The 40 numbered Markdown files under `/home/nalanmading/下载/2. geowiki` form a separate official MNR mineral-service-guide corpus and must be ingested as structured, internally visible service-guide documents. `_INDEX.md` is a corpus manifest only. These guides are outside the pre-2026 normative-document allowlist cleanup rule.
 
 ## Pending
 

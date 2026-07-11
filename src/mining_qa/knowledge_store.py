@@ -8,14 +8,20 @@ import sqlite3
 import uuid
 from collections import Counter
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
+
+from .config import get_settings
+from .embedding_provider import EmbeddingProvider, cosine_dense, embedding_config
+from .query_understanding import QueryPlan, canonical_exploration_type, understand_query
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_KB_ROOT = PROJECT_ROOT / "data" / "knowledge_base"
 DEFAULT_DB_PATH = DEFAULT_KB_ROOT / "db" / "knowledge_base.sqlite"
+DOMAIN_LEXICON_PATH = Path(__file__).with_name("domain_lexicon.json")
 QUOTE_LIMIT = 260
 VECTOR_DIM = 512
 
@@ -184,8 +190,34 @@ def official_source(standard_no: str | None) -> tuple[str | None, str | None]:
 
 
 def hydrate_official_urls(conn: sqlite3.Connection) -> None:
+    policy_rows = conn.execute(
+        """
+        select document_id, source_trace_json
+        from documents
+        where source_type = 'official_fulltext'
+          and (official_url is null or official_url = '')
+        """
+    ).fetchall()
+    for row in policy_rows:
+        try:
+            trace = json.loads(row["source_trace_json"] or "{}")
+        except json.JSONDecodeError:
+            trace = {}
+        source_url = trace.get("source_url")
+        if source_url:
+            conn.execute(
+                "update documents set official_url = ?, source_platform = ? where document_id = ?",
+                (source_url, "自然资源部政策法规库", row["document_id"]),
+            )
+
     rows = conn.execute(
-        "select document_id, standard_no from documents where standard_no is not null and (official_url is null or official_url = '')"
+        """
+        select document_id, standard_no
+        from documents
+        where standard_no is not null
+          and source_type != 'official_fulltext'
+          and (official_url is null or official_url = '')
+        """
     ).fetchall()
     for row in rows:
         platform, url = official_source(row["standard_no"])
@@ -194,6 +226,56 @@ def hydrate_official_urls(conn: sqlite3.Connection) -> None:
                 "update documents set official_url = ?, source_platform = ? where document_id = ?",
                 (url, platform, row["document_id"]),
             )
+
+
+@lru_cache(maxsize=1)
+def domain_lexicon() -> list[dict[str, Any]]:
+    if not DOMAIN_LEXICON_PATH.exists():
+        return []
+    try:
+        data = json.loads(DOMAIN_LEXICON_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    entries = [entry for entry in data if isinstance(entry, dict) and entry.get("status") == "active"]
+    return sorted(entries, key=lambda entry: int(entry.get("priority") or 0), reverse=True)
+
+
+def matched_lexicon_entries(query: str, intent_label: str | None = None) -> list[dict[str, Any]]:
+    matched = []
+    for entry in domain_lexicon():
+        if intent_label and entry.get("intent_label") != intent_label:
+            continue
+        probes = [entry.get("user_expression"), entry.get("canonical_term")]
+        if any(probe and str(probe) in query for probe in probes):
+            matched.append(entry)
+    return matched
+
+
+def lexicon_query_expansions(query: str) -> list[str]:
+    expansions: list[str] = []
+    for entry in matched_lexicon_entries(query):
+        expansions.append(str(entry.get("canonical_term") or ""))
+        expansions.extend(str(term) for term in (entry.get("positive_expansions") or []) if term)
+    return [term for term in expansions if term]
+
+
+def query_has_intent(query: str, intent_label: str) -> bool:
+    return bool(matched_lexicon_entries(query, intent_label=intent_label))
+
+
+def lexicon_negative_terms(query: str, intent_label: str | None = None) -> list[str]:
+    terms: list[str] = []
+    for entry in matched_lexicon_entries(query, intent_label=intent_label):
+        terms.extend(str(term) for term in (entry.get("negative_terms") or []) if term)
+    deduped: list[str] = []
+    seen = set()
+    for term in terms:
+        if term not in seen:
+            deduped.append(term)
+            seen.add(term)
+    return deduped
 
 
 def split_evidence_sentences(text: str) -> list[str]:
@@ -210,6 +292,28 @@ def split_evidence_sentences(text: str) -> list[str]:
 
 def quote_text(text: str, query: str = "", limit: int = QUOTE_LIMIT, max_sentences: int = 3) -> str:
     clean = re.sub(r"\s+", " ", text).strip()
+    targeted_patterns: list[str] = []
+    if "无限外推" in query:
+        infinite_match = re.search(r"(b\)\s*无限外推：.*?经验工程间距\s*1/2\s*尖推。)", clean)
+        if infinite_match:
+            finite_match = re.search(r"(普查阶段.*?实际工程间距\s*的\s*1/4\s*平推处理。)", clean)
+            quote = "".join(
+                part.group(1).strip()
+                for part in (finite_match, infinite_match)
+                if part is not None
+            )
+            return quote if len(quote) <= limit else quote[:limit].rstrip() + "..."
+    if any(term in query for term in ("真实性", "弄虚作假")):
+        targeted_patterns.append(r"(矿业权人应当对其报送的储量报告的真实性负责，不得弄虚作假。)")
+    if "采矿权" in query and any(term in query for term in ("申请材料", "申请资料", "资料清单", "附件4")):
+        targeted_patterns.append(
+            r"(自然资源部负责的矿业权.*?按照本通知附件2探矿权申请资料清单及要求、附件4采矿权申请资料清单及要求执行。)"
+        )
+    for pattern in targeted_patterns:
+        match = re.search(pattern, clean)
+        if match:
+            quote = match.group(1).strip()
+            return quote if len(quote) <= limit else quote[:limit].rstrip() + "..."
     if len(clean) <= limit:
         return clean
     priority_terms = [term for term in ["起草单位", "起草人", "发布", "实施", "代替", "替代"] if term in query]
@@ -248,7 +352,93 @@ def normalize_table_cell(value: Any) -> str:
     return cell
 
 
-def table_quote(table_json: str | None, fallback: str, query: str = "", limit: int = QUOTE_LIMIT) -> str:
+def _target_table_quote(matrix: list[Any], caption: str, plan: QueryPlan, limit: int) -> str | None:
+    target_type = plan.target_exploration_type
+    if not target_type:
+        return None
+
+    normalized_rows = [
+        [normalize_table_cell(cell) for cell in row]
+        for row in matrix
+        if isinstance(row, list) and any(str(cell).strip() for cell in row)
+    ]
+    target_index = -1
+    first_data_index = -1
+    for index, row in enumerate(normalized_rows):
+        row_type = canonical_exploration_type(row[0]) if row else None
+        if row_type and first_data_index < 0:
+            first_data_index = index
+        if row_type == target_type:
+            target_index = index
+            break
+    if target_index < 0:
+        return None
+
+    target_row = normalized_rows[target_index]
+    header_rows = normalized_rows[:first_data_index]
+    labels = ["勘查类型"]
+    for column in range(1, len(target_row)):
+        parts: list[str] = []
+        for row in header_rows:
+            if column >= len(row):
+                continue
+            value = row[column]
+            if not value or value == "勘查类型" or "工程间距" in value or value in parts:
+                continue
+            parts.append(value)
+        labels.append("-".join(parts[-2:]) or f"第{column}列")
+
+    measurements = []
+    for column, value in enumerate(target_row[1:], start=1):
+        label = labels[column] if column < len(labels) else f"第{column}列"
+        distance = value.replace("~", "～")
+        measurements.append(f"{label} {distance} m")
+    if not measurements:
+        return None
+
+    title = caption.strip() or "参考基本勘查工程间距"
+    text = f"{title}。控制资源量勘查工程间距：{target_type}类型；" + "；".join(measurements) + "。"
+    return text if len(text) <= limit else text[:limit].rstrip() + "..."
+
+
+def _service_material_table_quote(matrix: list[Any], caption: str, limit: int) -> str | None:
+    rows = [row for row in matrix if isinstance(row, list) and any(str(cell).strip() for cell in row)]
+    if len(rows) < 2:
+        return None
+    headers = [normalize_table_cell(cell).replace("*", "") for cell in rows[0]]
+    material_index = next(
+        (
+            index
+            for index, header in enumerate(headers)
+            if any(marker in header for marker in ("材料名称", "提交材料名称", "申请材料"))
+        ),
+        1 if len(headers) > 1 else 0,
+    )
+    lines = [caption.strip() or "申请材料目录"]
+    for row in rows[1:]:
+        if material_index >= len(row):
+            continue
+        material = re.sub(r"\s+", " ", str(row[material_index])).strip()
+        if not material:
+            continue
+        sequence = re.sub(r"\s+", "", str(row[0])).strip() if row else ""
+        line = f"{sequence}. {material}" if sequence else material
+        candidate = "\n".join([*lines, line])
+        if len(candidate) > limit:
+            break
+        lines.append(line)
+    if len(lines) == 1:
+        return None
+    return "\n".join(lines)
+
+
+def table_quote(
+    table_json: str | None,
+    fallback: str,
+    query: str = "",
+    limit: int = QUOTE_LIMIT,
+    plan: QueryPlan | None = None,
+) -> str:
     if not table_json:
         return quote_text(fallback, query, limit)
     try:
@@ -258,6 +448,15 @@ def table_quote(table_json: str | None, fallback: str, query: str = "", limit: i
 
     caption = table.get("caption") or ""
     matrix = table.get("matrix") or []
+    query_plan = plan or understand_query(query)
+    target_quote = _target_table_quote(matrix, str(caption), query_plan, limit)
+    if target_quote:
+        return target_quote
+    if query_plan.intent == "service_materials":
+        material_quote = _service_material_table_quote(matrix, str(caption), limit)
+        if material_quote:
+            return material_quote
+
     lines: list[str] = []
     if caption:
         lines.append(str(caption).strip())
@@ -323,19 +522,7 @@ def is_policy_management_query(query: str) -> bool:
 
 
 def is_policy_authority_query(query: str) -> bool:
-    return any(term in query for term in ("哪个机构", "去哪个机构", "谁负责", "哪一级部门", "哪个部门", "权限", "负责")) and any(
-        term in query
-        for term in (
-            "储量评审",
-            "储量报告评审",
-            "储量报告",
-            "评审备案",
-            "采矿证",
-            "采矿许可证",
-            "勘查许可证",
-            "矿产资源储量",
-        )
-    )
+    return understand_query(query).intent == "authority_responsibility"
 
 
 def is_standard_or_technical_query(query: str) -> bool:
@@ -343,8 +530,13 @@ def is_standard_or_technical_query(query: str) -> bool:
 
 
 def query_terms(query: str) -> list[str]:
+    plan = understand_query(query)
+    normalized_query = plan.normalized_query
     terms: list[str] = []
-    raw_terms = re.findall(r"[A-Za-z0-9]+(?:/[A-Za-z0-9]+)?(?:[-.][A-Za-z0-9]+)*|[\u4e00-\u9fff]{2,}", query)
+    raw_terms = re.findall(
+        r"[A-Za-z0-9]+(?:/[A-Za-z0-9]+)?(?:[-.][A-Za-z0-9]+)*|[\u4e00-\u9fff]{2,}",
+        normalized_query,
+    )
     stopwords = [
         "关于",
         "哪个",
@@ -408,6 +600,28 @@ def query_terms(query: str) -> list[str]:
         "矿产资源法",
         "采矿许可证",
         "勘查许可证",
+        "采矿权延续登记",
+        "采矿权申请资料清单及要求",
+        "探矿权首次登记",
+        "采矿许可变更（开采方式）",
+        "矿产资源储量评审备案",
+        "矿产资源开采方案",
+        "申请材料",
+        "申请资料",
+        "申请材料目录",
+        "申请材料提交",
+        "办理基本流程",
+        "办理方式",
+        "办结时限",
+        "附件4",
+        "办理依据",
+        "矿业权人",
+        "真实性负责",
+        "不得弄虚作假",
+        "无限外推",
+        "经验工程间距1/2尖推",
+        "勘查实施方案",
+        "评审或审查",
         "储量评审备案",
         "矿产资源储量评审备案",
         "评审备案范围和权限",
@@ -424,7 +638,7 @@ def query_terms(query: str) -> list[str]:
         "采矿证": ["采矿许可证"],
         "储量评审": ["矿产资源储量评审备案", "评审备案范围和权限"],
         "储量报告评审": ["矿产资源储量评审备案", "评审备案范围和权限"],
-        "储量报告": ["矿产资源储量报告", "矿产资源储量评审备案", "评审备案范围和权限"],
+        "储量报告": ["矿产资源储量报告"],
         "去哪个机构": ["谁负责", "负责", "自然资源主管部门负责"],
         "哪个机构": ["谁负责", "负责", "自然资源主管部门负责"],
         "哪一级部门": ["省级自然资源主管部门负责", "自然资源部负责"],
@@ -440,12 +654,16 @@ def query_terms(query: str) -> list[str]:
                 reduced = reduced.replace(stopword, " ")
             terms.extend(x for x in re.split(r"\s+", reduced) if len(x) >= 2)
         for phrase in key_phrases:
-            if phrase in term or phrase in query:
+            if phrase in term or phrase in normalized_query:
                 terms.append(phrase)
         for source, replacements in synonyms.items():
-            if source in term or source in query:
+            if source in term or source in normalized_query:
                 terms.extend(replacements)
-    if is_policy_authority_query(query):
+    if plan.target_exploration_type:
+        ascii_type = {"Ⅰ": "I", "Ⅱ": "II", "Ⅲ": "III"}[plan.target_exploration_type]
+        terms.extend([f"{plan.target_exploration_type}类型", ascii_type])
+    terms.extend(lexicon_query_expansions(normalized_query))
+    if plan.intent == "authority_responsibility":
         terms.extend(
             [
                 "自然资规〔2023〕6号",
@@ -454,6 +672,54 @@ def query_terms(query: str) -> list[str]:
                 "省级自然资源主管部门",
                 "自然资源部负责本级已颁发勘查许可证或采矿许可证",
                 "其他由省级自然资源主管部门负责",
+            ]
+        )
+    elif plan.intent == "service_materials":
+        terms.extend(plan.candidate_title_terms)
+        if "自然资规〔2023〕4号" not in plan.standard_numbers:
+            terms.extend(["申请材料", "申请材料目录", "提交材料名称", "材料名称"])
+        else:
+            terms.extend(
+                [
+                    "自然资规〔2023〕4号",
+                    "采矿权延续登记",
+                    "采矿权申请资料清单及要求",
+                    "附件4",
+                    "申请材料",
+                ]
+            )
+    elif plan.intent == "service_procedure_basis":
+        terms.extend(plan.candidate_title_terms)
+        if "自然资规〔2023〕4号" not in plan.standard_numbers:
+            terms.extend(["办理基本流程", "办理方式", "申请材料提交"])
+        else:
+            terms.extend(
+                [
+                    "自然资规〔2023〕4号",
+                    "矿产资源勘查开采登记管理",
+                    "采矿权登记",
+                    "采矿权申请资料清单及要求",
+                ]
+            )
+    elif plan.intent == "service_time_limit":
+        terms.extend([*plan.candidate_title_terms, "办结时限", "工作日"])
+    elif plan.intent == "projection_numeric_rule":
+        terms.extend(
+            [
+                "DZ/T 0338.1-2020",
+                "6.2.2.1",
+                "无限外推",
+                "经验工程间距1/2尖推",
+            ]
+        )
+    elif plan.intent == "legal_responsibility":
+        terms.extend(
+            [
+                "国令第839号",
+                "第四十三条",
+                "矿业权人",
+                "储量报告的真实性负责",
+                "不得弄虚作假",
             ]
         )
     deduped: list[str] = []
@@ -466,7 +732,11 @@ def query_terms(query: str) -> list[str]:
 
 
 def fts_query(query: str) -> str:
-    terms = query_terms(query)
+    terms = [
+        term
+        for term in query_terms(query)
+        if not re.fullmatch(r"[0-9IVXⅠⅡⅢ]+", term, flags=re.IGNORECASE)
+    ]
     if not terms:
         return ""
     escaped = [term.replace('"', '""') for term in terms[:8]]
@@ -503,6 +773,301 @@ def cosine_sparse(left: dict[int, float], right_json: str) -> float:
     except json.JSONDecodeError:
         return 0.0
     return sum(left.get(int(idx), 0.0) * float(value) for idx, value in right)
+
+
+def parse_dense_vector(vector_json: str) -> list[float]:
+    try:
+        values = json.loads(vector_json)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(values, list):
+        return []
+    return [float(value) for value in values]
+
+
+def table_has_exploration_type(table_json: str | None, target_type: str | None) -> bool:
+    if not table_json or not target_type:
+        return False
+    try:
+        table = json.loads(table_json)
+    except json.JSONDecodeError:
+        return False
+    for row in table.get("matrix") or []:
+        if isinstance(row, list) and row and canonical_exploration_type(row[0]) == target_type:
+            return True
+    return False
+
+
+def row_has_engineering_distance_evidence(row: sqlite3.Row, plan: QueryPlan) -> bool:
+    if plan.intent != "engineering_distance_lookup":
+        return False
+    title = row["title"] or ""
+    if plan.candidate_title_terms and not any(term in title for term in plan.candidate_title_terms):
+        return False
+    section = row["section_path"] or ""
+    text = row["text"] or ""
+    context = f"{section}\n{text}"
+    if "工程间距" not in context or not any(term in context for term in ("表 F.1", "表F.1", "参考基本勘查工程间距")):
+        return False
+    if not plan.target_exploration_type:
+        return True
+    if table_has_exploration_type(row["table_json"], plan.target_exploration_type):
+        return True
+
+    markers = {
+        "Ⅰ": ("I", "Ⅰ", "工", "1"),
+        "Ⅱ": ("II", "Ⅱ", "2"),
+        "Ⅲ": ("III", "Ⅲ", "3"),
+    }[plan.target_exploration_type]
+    marker_pattern = "|".join(re.escape(marker) for marker in markers)
+    distance_pattern = r"\d+(?:\.\d+)?\s*[~～-]\s*\d+(?:\.\d+)?"
+    return bool(
+        re.search(
+            rf"(?:^|\n)\s*(?:{marker_pattern})\s*(?:\n|\t|\|)+\s*{distance_pattern}",
+            text,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+STRICT_EVIDENCE_INTENTS = {
+    "engineering_distance_lookup",
+    "service_materials",
+    "service_procedure_basis",
+    "service_time_limit",
+    "projection_numeric_rule",
+    "legal_responsibility",
+    "authority_responsibility",
+}
+
+
+def row_matches_candidate_title(row: sqlite3.Row, plan: QueryPlan) -> bool:
+    if not plan.candidate_title_terms:
+        return True
+    title = row["title"] or ""
+    return any(term in title for term in plan.candidate_title_terms)
+
+
+def service_application_section_terms(plan: QueryPlan) -> tuple[str, ...]:
+    query = plan.normalized_query
+    if any(term in query for term in ("延续", "续期")):
+        return ("附件4 > 延续 >",)
+    if "注销" in query:
+        return ("附件4 > 注销 >",)
+    if any(term in query for term in ("首次", "新立")):
+        return ("附件4 > 新立 >",)
+    if "变更" in query or any(term in query for term in ("转让", "转移")):
+        if "扩大" in query:
+            return ("附件4 > 变更 > 扩大矿区范围 >",)
+        if "缩小" in query:
+            return ("附件4 > 变更 > 缩小矿区范围 >",)
+        if any(term in query for term in ("开采矿种", "开采主矿种", "开采方式")):
+            return ("附件4 > 变更 > 开采主矿种、开采方式 >",)
+        if "采矿权人名称" in query:
+            return ("附件4 > 变更 > 采矿权人名称 >",)
+        if any(term in query for term in ("转让", "转移")):
+            return ("附件4 > 变更 > 转让 >",)
+    return ()
+
+
+def row_has_service_material_evidence(row: sqlite3.Row, plan: QueryPlan) -> bool:
+    title = row["title"] or ""
+    standard_no = row["standard_no"] or ""
+    section = row["section_path"] or ""
+    text = row["text"] or ""
+    context = f"{title} {section} {text}"
+    if row["document_type"] in {"service_guide", "administrative_service_guide"}:
+        return (
+            row["validation_status"] != "empty_source_section"
+            and row_matches_candidate_title(row, plan)
+            and (section == "申请材料" or section.startswith("申请材料 >"))
+        )
+    if row["document_type"] == "policy_attachment":
+        section_terms = service_application_section_terms(plan)
+        return (
+            row["validation_status"] != "empty_source_section"
+            and row_matches_candidate_title(row, plan)
+            and row["chunk_type"] == "application_material_row"
+            and bool(section_terms)
+            and any(section.startswith(term) for term in section_terms)
+        )
+    return (
+        "自然资规〔2023〕4号" in standard_no
+        and "采矿权申请资料清单" in context
+        and "延续" in context
+        and "附件4" in context
+    )
+
+
+def row_has_service_procedure_evidence(row: sqlite3.Row, plan: QueryPlan) -> bool:
+    title = row["title"] or ""
+    standard_no = row["standard_no"] or ""
+    section = row["section_path"] or ""
+    text = row["text"] or ""
+    context = f"{title} {section} {text}"
+    if row["document_type"] in {"service_guide", "administrative_service_guide"}:
+        return (
+            row["validation_status"] != "empty_source_section"
+            and row_matches_candidate_title(row, plan)
+            and any(term in section for term in ("办理基本流程", "办理方式", "申请材料提交"))
+        )
+    return (
+        "自然资规〔2023〕4号" in standard_no
+        and "矿产资源勘查开采登记管理" in title
+        and "采矿权" in context
+        and any(term in context for term in ("申请资料", "登记管理", "附件4"))
+    )
+
+
+def row_has_service_time_limit_evidence(row: sqlite3.Row, plan: QueryPlan) -> bool:
+    if row["document_type"] not in {"service_guide", "administrative_service_guide"}:
+        return False
+    return (
+        row["validation_status"] != "empty_source_section"
+        and row_matches_candidate_title(row, plan)
+        and "办结时限" in (row["section_path"] or "")
+        and bool((row["text"] or "").strip())
+    )
+
+
+def row_has_projection_numeric_evidence(row: sqlite3.Row) -> bool:
+    standard_no = (row["standard_no"] or "").replace(" ", "").upper()
+    clause = row["clause_no"] or ""
+    text = re.sub(r"\s+", "", row["text"] or "")
+    return (
+        standard_no == "DZ/T0338.1-2020"
+        and (clause == "6.2.2.1" or "6.2.2.1" in text)
+        and "无限外推" in text
+        and "经验工程间距1/2尖推" in text
+    )
+
+
+def row_has_legal_responsibility_evidence(row: sqlite3.Row) -> bool:
+    standard_no = row["standard_no"] or ""
+    clause = row["clause_no"] or ""
+    text = re.sub(r"\s+", "", row["text"] or "")
+    return (
+        "国令第839号" in standard_no
+        and (clause == "第四十三条" or "第四十三条" in text)
+        and "矿业权人" in text
+        and "储量报告的真实性负责" in text
+        and "不得弄虚作假" in text
+    )
+
+
+def row_has_authority_evidence(row: sqlite3.Row) -> bool:
+    text = re.sub(r"\s+", "", row["text"] or "")
+    return (
+        "自然资源部负责本级已颁发勘查许可证或采矿许可证" in text
+        and "其他由省级自然资源主管部门负责" in text
+    )
+
+
+def row_matches_query_plan_evidence(row: sqlite3.Row, plan: QueryPlan) -> bool:
+    if plan.intent == "engineering_distance_lookup":
+        return row_has_engineering_distance_evidence(row, plan)
+    if plan.intent == "service_materials":
+        return row_has_service_material_evidence(row, plan)
+    if plan.intent == "service_procedure_basis":
+        return row_has_service_procedure_evidence(row, plan)
+    if plan.intent == "service_time_limit":
+        return row_has_service_time_limit_evidence(row, plan)
+    if plan.intent == "projection_numeric_rule":
+        return row_has_projection_numeric_evidence(row)
+    if plan.intent == "legal_responsibility":
+        return row_has_legal_responsibility_evidence(row)
+    if plan.intent == "authority_responsibility":
+        return row_has_authority_evidence(row)
+    return True
+
+
+def query_plan_score(row: sqlite3.Row, plan: QueryPlan) -> float:
+    score = 0.0
+    title = row["title"] or ""
+    section = row["section_path"] or ""
+    text = row["text"] or ""
+    if plan.candidate_title_terms:
+        if any(term in title for term in plan.candidate_title_terms):
+            score += 8.0
+        else:
+            score -= 6.0
+    if plan.intent == "engineering_distance_lookup":
+        if any(term in f"{section} {text}" for term in ("表 F.1", "表F.1", "参考基本勘查工程间距")):
+            score += 6.0
+        if row["chunk_type"] == "table":
+            score += 3.0
+        if row_has_engineering_distance_evidence(row, plan):
+            score += 10.0
+    elif plan.intent == "service_materials":
+        if row["document_type"] == "policy_attachment":
+            score += 18.0
+        if row["document_type"] in {"service_guide", "administrative_service_guide"}:
+            score += 10.0
+        if "自然资规〔2023〕4号" in (row["standard_no"] or ""):
+            score += 7.0
+        if section == "申请材料" or section.startswith("申请材料 >"):
+            score += 7.0
+        if row["chunk_type"] == "table":
+            score += 7.0
+        if row["chunk_type"] == "application_material_row":
+            score += 16.0
+        if any(section.startswith(term) for term in service_application_section_terms(plan)):
+            score += 12.0
+        if row_has_service_material_evidence(row, plan):
+            score += 12.0
+        if "自然资规〔2023〕6号" in (row["standard_no"] or ""):
+            score -= 10.0
+    elif plan.intent == "service_procedure_basis":
+        if row["document_type"] in {"service_guide", "administrative_service_guide"}:
+            score += 10.0
+        if "自然资规〔2023〕4号" in (row["standard_no"] or ""):
+            score += 8.0
+        if "矿产资源勘查开采登记管理" in title:
+            score += 5.0
+        if "办理基本流程" in section:
+            score += 10.0
+        elif "办理方式" in section:
+            score += 7.0
+        elif "申请材料提交" in section:
+            score += 6.0
+        if row_has_service_procedure_evidence(row, plan):
+            score += 12.0
+        if "自然资规〔2023〕6号" in (row["standard_no"] or ""):
+            score -= 10.0
+    elif plan.intent == "service_time_limit":
+        if row["document_type"] in {"service_guide", "administrative_service_guide"}:
+            score += 10.0
+        if "办结时限" in section:
+            score += 12.0
+        if row_has_service_time_limit_evidence(row, plan):
+            score += 12.0
+    elif plan.intent == "projection_numeric_rule":
+        if (row["standard_no"] or "").replace(" ", "").upper() == "DZ/T0338.1-2020":
+            score += 8.0
+        if row["clause_no"] == "6.2.2.1":
+            score += 8.0
+        if row_has_projection_numeric_evidence(row):
+            score += 15.0
+    elif plan.intent == "legal_responsibility":
+        if "国令第839号" in (row["standard_no"] or ""):
+            score += 8.0
+        if row["clause_no"] == "第四十三条":
+            score += 8.0
+        if row_has_legal_responsibility_evidence(row):
+            score += 15.0
+        if "评审备案范围和权限" in f"{section} {text}":
+            score -= 12.0
+    elif plan.intent == "authority_responsibility" and row_has_authority_evidence(row):
+        score += 12.0
+    elif plan.intent == "related_documents" and plan.focus_terms:
+        context = f"{title} {section} {text}"
+        anchor = max(plan.focus_terms, key=len)
+        if anchor in context:
+            score += 10.0
+        else:
+            score -= 8.0
+        score += sum(2.0 for term in plan.focus_terms if term != anchor and term in context)
+    return score
 
 
 def lexical_score(row: sqlite3.Row, query: str, idx: int) -> float:
@@ -575,6 +1140,18 @@ def intent_score(row: sqlite3.Row, query: str) -> float:
             score += 3.0
         if "矿产资源储量评审备案" in text and "负责" in text:
             score += 2.0
+        evidence_text = " ".join([title, standard_no, section, text])
+        is_target_authority_evidence = (
+            "自然资源部负责本级已颁发勘查许可证或采矿许可证" in text
+            or "明确评审备案范围和权限" in section
+            or row["clause_no"] == "十、"
+        )
+        for negative in lexicon_negative_terms(query, intent_label="authority_responsibility"):
+            if negative and negative not in query and negative in evidence_text and not is_target_authority_evidence:
+                score -= 3.0
+        if any(term in query for term in ("大型金矿", "金矿", "固体矿产")):
+            if any(term in evidence_text for term in ("油气", "煤层气")) and not is_target_authority_evidence:
+                score -= 30.0
     return score
 
 
@@ -598,6 +1175,19 @@ def row_to_document(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def source_role(row: sqlite3.Row) -> str:
+    document_type = row["document_type"] or ""
+    if document_type == "policy_attachment":
+        return "policy_attachment"
+    if document_type in {"service_guide", "administrative_service_guide"}:
+        return "service_guide"
+    if row["standard_no"] == "自然资规〔2023〕4号":
+        return "parent_policy"
+    if document_type in {"law", "regulation", "department_rule", "policy_document"}:
+        return "policy_document"
+    return "standard_or_other"
+
+
 def table_count(conn: sqlite3.Connection, table_name: str) -> int:
     exists = conn.execute(
         "select 1 from sqlite_master where type in ('table', 'virtual table') and name = ?",
@@ -619,6 +1209,7 @@ class KnowledgeStore:
             chunk_count = conn.execute("select count(*) from chunks").fetchone()[0]
             candidate_count = conn.execute("select count(*) from candidates").fetchone()[0]
             vector_count = table_count(conn, "chunk_vectors")
+            embedding_count = table_count(conn, "chunk_embeddings")
             kg_entity_count = table_count(conn, "kg_entities")
             kg_relation_count = table_count(conn, "kg_relations")
         return {
@@ -630,12 +1221,15 @@ class KnowledgeStore:
             "chunk_count": chunk_count,
             "candidate_count": candidate_count,
             "vector_count": vector_count,
+            "embedding_count": embedding_count,
             "kg_entity_count": kg_entity_count,
             "kg_relation_count": kg_relation_count,
         }
 
     def search(self, payload: dict[str, Any]) -> dict[str, Any]:
         query = str(payload.get("query") or "").strip()
+        plan = understand_query(query)
+        retrieval_query = plan.retrieval_query or plan.normalized_query or query
         filters = payload.get("filters") or {}
         options = payload.get("options") or {}
         top_k = int(options.get("top_k") or 10)
@@ -643,91 +1237,90 @@ class KnowledgeStore:
         recall_limit = max(top_k * 20, 60)
         include_full_text = bool(options.get("include_full_text"))
 
-        where = ["d.visibility in ('internal', 'public')"]
-        params: list[Any] = []
+        base_where = ["d.visibility in ('internal', 'public')"]
+        base_params: list[Any] = []
         standard_no = filters.get("standard_no")
         if standard_no:
-            where.append("d.standard_no = ?")
-            params.append(standard_no)
+            base_where.append("d.standard_no = ?")
+            base_params.append(standard_no)
         statuses = filters.get("status") or []
         if isinstance(statuses, str):
             statuses = [statuses]
         if statuses:
             placeholders = ",".join("?" for _ in statuses)
-            where.append(f"d.status in ({placeholders})")
-            params.extend(statuses)
+            base_where.append(f"d.status in ({placeholders})")
+            base_params.extend(statuses)
         doc_types = filters.get("document_types") or []
         if isinstance(doc_types, str):
             doc_types = [doc_types]
         if doc_types:
             placeholders = ",".join("?" for _ in doc_types)
-            where.append(f"d.document_type in ({placeholders})")
-            params.extend(doc_types)
+            base_where.append(f"d.document_type in ({placeholders})")
+            base_params.extend(doc_types)
 
-        results: list[sqlite3.Row] = []
+        scope_document_ids: list[str] = []
+        scope_applied = False
+        vector_ran = False
         with connect(self.db_path) as conn:
-            match = fts_query(query)
-            if match:
-                sql = f"""
-                    select c.*, d.document_type, d.status, d.official_url, d.source_platform, bm25(chunks_fts) as rank
-                    from chunks_fts
-                    join chunks c on c.chunk_id = chunks_fts.chunk_id
-                    join documents d on d.document_id = c.document_id
-                    where chunks_fts match ? and {' and '.join(where)}
-                    order by rank
-                    limit ?
-                """
-                try:
-                    results = conn.execute(sql, [match, *params, recall_limit]).fetchall()
-                except sqlite3.OperationalError:
-                    results = []
-            if len(results) < recall_limit and query:
-                like_terms = query_terms(query)[:5] or [query]
-                like_where = ["(" + " or ".join(["c.text like ? or c.title like ? or c.standard_no like ?" for _ in like_terms]) + ")"]
-                like_params: list[Any] = []
-                for term in like_terms:
-                    pattern = f"%{term}%"
-                    like_params.extend([pattern, pattern, pattern])
-                sql = f"""
-                    select c.*, d.document_type, d.status, d.official_url, d.source_platform, 0.0 as rank
-                    from chunks c
-                    join documents d on d.document_id = c.document_id
-                    where {' and '.join(where + like_where)}
-                    order by length(c.text) asc
-                    limit ?
-                """
-                seen = {row["chunk_id"] for row in results}
-                for row in conn.execute(sql, [*params, *like_params, recall_limit]).fetchall():
-                    if row["chunk_id"] not in seen:
-                        results.append(row)
-                    if len(results) >= recall_limit:
-                        break
+            where, params, scope_document_ids = self._candidate_scope(
+                conn,
+                plan,
+                base_where,
+                base_params,
+            )
+            scope_applied = bool(scope_document_ids)
+            candidate_rows = self._lexical_and_graph_candidates(
+                conn,
+                retrieval_query,
+                where,
+                params,
+                recall_limit,
+            )
+
+            if scope_applied and not self._route_evidence_found(candidate_rows, plan):
+                where = list(base_where)
+                params = list(base_params)
+                scope_document_ids = []
+                scope_applied = False
+                candidate_rows = self._lexical_and_graph_candidates(
+                    conn,
+                    retrieval_query,
+                    where,
+                    params,
+                    recall_limit,
+                )
+
+            if not self._evidence_sufficient_without_vectors(candidate_rows, plan, scope_applied):
+                vector_ran = True
+                for row, score in self._vector_candidates(conn, retrieval_query, where, params, recall_limit):
+                    self._add_candidate(candidate_rows, row, "vector", score * 3.0)
 
         items = []
-        candidate_rows: dict[str, dict[str, Any]] = {}
-        for idx, row in enumerate(results):
-            candidate_rows.setdefault(row["chunk_id"], {"row": row, "hit_types": set(), "boost": 0.0, "order": idx})
-            candidate_rows[row["chunk_id"]]["hit_types"].add("full_text")
-            candidate_rows[row["chunk_id"]]["boost"] += 2.0
-        with connect(self.db_path) as conn:
-            for row, score in self._vector_candidates(conn, query, where, params, recall_limit):
-                candidate_rows.setdefault(row["chunk_id"], {"row": row, "hit_types": set(), "boost": 0.0, "order": len(candidate_rows)})
-                candidate_rows[row["chunk_id"]]["hit_types"].add("vector")
-                candidate_rows[row["chunk_id"]]["boost"] += score * 3.0
-            for row, score in self._graph_candidates(conn, query, where, params, recall_limit):
-                candidate_rows.setdefault(row["chunk_id"], {"row": row, "hit_types": set(), "boost": 0.0, "order": len(candidate_rows)})
-                candidate_rows[row["chunk_id"]]["hit_types"].add("graph")
-                candidate_rows[row["chunk_id"]]["boost"] += score * 2.5
-
         candidates = list(candidate_rows.values())
         ranked = sorted(
             enumerate(candidates),
-            key=lambda item: lexical_score(item[1]["row"], query, item[1]["order"])
-            + intent_score(item[1]["row"], query)
+            key=lambda item: lexical_score(item[1]["row"], plan.normalized_query, item[1]["order"])
+            + intent_score(item[1]["row"], plan.normalized_query)
+            + query_plan_score(item[1]["row"], plan)
             + item[1]["boost"],
             reverse=True,
         )
-        if is_standard_selection_query(query) and ranked:
+        ranked = [
+            item
+            for item in ranked
+            if lexical_score(item[1]["row"], plan.normalized_query, item[1]["order"])
+            + intent_score(item[1]["row"], plan.normalized_query)
+            + query_plan_score(item[1]["row"], plan)
+            + item[1]["boost"]
+            > 0
+        ]
+        if plan.intent in STRICT_EVIDENCE_INTENTS:
+            evidence_ranked = [
+                item for item in ranked if row_matches_query_plan_evidence(item[1]["row"], plan)
+            ]
+            if evidence_ranked:
+                ranked = evidence_ranked
+        if is_standard_selection_query(plan.normalized_query) and ranked:
             _, top_candidate = ranked[0]
             top_row = top_candidate["row"]
             platform = top_row["source_platform"] or "官方标准平台"
@@ -750,12 +1343,19 @@ class KnowledgeStore:
                     "validation_status": "catalog_matched",
                     "url": top_row["official_url"],
                     "source_platform": top_row["source_platform"],
+                    "document_type": top_row["document_type"],
+                    "source_role": source_role(top_row),
                 }
             )
 
         for idx, (_, candidate) in enumerate(ranked[:top_k], 1):
             row = candidate["row"]
-            raw_score = lexical_score(row, query, idx - 1) + intent_score(row, query) + candidate["boost"]
+            raw_score = (
+                lexical_score(row, plan.normalized_query, idx - 1)
+                + intent_score(row, plan.normalized_query)
+                + query_plan_score(row, plan)
+                + candidate["boost"]
+            )
             score = min(0.99, max(0.05, raw_score / 12.0))
             item = {
                 "chunk_id": row["chunk_id"],
@@ -767,9 +1367,9 @@ class KnowledgeStore:
                 "page_start": row["page_start"],
                 "page_end": row["page_end"],
                 "page": row["page_start"],
-                "quote": table_quote(row["table_json"], row["text"], query)
+                "quote": table_quote(row["table_json"], row["text"], plan.normalized_query, plan=plan)
                 if row["chunk_type"] == "table"
-                else quote_text(row["text"], query),
+                else quote_text(row["text"], plan.normalized_query),
                 "score": round(score, 4),
                 "hit_type": sorted(candidate["hit_types"]),
                 "source_type": row["source_type"],
@@ -777,12 +1377,28 @@ class KnowledgeStore:
                 "validation_status": row["validation_status"],
                 "url": row["official_url"],
                 "source_platform": row["source_platform"],
+                "document_type": row["document_type"],
+                "source_role": source_role(row),
             }
             if include_full_text:
                 item["text"] = row["text"]
             items.append(item)
 
+        route_evidence_found = self._route_evidence_found(candidate_rows, plan)
         has_hits = bool(items)
+        if plan.intent in STRICT_EVIDENCE_INTENTS:
+            has_hits = route_evidence_found
+        has_clause_level_evidence = any(
+            item.get("clause_no")
+            or (
+                item.get("chunk_id")
+                and item.get("section_path")
+                and any(marker in str(item["section_path"]) for marker in ("表", "附录"))
+            )
+            for item in items
+        )
+        if plan.intent in STRICT_EVIDENCE_INTENTS:
+            has_clause_level_evidence = route_evidence_found
         return {
             "query": query,
             "results": items,
@@ -791,16 +1407,231 @@ class KnowledgeStore:
                 "vector_hits": sum(1 for c in candidates if "vector" in c["hit_types"]),
                 "graph_hits": sum(1 for c in candidates if "graph" in c["hit_types"]),
                 "web_hits": 0,
+                "scoped_search": int(scope_applied),
+                "vector_skipped": int(not vector_ran),
             },
             "coverage": {
-                "has_clause_level_evidence": any(item.get("clause_no") for item in items),
+                "has_clause_level_evidence": has_clause_level_evidence,
                 "has_page_level_evidence": any(item.get("page_start") for item in items),
                 "needs_web_supplement": not has_hits,
                 "notes": [] if has_hits else ["本地知识库未命中可引用证据，建议进入联网补齐候选流程。"],
+                "query_plan": {
+                    "normalized_query": plan.normalized_query,
+                    "intent": plan.intent,
+                    "target_exploration_type": plan.target_exploration_type,
+                    "candidate_document_ids": scope_document_ids,
+                    "exhaustive_search": plan.exhaustive_search,
+                },
             },
         }
 
+    def _candidate_scope(
+        self,
+        conn: sqlite3.Connection,
+        plan: QueryPlan,
+        base_where: list[str],
+        base_params: list[Any],
+    ) -> tuple[list[str], list[Any], list[str]]:
+        if not plan.has_candidate_scope:
+            return list(base_where), list(base_params), []
+
+        scope_terms: list[str] = []
+        scope_params: list[Any] = []
+        for title_term in plan.candidate_title_terms:
+            scope_terms.append("d.title like ?")
+            scope_params.append(f"%{title_term}%")
+        for number in plan.standard_numbers:
+            scope_terms.append("replace(upper(d.standard_no), ' ', '') = ?")
+            scope_params.append(number.upper().replace(" ", ""))
+        if not scope_terms:
+            return list(base_where), list(base_params), []
+
+        rows = conn.execute(
+            f"""
+            select d.document_id
+            from documents d
+            where {' and '.join(base_where)} and ({' or '.join(scope_terms)})
+            order by d.updated_at desc
+            limit 20
+            """,
+            [*base_params, *scope_params],
+        ).fetchall()
+        document_ids = [str(row["document_id"]) for row in rows]
+        if not document_ids:
+            return list(base_where), list(base_params), []
+
+        placeholders = ",".join("?" for _ in document_ids)
+        return (
+            [*base_where, f"d.document_id in ({placeholders})"],
+            [*base_params, *document_ids],
+            document_ids,
+        )
+
+    def _full_text_candidates(
+        self,
+        conn: sqlite3.Connection,
+        query: str,
+        where: list[str],
+        params: list[Any],
+        recall_limit: int,
+    ) -> list[sqlite3.Row]:
+        results: list[sqlite3.Row] = []
+        match = fts_query(query)
+        if match:
+            sql = f"""
+                select c.*, d.document_type, d.status, d.official_url, d.source_platform, bm25(chunks_fts) as rank
+                from chunks_fts
+                join chunks c on c.chunk_id = chunks_fts.chunk_id
+                join documents d on d.document_id = c.document_id
+                where chunks_fts match ? and {' and '.join(where)}
+                order by rank
+                limit ?
+            """
+            try:
+                results = conn.execute(sql, [match, *params, recall_limit]).fetchall()
+            except sqlite3.OperationalError:
+                results = []
+        if len(results) >= recall_limit or not query:
+            return results
+
+        like_terms = query_terms(query)[:8] or [query]
+        like_where = [
+            "(" + " or ".join(["c.text like ? or c.title like ? or c.standard_no like ?" for _ in like_terms]) + ")"
+        ]
+        like_params: list[Any] = []
+        for term in like_terms:
+            pattern = f"%{term}%"
+            like_params.extend([pattern, pattern, pattern])
+        sql = f"""
+            select c.*, d.document_type, d.status, d.official_url, d.source_platform, 0.0 as rank
+            from chunks c
+            join documents d on d.document_id = c.document_id
+            where c.validation_status != 'empty_source_section' and {' and '.join(where + like_where)}
+            order by length(c.text) asc
+            limit ?
+        """
+        seen = {row["chunk_id"] for row in results}
+        for row in conn.execute(sql, [*params, *like_params, recall_limit]).fetchall():
+            if row["chunk_id"] not in seen:
+                results.append(row)
+                seen.add(row["chunk_id"])
+            if len(results) >= recall_limit:
+                break
+        return results
+
+    def _lexical_and_graph_candidates(
+        self,
+        conn: sqlite3.Connection,
+        query: str,
+        where: list[str],
+        params: list[Any],
+        recall_limit: int,
+    ) -> dict[str, dict[str, Any]]:
+        candidate_rows: dict[str, dict[str, Any]] = {}
+        for row in self._full_text_candidates(conn, query, where, params, recall_limit):
+            self._add_candidate(candidate_rows, row, "full_text", 2.0)
+        for row, score in self._graph_candidates(conn, query, where, params, recall_limit):
+            self._add_candidate(candidate_rows, row, "graph", score * 2.5)
+        return candidate_rows
+
+    def _add_candidate(
+        self,
+        candidate_rows: dict[str, dict[str, Any]],
+        row: sqlite3.Row,
+        hit_type: str,
+        boost: float,
+    ) -> None:
+        candidate = candidate_rows.setdefault(
+            row["chunk_id"],
+            {"row": row, "hit_types": set(), "boost": 0.0, "order": len(candidate_rows)},
+        )
+        candidate["hit_types"].add(hit_type)
+        candidate["boost"] += boost
+
+    def _route_evidence_found(self, candidate_rows: dict[str, dict[str, Any]], plan: QueryPlan) -> bool:
+        rows = [candidate["row"] for candidate in candidate_rows.values()]
+        if plan.intent in STRICT_EVIDENCE_INTENTS:
+            return any(row_matches_query_plan_evidence(row, plan) for row in rows)
+        if plan.intent == "standard_selection" and plan.candidate_title_terms:
+            return any(any(term in (row["title"] or "") for term in plan.candidate_title_terms) for row in rows)
+        if plan.standard_numbers:
+            expected = {number.upper().replace(" ", "") for number in plan.standard_numbers}
+            return any((row["standard_no"] or "").upper().replace(" ", "") in expected for row in rows)
+        if plan.candidate_title_terms:
+            return any(any(term in (row["title"] or "") for term in plan.candidate_title_terms) for row in rows)
+        return bool(rows)
+
+    def _evidence_sufficient_without_vectors(
+        self,
+        candidate_rows: dict[str, dict[str, Any]],
+        plan: QueryPlan,
+        scope_applied: bool,
+    ) -> bool:
+        if plan.exhaustive_search or not candidate_rows:
+            return False
+        if plan.intent in STRICT_EVIDENCE_INTENTS | {"standard_selection"}:
+            return self._route_evidence_found(candidate_rows, plan)
+        return False
+
     def _vector_candidates(
+        self, conn: sqlite3.Connection, query: str, where: list[str], params: list[Any], limit: int
+    ) -> list[tuple[sqlite3.Row, float]]:
+        dense_succeeded, dense = self._dense_embedding_candidates(conn, query, where, params, limit)
+        if dense_succeeded:
+            return [(row, score + 0.15) for row, score in dense]
+        return self._local_hash_vector_candidates(conn, query, where, params, limit)
+
+    def _dense_embedding_candidates(
+        self, conn: sqlite3.Connection, query: str, where: list[str], params: list[Any], limit: int
+    ) -> tuple[bool, list[tuple[sqlite3.Row, float]]]:
+        settings = get_settings()
+        config = embedding_config(settings)
+        if not config.enabled:
+            return False, []
+        try:
+            exists = conn.execute(
+                f"""
+                select 1
+                from chunk_embeddings e
+                join chunks c on c.chunk_id = e.chunk_id
+                join documents d on d.document_id = c.document_id
+                where e.vector_model = ? and {' and '.join(where)}
+                limit 1
+                """,
+                [config.model, *params],
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return False, []
+        if not exists:
+            return False, []
+        try:
+            q_vec = EmbeddingProvider(config, timeout_seconds=settings.request_timeout_seconds).embed(
+                [query + " " + " ".join(query_terms(query))]
+            )[0]
+        except Exception:
+            return False, []
+        try:
+            rows = conn.execute(
+                f"""
+                select c.*, d.document_type, d.status, d.official_url, d.source_platform, e.vector_json, 0.0 as rank
+                from chunk_embeddings e
+                join chunks c on c.chunk_id = e.chunk_id
+                join documents d on d.document_id = c.document_id
+                where e.vector_model = ? and {' and '.join(where)}
+                """,
+                [config.model, *params],
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return False, []
+        scored = []
+        for row in rows:
+            score = cosine_dense(q_vec, parse_dense_vector(row["vector_json"]))
+            if score > 0.2:
+                scored.append((row, score))
+        scored.sort(key=lambda item: item[1], reverse=True)
+        return True, scored[:limit]
+
+    def _local_hash_vector_candidates(
         self, conn: sqlite3.Connection, query: str, where: list[str], params: list[Any], limit: int
     ) -> list[tuple[sqlite3.Row, float]]:
         q_vec = hashed_vector(query + " " + " ".join(query_terms(query)))

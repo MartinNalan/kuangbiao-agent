@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 import time
@@ -78,11 +79,32 @@ def hydrate(db_path: Path, sleep_seconds: float, limit: int | None) -> tuple[int
     updated = 0
     checked = 0
     with connect(db_path) as conn:
+        policy_rows = conn.execute(
+            """
+            select document_id, source_trace_json, official_url
+            from documents
+            where source_type = 'official_fulltext'
+            order by title
+            """
+        ).fetchall()
+        for row in policy_rows:
+            try:
+                trace = json.loads(row["source_trace_json"] or "{}")
+            except json.JSONDecodeError:
+                trace = {}
+            source_url = trace.get("source_url")
+            if source_url and source_url != row["official_url"]:
+                conn.execute(
+                    "update documents set official_url = ?, source_platform = ? where document_id = ?",
+                    (source_url, "自然资源部政策法规库", row["document_id"]),
+                )
+                updated += 1
+
         rows = conn.execute(
             """
             select document_id, standard_no, title, official_url
             from documents
-            where standard_no is not null
+            where standard_no is not null and source_type != 'official_fulltext'
             order by standard_no
             """
         ).fetchall()

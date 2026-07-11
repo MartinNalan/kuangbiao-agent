@@ -1,10 +1,10 @@
-# Mining Knowledge QA
+# geowiki
 
-矿产资源专业知识库问答产品规划与原型项目。
+一款专注地质领域的百科全搜。
 
 ## 当前阶段
 
-本项目先用于沉淀产品需求、接口约定、架构方案和原型说明。知识库检索服务可在独立项目中实现，后续通过 API 接入。
+当前已具备私有知识库问答、邀请码与邮箱验证注册、登录会话、用户 API Key、每日次数配额、会话历史、标准目录、开发者控制台和管理员基础入口。
 
 ## 文档
 
@@ -23,16 +23,34 @@
 示例：
 
 ```text
-OPENAI_API_KEY=sk-your-api-key-here
+OPENAI_API_KEY=<your-model-api-key>
 OPENAI_BASE_URL=https://api.deepseek.com
 OPENAI_MODEL=deepseek-v4-flash
 KNOWLEDGE_BASE_URL=
 ENABLE_SYNC_WEB_SUPPLEMENT=false
-API_KEYS=dev-local-key
+API_KEYS=
 API_KEY_REGISTRY_PATH=
 REDIS_URL=redis://127.0.0.1:6379/0
 RATE_LIMIT_ENABLED=true
 RATE_LIMIT_PER_MINUTE=30
+APP_DB_PATH=data/app/application.sqlite
+AUTH_REQUIRED=true
+REGISTRATION_ENABLED=true
+SESSION_COOKIE_NAME=kb_session
+SESSION_COOKIE_SECURE=false
+SESSION_TTL_HOURS=168
+DAILY_QUOTA_DEFAULT=10
+QUOTA_TIMEZONE=Asia/Shanghai
+EMAIL_VERIFICATION_ENABLED=true
+EMAIL_VERIFICATION_SECRET=<long-random-secret>
+EMAIL_CODE_TTL_MINUTES=10
+EMAIL_CODE_COOLDOWN_SECONDS=60
+EMAIL_CODE_DAILY_LIMIT=5
+EMAIL_DEBUG=false
+EMAIL_PROVIDER=agentmail
+AGENTMAIL_API_KEY=am_your_token
+AGENTMAIL_INBOX_ID=geowiki@agentmail.to
+AGENTMAIL_BASE_URL=https://api.agentmail.to/v0
 ```
 
 `KNOWLEDGE_BASE_URL` 为空时，系统不会编造答案，会返回证据不足提示。知识库服务完成后，填入知识库后端地址即可接入 `/knowledge/search` 和 `/knowledge/standards`。
@@ -50,6 +68,14 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+将 AgentMail token 写入 `.env` 后，创建或复用 `geowiki` 发件箱并生成验证码签名密钥：
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/setup_agentmail.py
+```
+
+token、验证码签名密钥和 `.env` 都不得提交到 Git。
+
 启动 API：
 
 ```bash
@@ -60,6 +86,22 @@ PYTHONPATH=src uvicorn mining_qa.api:app --host 127.0.0.1 --port 8000
 
 ```text
 http://127.0.0.1:8000
+```
+
+首次使用先创建管理员账号和邀请码：
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/manage_accounts.py create-admin --account admin --display-name 管理员
+PYTHONPATH=src .venv/bin/python scripts/manage_accounts.py create-invite --label "第一轮内测" --admin-account admin
+```
+
+管理员创建时会安全提示输入密码；邀请码明文只显示一次。注册用户默认每天可问 10 次，网页问答和用户 API Key 共用该配额。正常完成的回答、拒答和证据不足都使用 1 次，只有系统异常会退回本次预留次数。
+
+管理员可以修改长期日上限，或给指定用户增加当天次数：
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/manage_accounts.py set-daily-limit --account user@example.com --limit 20 --reason "扩大测试范围" --admin-account admin
+PYTHONPATH=src .venv/bin/python scripts/manage_accounts.py add-quota --account user@example.com --count 5 --reason "专项测试" --admin-account admin
 ```
 
 健康检查：
@@ -79,13 +121,13 @@ API 调用示例：
 ```bash
 curl -X POST http://127.0.0.1:8000/api/ask \
   -H 'Content-Type: application/json' \
-  -H 'X-API-Key: dev-local-key' \
+  -H 'X-API-Key: kb_live_xxx' \
   -d '{"question":"哪个规范规定了铁矿的推荐工程间距？"}'
 ```
 
-`API_KEYS` 为空且没有 API Key registry 时用于本地开发，不启用 API Key 鉴权；配置后，`/api/*` 需要通过 `X-API-Key` 或 `Authorization: Bearer <key>` 调用。调用日志写入本地 `data/api_calls.jsonl`，不会提交到 Git。
+默认要求登录或用户 API Key。用户登录网页后在“开发者”页面创建密钥，网页问答和该账号的全部 API Key 共用每日次数。调用日志写入本地 `data/api_calls.jsonl`，不会提交到 Git。
 
-API Key registry 支持本地可管理 key，默认写入 `data/api_keys.json`，只保存 key hash 和元数据，不保存明文 key：
+旧 API Key registry 仅用于内部回归和兼容，默认写入 `data/api_keys.json`，只保存 key hash 和元数据：
 
 ```bash
 PYTHONPATH=src .venv/bin/python scripts/manage_api_keys.py create --name test-client --purpose "local testing"
@@ -118,7 +160,7 @@ redis-cli ping
 用量统计：
 
 ```bash
-curl http://127.0.0.1:8000/api/usage -H 'X-API-Key: dev-local-key'
+curl http://127.0.0.1:8000/api/usage -H 'X-API-Key: kb_live_xxx'
 ```
 
 ## 知识库 Mock 与回归测试

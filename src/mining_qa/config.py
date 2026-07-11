@@ -24,6 +24,36 @@ class Settings(BaseSettings):
     rate_limit_enabled: bool = Field(default=True, alias="RATE_LIMIT_ENABLED")
     rate_limit_per_minute: int = Field(default=30, alias="RATE_LIMIT_PER_MINUTE")
     request_timeout_seconds: float = Field(default=60.0, alias="REQUEST_TIMEOUT_SECONDS")
+    dashscope_api_key: str = Field(default="", alias="DASHSCOPE_API_KEY")
+    embedding_provider: str = Field(default="", alias="EMBEDDING_PROVIDER")
+    embedding_api_key: str = Field(default="", alias="EMBEDDING_API_KEY")
+    embedding_base_url: str = Field(default="", alias="EMBEDDING_BASE_URL")
+    embedding_model: str = Field(default="", alias="EMBEDDING_MODEL")
+    embedding_dimensions: int = Field(default=0, alias="EMBEDDING_DIMENSIONS")
+    embedding_batch_size: int = Field(default=10, alias="EMBEDDING_BATCH_SIZE")
+    app_db_path: str = Field(
+        default=str(PROJECT_ROOT / "data" / "app" / "application.sqlite"),
+        alias="APP_DB_PATH",
+    )
+    auth_required: bool = Field(default=True, alias="AUTH_REQUIRED")
+    registration_enabled: bool = Field(default=True, alias="REGISTRATION_ENABLED")
+    session_cookie_name: str = Field(default="kb_session", alias="SESSION_COOKIE_NAME")
+    session_cookie_secure: bool = Field(default=False, alias="SESSION_COOKIE_SECURE")
+    session_ttl_hours: int = Field(default=168, alias="SESSION_TTL_HOURS")
+    daily_quota_default: int = Field(default=10, alias="DAILY_QUOTA_DEFAULT")
+    quota_timezone: str = Field(default="Asia/Shanghai", alias="QUOTA_TIMEZONE")
+    email_verification_enabled: bool = Field(default=True, alias="EMAIL_VERIFICATION_ENABLED")
+    email_verification_secret: str = Field(default="", alias="EMAIL_VERIFICATION_SECRET")
+    email_code_ttl_minutes: int = Field(default=10, alias="EMAIL_CODE_TTL_MINUTES")
+    email_code_cooldown_seconds: int = Field(default=60, alias="EMAIL_CODE_COOLDOWN_SECONDS")
+    email_code_daily_limit: int = Field(default=5, alias="EMAIL_CODE_DAILY_LIMIT")
+    email_debug: bool = Field(default=False, alias="EMAIL_DEBUG")
+    email_provider: str = Field(default="agentmail", alias="EMAIL_PROVIDER")
+    agentmail_api_key: str = Field(default="", alias="AGENTMAIL_API_KEY")
+    agentmail_inbox_id: str = Field(default="", alias="AGENTMAIL_INBOX_ID")
+    agentmail_base_url: str = Field(default="https://api.agentmail.to/v0", alias="AGENTMAIL_BASE_URL")
+    agentmail_proxy_url: str = Field(default="", alias="AGENTMAIL_PROXY_URL")
+    public_base_url: str = Field(default="", alias="PUBLIC_BASE_URL")
 
     @property
     def chat_completions_url(self) -> str:
@@ -32,6 +62,18 @@ class Settings(BaseSettings):
     @property
     def allowed_api_keys(self) -> set[str]:
         return {key.strip() for key in self.api_keys.split(",") if key.strip()}
+
+    @property
+    def email_verification_ready(self) -> bool:
+        if not self.email_verification_enabled or not self.email_verification_secret:
+            return False
+        if self.email_debug:
+            return True
+        return bool(
+            self.email_provider == "agentmail"
+            and self.agentmail_api_key
+            and self.agentmail_inbox_id
+        )
 
 
 @lru_cache

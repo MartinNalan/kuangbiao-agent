@@ -1,5 +1,7 @@
 .venv/
 .env
+.cloud.env
+data/deploy/
 __pycache__/
 *.pyc
 .firecrawl/
