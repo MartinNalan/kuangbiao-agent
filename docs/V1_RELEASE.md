@@ -20,7 +20,7 @@ domain gate
 
 - Curated private SQLite KB: 155 documents and 26,752 chunks at release validation time.
 - Dense vectors: 22,778 vectors, 1,024 dimensions, model `text-embedding-v4`.
-- Private USEARCH HNSW index: 22,778 entries; index and manifest remain under ignored `data/`.
+- Private USEARCH HNSW index: 22,778 entries using `f16` storage (about 50 MB); index and manifest remain under ignored `data/`.
 - Knowledge graph: SQLite entities and relations remain part of the private KB.
 
 ## Acceptance Results

@@ -61,7 +61,7 @@ def main() -> int:
     ann = Index(
         ndim=dimensions,
         metric="cos",
-        dtype="f32",
+        dtype="f16",
         connectivity=24,
         expansion_add=128,
         expansion_search=96,
@@ -77,6 +77,7 @@ def main() -> int:
         "index_path": str(args.index),
         "model": args.model,
         "dimensions": dimensions,
+        "dtype": "f16",
         "count": len(rows),
         "max_updated_at": max_updated_at,
         "chunk_ids": chunk_ids,

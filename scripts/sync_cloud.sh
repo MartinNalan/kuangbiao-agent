@@ -44,9 +44,24 @@ if [[ ! -f "${PROJECT_ROOT}/.env" ]]; then
 fi
 
 export SSHPASS="${CLOUD_SSH_PASSWORD}"
-SSH=(sshpass -e ssh -p "${CLOUD_SSH_PORT}" -o StrictHostKeyChecking=accept-new)
-RSYNC_SSH="ssh -p ${CLOUD_SSH_PORT} -o StrictHostKeyChecking=accept-new"
+CONTROL_DIR="$(mktemp -d)"
+CONTROL_PATH="${CONTROL_DIR}/ssh-control"
+SSH=(
+  sshpass -e ssh
+  -p "${CLOUD_SSH_PORT}"
+  -o StrictHostKeyChecking=accept-new
+  -o ControlMaster=auto
+  -o ControlPersist=10m
+  -o "ControlPath=${CONTROL_PATH}"
+)
+RSYNC_SSH="ssh -p ${CLOUD_SSH_PORT} -o StrictHostKeyChecking=accept-new -o ControlMaster=auto -o ControlPersist=10m -o ControlPath=${CONTROL_PATH}"
 REMOTE="${CLOUD_USER}@${CLOUD_HOST}"
+
+cleanup() {
+  ssh -p "${CLOUD_SSH_PORT}" -o "ControlPath=${CONTROL_PATH}" -O exit "${REMOTE}" >/dev/null 2>&1 || true
+  rm -rf "${CONTROL_DIR}"
+}
+trap cleanup EXIT
 
 "${SSH[@]}" "${REMOTE}" "mkdir -p \
   '${CLOUD_APP_DIR}/data/knowledge_base/db' \
@@ -79,15 +94,16 @@ sshpass -e rsync -az --info=progress2 \
 if [[ "${SYNC_KB_DB}" == "true" ]]; then
   sshpass -e rsync -az --info=progress2 -e "${RSYNC_SSH}" \
     "${LOCAL_KB_DB}" "${REMOTE}:${CLOUD_APP_DIR}/data/knowledge_base/db/knowledge_base.sqlite"
-  sshpass -e rsync -az --info=progress2 -e "${RSYNC_SSH}" \
+  sshpass -e rsync -az --partial-dir=.rsync-partial --info=progress2 -e "${RSYNC_SSH}" \
     "${LOCAL_ANN_INDEX}" "${REMOTE}:${CLOUD_APP_DIR}/data/knowledge_base/indexes/dense.usearch"
-  sshpass -e rsync -az --info=progress2 -e "${RSYNC_SSH}" \
+  sshpass -e rsync -az --partial-dir=.rsync-partial --info=progress2 -e "${RSYNC_SSH}" \
     "${LOCAL_ANN_MANIFEST}" "${REMOTE}:${CLOUD_APP_DIR}/data/knowledge_base/indexes/dense_manifest.json"
 else
   echo "Skipping private knowledge database synchronization (SYNC_KB_DB=${SYNC_KB_DB})."
 fi
 
 sshpass -e scp -P "${CLOUD_SSH_PORT}" -o StrictHostKeyChecking=accept-new \
+  -o ControlMaster=auto -o ControlPersist=10m -o "ControlPath=${CONTROL_PATH}" \
   "${PROJECT_ROOT}/.env" "${REMOTE}:${CLOUD_APP_DIR}/.env"
 
 "${SSH[@]}" "${REMOTE}" "sed -i \

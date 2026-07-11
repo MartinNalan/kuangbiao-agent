@@ -18,6 +18,7 @@ except ImportError:  # pragma: no cover
 class AnnManifest:
     model: str
     dimensions: int
+    dtype: str
     count: int
     max_updated_at: str
     chunk_ids: tuple[str, ...]
@@ -74,6 +75,7 @@ class DenseAnnIndex:
             manifest = AnnManifest(
                 model=str(payload["model"]),
                 dimensions=int(payload["dimensions"]),
+                dtype=str(payload.get("dtype") or "f32"),
                 count=int(payload["count"]),
                 max_updated_at=str(payload.get("max_updated_at") or ""),
                 chunk_ids=tuple(str(value) for value in payload["chunk_ids"]),

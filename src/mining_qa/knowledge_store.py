@@ -1317,6 +1317,7 @@ class KnowledgeStore:
             "ann_available": bool(ann_manifest),
             "ann_count": ann_manifest.count if ann_manifest else 0,
             "ann_model": ann_manifest.model if ann_manifest else None,
+            "ann_dtype": ann_manifest.dtype if ann_manifest else None,
         }
 
     def search(self, payload: dict[str, Any]) -> dict[str, Any]:
