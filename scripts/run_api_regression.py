@@ -145,6 +145,14 @@ def main() -> int:
         if not projection.json().get("sources") or len(projection.json()["sources"]) < 2:
             raise AssertionError("projection-comparison response should include multiple sources")
 
+        infinite_projection = post_ask(
+            "关于矿体无限外推所依据的间距，不同的标准是否有不同的规定？具体列出来代表性的。"
+        )
+        assert_equal(infinite_projection.status_code, 200, "infinite-projection http status")
+        assert_equal(infinite_projection.json()["status"], "answered", "infinite-projection response status")
+        if len(infinite_projection.json().get("sources") or []) < 2:
+            raise AssertionError("infinite-projection wording should retrieve multiple direct sources")
+
         authority = post_ask("我的采矿证是自然资源部颁发的，我的储量评审应该去哪个机构")
         assert_equal(authority.status_code, 200, "policy-authority http status")
         assert_equal(authority.json()["status"], "answered", "policy-authority response status")

@@ -23,6 +23,10 @@ if [[ ! -f "${APP_DIR}/data/knowledge_base/db/knowledge_base.sqlite" ]]; then
   echo "Missing private knowledge-base SQLite file." >&2
   exit 1
 fi
+if [[ ! -f "${APP_DIR}/data/knowledge_base/indexes/dense.usearch" || ! -f "${APP_DIR}/data/knowledge_base/indexes/dense_manifest.json" ]]; then
+  echo "Missing private dense ANN index or manifest." >&2
+  exit 1
+fi
 
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-venv python3-pip nginx redis-server rsync curl
@@ -31,15 +35,24 @@ if ! id -u kuangbiao >/dev/null 2>&1; then
   useradd --system --home-dir "${APP_DIR}" --shell /usr/sbin/nologin kuangbiao
 fi
 
-mkdir -p "${APP_DIR}/data/app"
+mkdir -p "${APP_DIR}/data/app" "${APP_DIR}/data/backups"
 python3 -m venv "${APP_DIR}/.venv"
 "${APP_DIR}/.venv/bin/pip" install --index-url "${PIP_INDEX_URL}" --timeout 60 --retries 5 --upgrade pip
 "${APP_DIR}/.venv/bin/pip" install --index-url "${PIP_INDEX_URL}" --timeout 60 --retries 5 -r "${APP_DIR}/requirements.txt"
 
 chown -R kuangbiao:kuangbiao "${APP_DIR}"
 chmod 600 "${APP_DIR}/.env"
-chmod 700 "${APP_DIR}/data" "${APP_DIR}/data/knowledge_base" "${APP_DIR}/data/knowledge_base/db" "${APP_DIR}/data/app"
+chmod 700 \
+  "${APP_DIR}/data" \
+  "${APP_DIR}/data/knowledge_base" \
+  "${APP_DIR}/data/knowledge_base/db" \
+  "${APP_DIR}/data/knowledge_base/indexes" \
+  "${APP_DIR}/data/app" \
+  "${APP_DIR}/data/backups"
 chmod 600 "${APP_DIR}/data/knowledge_base/db/knowledge_base.sqlite"
+chmod 600 \
+  "${APP_DIR}/data/knowledge_base/indexes/dense.usearch" \
+  "${APP_DIR}/data/knowledge_base/indexes/dense_manifest.json"
 if [[ -f "${APP_DIR}/data/app/application.sqlite" ]]; then
   chmod 600 "${APP_DIR}/data/app/application.sqlite"
 fi

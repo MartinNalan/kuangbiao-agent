@@ -7,15 +7,23 @@ import re
 import sqlite3
 import uuid
 from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 from urllib.parse import quote
 
+from .ann_index import AnnManifest, get_ann_index
 from .config import get_settings
 from .embedding_provider import EmbeddingProvider, cosine_dense, embedding_config
-from .query_understanding import QueryPlan, canonical_exploration_type, understand_query
+from .query_understanding import (
+    QueryPlan,
+    canonical_exploration_type,
+    query_plan_from_payload,
+    understand_query,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -24,6 +32,21 @@ DEFAULT_DB_PATH = DEFAULT_KB_ROOT / "db" / "knowledge_base.sqlite"
 DOMAIN_LEXICON_PATH = Path(__file__).with_name("domain_lexicon.json")
 QUOTE_LIMIT = 260
 VECTOR_DIM = 512
+RRF_K = 60
+ROUTE_WEIGHTS = {"full_text": 1.15, "graph": 0.9, "vector": 1.0}
+
+
+@dataclass(frozen=True)
+class VectorCandidateResult:
+    candidates: tuple[tuple[sqlite3.Row, float], ...] = ()
+    route: str = "none"
+    embedding_ms: float = 0.0
+    search_ms: float = 0.0
+    error: str | None = None
+
+    @property
+    def succeeded(self) -> bool:
+        return self.route in {"ann", "exact_dense"}
 
 
 def utc_now() -> str:
@@ -529,9 +552,9 @@ def is_standard_or_technical_query(query: str) -> bool:
     return any(term in query for term in ("标准", "规范", "规程", "技术", "工程间距", "勘查类型", "勘查规范"))
 
 
-def query_terms(query: str) -> list[str]:
-    plan = understand_query(query)
-    normalized_query = plan.normalized_query
+def query_terms(query: str, plan: QueryPlan | None = None) -> list[str]:
+    effective_plan = plan or understand_query(query)
+    normalized_query = effective_plan.normalized_query
     terms: list[str] = []
     raw_terms = re.findall(
         r"[A-Za-z0-9]+(?:/[A-Za-z0-9]+)?(?:[-.][A-Za-z0-9]+)*|[\u4e00-\u9fff]{2,}",
@@ -659,11 +682,18 @@ def query_terms(query: str) -> list[str]:
         for source, replacements in synonyms.items():
             if source in term or source in normalized_query:
                 terms.extend(replacements)
-    if plan.target_exploration_type:
-        ascii_type = {"Ⅰ": "I", "Ⅱ": "II", "Ⅲ": "III"}[plan.target_exploration_type]
-        terms.extend([f"{plan.target_exploration_type}类型", ascii_type])
+    if effective_plan.target_exploration_type:
+        ascii_type = {"Ⅰ": "I", "Ⅱ": "II", "Ⅲ": "III"}[effective_plan.target_exploration_type]
+        terms.extend([f"{effective_plan.target_exploration_type}类型", ascii_type])
     terms.extend(lexicon_query_expansions(normalized_query))
-    if plan.intent == "authority_responsibility":
+    terms.extend(effective_plan.subject_terms)
+    terms.extend(effective_plan.required_terms)
+    terms.extend(effective_plan.alternative_terms)
+    terms.extend(effective_plan.candidate_title_terms)
+    terms.extend(effective_plan.standard_numbers)
+    for group in effective_plan.required_evidence_groups:
+        terms.extend(group)
+    if effective_plan.intent == "authority_responsibility":
         terms.extend(
             [
                 "自然资规〔2023〕6号",
@@ -674,9 +704,9 @@ def query_terms(query: str) -> list[str]:
                 "其他由省级自然资源主管部门负责",
             ]
         )
-    elif plan.intent == "service_materials":
-        terms.extend(plan.candidate_title_terms)
-        if "自然资规〔2023〕4号" not in plan.standard_numbers:
+    elif effective_plan.intent == "service_materials":
+        terms.extend(effective_plan.candidate_title_terms)
+        if "自然资规〔2023〕4号" not in effective_plan.standard_numbers:
             terms.extend(["申请材料", "申请材料目录", "提交材料名称", "材料名称"])
         else:
             terms.extend(
@@ -688,9 +718,9 @@ def query_terms(query: str) -> list[str]:
                     "申请材料",
                 ]
             )
-    elif plan.intent == "service_procedure_basis":
-        terms.extend(plan.candidate_title_terms)
-        if "自然资规〔2023〕4号" not in plan.standard_numbers:
+    elif effective_plan.intent == "service_procedure_basis":
+        terms.extend(effective_plan.candidate_title_terms)
+        if "自然资规〔2023〕4号" not in effective_plan.standard_numbers:
             terms.extend(["办理基本流程", "办理方式", "申请材料提交"])
         else:
             terms.extend(
@@ -701,9 +731,9 @@ def query_terms(query: str) -> list[str]:
                     "采矿权申请资料清单及要求",
                 ]
             )
-    elif plan.intent == "service_time_limit":
-        terms.extend([*plan.candidate_title_terms, "办结时限", "工作日"])
-    elif plan.intent == "projection_numeric_rule":
+    elif effective_plan.intent == "service_time_limit":
+        terms.extend([*effective_plan.candidate_title_terms, "办结时限", "工作日"])
+    elif effective_plan.intent == "projection_numeric_rule":
         terms.extend(
             [
                 "DZ/T 0338.1-2020",
@@ -712,7 +742,7 @@ def query_terms(query: str) -> list[str]:
                 "经验工程间距1/2尖推",
             ]
         )
-    elif plan.intent == "legal_responsibility":
+    elif effective_plan.intent == "legal_responsibility":
         terms.extend(
             [
                 "国令第839号",
@@ -731,16 +761,28 @@ def query_terms(query: str) -> list[str]:
     return deduped
 
 
-def fts_query(query: str) -> str:
+def _fts_phrase(term: str) -> str:
+    return '"' + term.replace('"', '""') + '"'
+
+
+def fts_query(query: str, plan: QueryPlan | None = None, *, strict: bool = False) -> str:
+    effective_plan = plan or understand_query(query)
+    if strict and effective_plan.required_evidence_groups:
+        groups = []
+        for group in effective_plan.required_evidence_groups:
+            values = [term for term in group if term and len(term.strip()) >= 2]
+            if values:
+                groups.append("(" + " OR ".join(_fts_phrase(term) for term in values[:8]) + ")")
+        if groups:
+            return " AND ".join(groups)
     terms = [
         term
-        for term in query_terms(query)
+        for term in query_terms(query, effective_plan)
         if not re.fullmatch(r"[0-9IVXⅠⅡⅢ]+", term, flags=re.IGNORECASE)
     ]
     if not terms:
         return ""
-    escaped = [term.replace('"', '""') for term in terms[:8]]
-    return " OR ".join(f'"{term}"' for term in escaped)
+    return " OR ".join(_fts_phrase(term) for term in terms[:16])
 
 
 def vector_tokens(text: str) -> list[str]:
@@ -839,6 +881,35 @@ STRICT_EVIDENCE_INTENTS = {
     "legal_responsibility",
     "authority_responsibility",
 }
+
+
+def row_context(row: sqlite3.Row) -> str:
+    return " ".join(
+        str(row[key] or "")
+        for key in ("title", "standard_no", "section_path", "clause_no", "text")
+    )
+
+
+def evidence_group_match_count(row: sqlite3.Row, plan: QueryPlan) -> int:
+    context = row_context(row)
+    return sum(
+        1
+        for group in plan.required_evidence_groups
+        if any(term and term in context for term in group)
+    )
+
+
+def row_matches_required_evidence_groups(row: sqlite3.Row, plan: QueryPlan) -> bool:
+    if not plan.required_evidence_groups:
+        return True
+    return evidence_group_match_count(row, plan) == len(plan.required_evidence_groups)
+
+
+def negative_term_penalty(row: sqlite3.Row, plan: QueryPlan) -> float:
+    if not plan.negative_terms:
+        return 0.0
+    context = row_context(row)
+    return min(18.0, sum(4.5 for term in plan.negative_terms if term and term in context))
 
 
 def row_matches_candidate_title(row: sqlite3.Row, plan: QueryPlan) -> bool:
@@ -978,7 +1049,7 @@ def row_matches_query_plan_evidence(row: sqlite3.Row, plan: QueryPlan) -> bool:
         return row_has_legal_responsibility_evidence(row)
     if plan.intent == "authority_responsibility":
         return row_has_authority_evidence(row)
-    return True
+    return row_matches_required_evidence_groups(row, plan)
 
 
 def query_plan_score(row: sqlite3.Row, plan: QueryPlan) -> float:
@@ -986,6 +1057,18 @@ def query_plan_score(row: sqlite3.Row, plan: QueryPlan) -> float:
     title = row["title"] or ""
     section = row["section_path"] or ""
     text = row["text"] or ""
+    context = f"{title} {section} {text}"
+    if plan.document_types:
+        score += 3.0 if row["document_type"] in plan.document_types else -10.0
+    score += sum(2.0 for term in plan.subject_terms if term and term in context)
+    score += sum(2.5 for term in plan.required_terms if term and term in context)
+    score += sum(1.0 for term in plan.alternative_terms if term and term in context)
+    if plan.required_evidence_groups:
+        matched_groups = evidence_group_match_count(row, plan)
+        score += matched_groups * 3.0
+        if matched_groups == len(plan.required_evidence_groups):
+            score += 8.0
+    score -= negative_term_penalty(row, plan)
     if plan.candidate_title_terms:
         if any(term in title for term in plan.candidate_title_terms):
             score += 8.0
@@ -995,7 +1078,9 @@ def query_plan_score(row: sqlite3.Row, plan: QueryPlan) -> float:
         if any(term in f"{section} {text}" for term in ("表 F.1", "表F.1", "参考基本勘查工程间距")):
             score += 6.0
         if row["chunk_type"] == "table":
-            score += 3.0
+            score += 8.0
+            if table_has_exploration_type(row["table_json"], plan.target_exploration_type):
+                score += 10.0
         if row_has_engineering_distance_evidence(row, plan):
             score += 10.0
     elif plan.intent == "service_materials":
@@ -1060,7 +1145,6 @@ def query_plan_score(row: sqlite3.Row, plan: QueryPlan) -> float:
     elif plan.intent == "authority_responsibility" and row_has_authority_evidence(row):
         score += 12.0
     elif plan.intent == "related_documents" and plan.focus_terms:
-        context = f"{title} {section} {text}"
         anchor = max(plan.focus_terms, key=len)
         if anchor in context:
             score += 10.0
@@ -1070,8 +1154,8 @@ def query_plan_score(row: sqlite3.Row, plan: QueryPlan) -> float:
     return score
 
 
-def lexical_score(row: sqlite3.Row, query: str, idx: int) -> float:
-    terms = query_terms(query)
+def lexical_score(row: sqlite3.Row, query: str, idx: int, plan: QueryPlan | None = None) -> float:
+    terms = query_terms(query, plan)
     title = row["title"] or ""
     standard_no = row["standard_no"] or ""
     section = row["section_path"] or ""
@@ -1105,7 +1189,7 @@ def lexical_score(row: sqlite3.Row, query: str, idx: int) -> float:
     return score
 
 
-def intent_score(row: sqlite3.Row, query: str) -> float:
+def intent_score(row: sqlite3.Row, query: str, plan: QueryPlan | None = None) -> float:
     score = 0.0
     source_type = row["source_type"] or ""
     document_type = row["document_type"] or ""
@@ -1121,7 +1205,7 @@ def intent_score(row: sqlite3.Row, query: str) -> float:
             score += 1.5
         if document_type in {"standard", "national_standard", "industry_standard", "guidance"}:
             score += 1.0
-    if is_policy_authority_query(query):
+    if (plan and plan.intent == "authority_responsibility") or is_policy_authority_query(query):
         text = row["text"] or ""
         title = row["title"] or ""
         standard_no = row["standard_no"] or ""
@@ -1212,6 +1296,12 @@ class KnowledgeStore:
             embedding_count = table_count(conn, "chunk_embeddings")
             kg_entity_count = table_count(conn, "kg_entities")
             kg_relation_count = table_count(conn, "kg_relations")
+        settings = get_settings()
+        ann_manifest = None
+        try:
+            ann_manifest = get_ann_index(settings.ann_index_path, settings.ann_manifest_path).manifest()
+        except (OSError, ValueError, KeyError):
+            ann_manifest = None
         return {
             "ok": True,
             "service": "mining-knowledge-base",
@@ -1224,18 +1314,23 @@ class KnowledgeStore:
             "embedding_count": embedding_count,
             "kg_entity_count": kg_entity_count,
             "kg_relation_count": kg_relation_count,
+            "ann_available": bool(ann_manifest),
+            "ann_count": ann_manifest.count if ann_manifest else 0,
+            "ann_model": ann_manifest.model if ann_manifest else None,
         }
 
     def search(self, payload: dict[str, Any]) -> dict[str, Any]:
+        started = perf_counter()
         query = str(payload.get("query") or "").strip()
-        plan = understand_query(query)
+        plan = query_plan_from_payload(query, payload.get("retrieval_plan"))
         retrieval_query = plan.retrieval_query or plan.normalized_query or query
         filters = payload.get("filters") or {}
         options = payload.get("options") or {}
         top_k = int(options.get("top_k") or 10)
         top_k = max(1, min(top_k, 50))
-        recall_limit = max(top_k * 20, 60)
+        recall_limit = min(240, max(top_k * 4, 60))
         include_full_text = bool(options.get("include_full_text"))
+        retrieval_round = max(1, int(options.get("retrieval_round") or 1))
 
         base_where = ["d.visibility in ('internal', 'public')"]
         base_params: list[Any] = []
@@ -1250,9 +1345,16 @@ class KnowledgeStore:
             placeholders = ",".join("?" for _ in statuses)
             base_where.append(f"d.status in ({placeholders})")
             base_params.extend(statuses)
-        doc_types = filters.get("document_types") or []
-        if isinstance(doc_types, str):
-            doc_types = [doc_types]
+        requested_doc_types = filters.get("document_types") or []
+        if isinstance(requested_doc_types, str):
+            requested_doc_types = [requested_doc_types]
+        planned_doc_types = list(plan.document_types)
+        if requested_doc_types and planned_doc_types:
+            doc_types = [value for value in requested_doc_types if value in planned_doc_types]
+            if not doc_types:
+                base_where.append("1 = 0")
+        else:
+            doc_types = requested_doc_types or planned_doc_types
         if doc_types:
             placeholders = ",".join("?" for _ in doc_types)
             base_where.append(f"d.document_type in ({placeholders})")
@@ -1261,6 +1363,9 @@ class KnowledgeStore:
         scope_document_ids: list[str] = []
         scope_applied = False
         vector_ran = False
+        vector_result = VectorCandidateResult()
+        lexical_graph_ms = 0.0
+        vector_ms = 0.0
         with connect(self.db_path) as conn:
             where, params, scope_document_ids = self._candidate_scope(
                 conn,
@@ -1269,57 +1374,78 @@ class KnowledgeStore:
                 base_params,
             )
             scope_applied = bool(scope_document_ids)
+            lexical_started = perf_counter()
             candidate_rows = self._lexical_and_graph_candidates(
                 conn,
                 retrieval_query,
+                plan,
                 where,
                 params,
                 recall_limit,
             )
+            lexical_graph_ms += (perf_counter() - lexical_started) * 1000
 
             if scope_applied and not self._route_evidence_found(candidate_rows, plan):
                 where = list(base_where)
                 params = list(base_params)
                 scope_document_ids = []
                 scope_applied = False
+                lexical_started = perf_counter()
                 candidate_rows = self._lexical_and_graph_candidates(
                     conn,
                     retrieval_query,
+                    plan,
                     where,
                     params,
                     recall_limit,
                 )
+                lexical_graph_ms += (perf_counter() - lexical_started) * 1000
 
             if not self._evidence_sufficient_without_vectors(candidate_rows, plan, scope_applied):
                 vector_ran = True
-                for row, score in self._vector_candidates(conn, retrieval_query, where, params, recall_limit):
-                    self._add_candidate(candidate_rows, row, "vector", score * 3.0)
+                vector_started = perf_counter()
+                vector_result = self._vector_candidates(
+                    conn,
+                    retrieval_query,
+                    plan,
+                    where,
+                    params,
+                    min(recall_limit, 120),
+                )
+                vector_ms = (perf_counter() - vector_started) * 1000
+                for rank, (row, score) in enumerate(vector_result.candidates, start=1):
+                    self._add_candidate(candidate_rows, row, "vector", rank, score)
 
         items = []
         candidates = list(candidate_rows.values())
+        for candidate in candidates:
+            candidate["final_score"] = self._candidate_fusion_score(candidate, plan)
         ranked = sorted(
             enumerate(candidates),
-            key=lambda item: lexical_score(item[1]["row"], plan.normalized_query, item[1]["order"])
-            + intent_score(item[1]["row"], plan.normalized_query)
-            + query_plan_score(item[1]["row"], plan)
-            + item[1]["boost"],
+            key=lambda item: item[1]["final_score"],
             reverse=True,
         )
-        ranked = [
-            item
-            for item in ranked
-            if lexical_score(item[1]["row"], plan.normalized_query, item[1]["order"])
-            + intent_score(item[1]["row"], plan.normalized_query)
-            + query_plan_score(item[1]["row"], plan)
-            + item[1]["boost"]
-            > 0
-        ]
+        ranked = [item for item in ranked if item[1]["final_score"] > 0.05]
         if plan.intent in STRICT_EVIDENCE_INTENTS:
             evidence_ranked = [
                 item for item in ranked if row_matches_query_plan_evidence(item[1]["row"], plan)
             ]
             if evidence_ranked:
                 ranked = evidence_ranked
+        if plan.intent == "engineering_distance_lookup":
+            ranked.sort(
+                key=lambda item: (
+                    item[1]["row"]["chunk_type"] == "table"
+                    and table_has_exploration_type(
+                        item[1]["row"]["table_json"],
+                        plan.target_exploration_type,
+                    ),
+                    item[1]["final_score"],
+                ),
+                reverse=True,
+            )
+        if plan.intent in {"general", "regulation_lookup"} and not plan.standard_numbers:
+            ranked = self._diversify_documents(ranked)
         if is_standard_selection_query(plan.normalized_query) and ranked:
             _, top_candidate = ranked[0]
             top_row = top_candidate["row"]
@@ -1350,13 +1476,12 @@ class KnowledgeStore:
 
         for idx, (_, candidate) in enumerate(ranked[:top_k], 1):
             row = candidate["row"]
-            raw_score = (
-                lexical_score(row, plan.normalized_query, idx - 1)
-                + intent_score(row, plan.normalized_query)
-                + query_plan_score(row, plan)
-                + candidate["boost"]
+            score = min(0.99, max(0.05, float(candidate["final_score"])))
+            compact_quote = (
+                table_quote(row["table_json"], row["text"], plan.normalized_query, plan=plan)
+                if row["chunk_type"] == "table"
+                else quote_text(row["text"], plan.retrieval_query)
             )
-            score = min(0.99, max(0.05, raw_score / 12.0))
             item = {
                 "chunk_id": row["chunk_id"],
                 "document_id": row["document_id"],
@@ -1367,9 +1492,16 @@ class KnowledgeStore:
                 "page_start": row["page_start"],
                 "page_end": row["page_end"],
                 "page": row["page_start"],
-                "quote": table_quote(row["table_json"], row["text"], plan.normalized_query, plan=plan)
+                "quote": compact_quote,
+                "evidence_text": table_quote(
+                    row["table_json"],
+                    row["text"],
+                    plan.retrieval_query,
+                    limit=800,
+                    plan=plan,
+                )
                 if row["chunk_type"] == "table"
-                else quote_text(row["text"], plan.normalized_query),
+                else quote_text(row["text"], plan.retrieval_query, limit=800, max_sentences=6),
                 "score": round(score, 4),
                 "hit_type": sorted(candidate["hit_types"]),
                 "source_type": row["source_type"],
@@ -1385,9 +1517,19 @@ class KnowledgeStore:
             items.append(item)
 
         route_evidence_found = self._route_evidence_found(candidate_rows, plan)
-        has_hits = bool(items)
-        if plan.intent in STRICT_EVIDENCE_INTENTS:
-            has_hits = route_evidence_found
+        direct_rows = [
+            candidate["row"]
+            for candidate in candidate_rows.values()
+            if row_matches_query_plan_evidence(candidate["row"], plan)
+        ]
+        direct_documents = {str(row["document_id"]) for row in direct_rows}
+        comparison = plan.search_mode in {"comparison", "exhaustive"} or plan.intent in {
+            "projection_comparison",
+            "clause_comparison",
+        }
+        has_hits = route_evidence_found if plan.intent in STRICT_EVIDENCE_INTENTS else bool(items)
+        if plan.required_evidence_groups:
+            has_hits = bool(direct_rows) and (not comparison or len(direct_documents) >= 2)
         has_clause_level_evidence = any(
             item.get("clause_no")
             or (
@@ -1399,6 +1541,9 @@ class KnowledgeStore:
         )
         if plan.intent in STRICT_EVIDENCE_INTENTS:
             has_clause_level_evidence = route_evidence_found
+        if plan.required_evidence_groups:
+            has_clause_level_evidence = has_hits
+        total_ms = (perf_counter() - started) * 1000
         return {
             "query": query,
             "results": items,
@@ -1409,6 +1554,18 @@ class KnowledgeStore:
                 "web_hits": 0,
                 "scoped_search": int(scope_applied),
                 "vector_skipped": int(not vector_ran),
+                "direct_evidence_hits": len(direct_rows),
+                "candidate_count": len(candidates),
+                "ann_used": int(vector_result.route == "ann"),
+                "vector_route": vector_result.route,
+                "retrieval_round": retrieval_round,
+                "timings_ms": {
+                    "lexical_graph": round(lexical_graph_ms, 3),
+                    "embedding": round(vector_result.embedding_ms, 3),
+                    "vector_search": round(vector_result.search_ms, 3),
+                    "vector_total": round(vector_ms, 3),
+                    "total": round(total_ms, 3),
+                },
             },
             "coverage": {
                 "has_clause_level_evidence": has_clause_level_evidence,
@@ -1421,6 +1578,9 @@ class KnowledgeStore:
                     "target_exploration_type": plan.target_exploration_type,
                     "candidate_document_ids": scope_document_ids,
                     "exhaustive_search": plan.exhaustive_search,
+                    "planner_used": plan.planner_used,
+                    "search_mode": plan.search_mode,
+                    "required_evidence_groups": plan.required_evidence_groups,
                 },
             },
         }
@@ -1433,6 +1593,8 @@ class KnowledgeStore:
         base_params: list[Any],
     ) -> tuple[list[str], list[Any], list[str]]:
         if not plan.has_candidate_scope:
+            return list(base_where), list(base_params), []
+        if plan.search_mode in {"comparison", "exhaustive"} and not plan.standard_numbers:
             return list(base_where), list(base_params), []
 
         scope_terms: list[str] = []
@@ -1471,13 +1633,17 @@ class KnowledgeStore:
         self,
         conn: sqlite3.Connection,
         query: str,
+        plan: QueryPlan,
         where: list[str],
         params: list[Any],
         recall_limit: int,
     ) -> list[sqlite3.Row]:
         results: list[sqlite3.Row] = []
-        match = fts_query(query)
-        if match:
+        seen: set[str] = set()
+
+        def append_match(match: str, limit: int) -> None:
+            if not match or len(results) >= recall_limit:
+                return
             sql = f"""
                 select c.*, d.document_type, d.status, d.official_url, d.source_platform, bm25(chunks_fts) as rank
                 from chunks_fts
@@ -1488,13 +1654,24 @@ class KnowledgeStore:
                 limit ?
             """
             try:
-                results = conn.execute(sql, [match, *params, recall_limit]).fetchall()
+                rows = conn.execute(sql, [match, *params, limit]).fetchall()
             except sqlite3.OperationalError:
-                results = []
+                rows = []
+            for row in rows:
+                if row["chunk_id"] in seen:
+                    continue
+                results.append(row)
+                seen.add(row["chunk_id"])
+                if len(results) >= recall_limit:
+                    break
+
+        strict_budget = min(recall_limit, max(20, recall_limit // 2))
+        append_match(fts_query(query, plan, strict=True), strict_budget)
+        append_match(fts_query(query, plan), recall_limit)
         if len(results) >= recall_limit or not query:
             return results
 
-        like_terms = query_terms(query)[:8] or [query]
+        like_terms = query_terms(query, plan)[:10] or [query]
         like_where = [
             "(" + " or ".join(["c.text like ? or c.title like ? or c.standard_no like ?" for _ in like_terms]) + ")"
         ]
@@ -1510,7 +1687,6 @@ class KnowledgeStore:
             order by length(c.text) asc
             limit ?
         """
-        seen = {row["chunk_id"] for row in results}
         for row in conn.execute(sql, [*params, *like_params, recall_limit]).fetchall():
             if row["chunk_id"] not in seen:
                 results.append(row)
@@ -1523,15 +1699,23 @@ class KnowledgeStore:
         self,
         conn: sqlite3.Connection,
         query: str,
+        plan: QueryPlan,
         where: list[str],
         params: list[Any],
         recall_limit: int,
     ) -> dict[str, dict[str, Any]]:
         candidate_rows: dict[str, dict[str, Any]] = {}
-        for row in self._full_text_candidates(conn, query, where, params, recall_limit):
-            self._add_candidate(candidate_rows, row, "full_text", 2.0)
-        for row, score in self._graph_candidates(conn, query, where, params, recall_limit):
-            self._add_candidate(candidate_rows, row, "graph", score * 2.5)
+        for rank, row in enumerate(
+            self._full_text_candidates(conn, query, plan, where, params, recall_limit),
+            start=1,
+        ):
+            bm25_rank = float(row["rank"] or 0.0)
+            self._add_candidate(candidate_rows, row, "full_text", rank, 1.0 / (1.0 + abs(bm25_rank)))
+        for rank, (row, score) in enumerate(
+            self._graph_candidates(conn, query, plan, where, params, recall_limit),
+            start=1,
+        ):
+            self._add_candidate(candidate_rows, row, "graph", rank, score)
         return candidate_rows
 
     def _add_candidate(
@@ -1539,19 +1723,72 @@ class KnowledgeStore:
         candidate_rows: dict[str, dict[str, Any]],
         row: sqlite3.Row,
         hit_type: str,
-        boost: float,
+        rank: int,
+        route_score: float,
     ) -> None:
         candidate = candidate_rows.setdefault(
             row["chunk_id"],
-            {"row": row, "hit_types": set(), "boost": 0.0, "order": len(candidate_rows)},
+            {
+                "row": row,
+                "hit_types": set(),
+                "route_ranks": {},
+                "route_scores": {},
+                "order": len(candidate_rows),
+            },
         )
         candidate["hit_types"].add(hit_type)
-        candidate["boost"] += boost
+        candidate["route_ranks"][hit_type] = min(
+            int(candidate["route_ranks"].get(hit_type, rank)),
+            max(1, rank),
+        )
+        candidate["route_scores"][hit_type] = max(
+            float(candidate["route_scores"].get(hit_type, 0.0)),
+            float(route_score),
+        )
+
+    def _candidate_fusion_score(self, candidate: dict[str, Any], plan: QueryPlan) -> float:
+        row = candidate["row"]
+        rrf = sum(
+            ROUTE_WEIGHTS.get(route, 1.0) / (RRF_K + int(rank))
+            for route, rank in candidate["route_ranks"].items()
+        )
+        max_rrf = sum(ROUTE_WEIGHTS.values()) / (RRF_K + 1)
+        route_score = min(1.0, rrf / max_rrf) if max_rrf else 0.0
+        heuristic_raw = (
+            lexical_score(row, plan.normalized_query, candidate["order"], plan)
+            + intent_score(row, plan.normalized_query, plan)
+            + query_plan_score(row, plan)
+        )
+        heuristic_score = 1.0 / (1.0 + math.exp(-max(-40.0, min(40.0, heuristic_raw)) / 8.0))
+        direct_bonus = 0.08 if row_matches_query_plan_evidence(row, plan) else 0.0
+        return min(0.99, max(0.0, route_score * 0.68 + heuristic_score * 0.32 + direct_bonus))
+
+    @staticmethod
+    def _diversify_documents(ranked: list[tuple[int, dict[str, Any]]]) -> list[tuple[int, dict[str, Any]]]:
+        first_per_document: list[tuple[int, dict[str, Any]]] = []
+        remaining: list[tuple[int, dict[str, Any]]] = []
+        seen: set[str] = set()
+        for item in ranked:
+            document_id = str(item[1]["row"]["document_id"] or "")
+            if document_id not in seen:
+                first_per_document.append(item)
+                seen.add(document_id)
+            else:
+                remaining.append(item)
+        return [*first_per_document, *remaining]
 
     def _route_evidence_found(self, candidate_rows: dict[str, dict[str, Any]], plan: QueryPlan) -> bool:
         rows = [candidate["row"] for candidate in candidate_rows.values()]
         if plan.intent in STRICT_EVIDENCE_INTENTS:
             return any(row_matches_query_plan_evidence(row, plan) for row in rows)
+        if plan.required_evidence_groups:
+            direct_rows = [row for row in rows if row_matches_required_evidence_groups(row, plan)]
+            if plan.search_mode in {"comparison", "exhaustive"} or plan.intent in {
+                "projection_comparison",
+                "clause_comparison",
+            }:
+                return len({str(row["document_id"]) for row in direct_rows}) >= 2
+            return bool(direct_rows)
         if plan.intent == "standard_selection" and plan.candidate_title_terms:
             return any(any(term in (row["title"] or "") for term in plan.candidate_title_terms) for row in rows)
         if plan.standard_numbers:
@@ -1574,20 +1811,48 @@ class KnowledgeStore:
         return False
 
     def _vector_candidates(
-        self, conn: sqlite3.Connection, query: str, where: list[str], params: list[Any], limit: int
-    ) -> list[tuple[sqlite3.Row, float]]:
-        dense_succeeded, dense = self._dense_embedding_candidates(conn, query, where, params, limit)
-        if dense_succeeded:
-            return [(row, score + 0.15) for row, score in dense]
-        return self._local_hash_vector_candidates(conn, query, where, params, limit)
+        self,
+        conn: sqlite3.Connection,
+        query: str,
+        plan: QueryPlan,
+        where: list[str],
+        params: list[Any],
+        limit: int,
+    ) -> VectorCandidateResult:
+        dense = self._dense_embedding_candidates(conn, query, plan, where, params, limit)
+        if dense.succeeded:
+            return VectorCandidateResult(
+                candidates=tuple((row, min(1.0, score + 0.08)) for row, score in dense.candidates),
+                route=dense.route,
+                embedding_ms=dense.embedding_ms,
+                search_ms=dense.search_ms,
+                error=dense.error,
+            )
+        if not self._has_narrow_sql_scope(where):
+            return dense
+        started = perf_counter()
+        local = self._local_hash_vector_candidates(conn, query, plan, where, params, limit)
+        return VectorCandidateResult(
+            candidates=tuple(local),
+            route="local_hash" if local else dense.route,
+            embedding_ms=dense.embedding_ms,
+            search_ms=dense.search_ms + (perf_counter() - started) * 1000,
+            error=dense.error,
+        )
 
     def _dense_embedding_candidates(
-        self, conn: sqlite3.Connection, query: str, where: list[str], params: list[Any], limit: int
-    ) -> tuple[bool, list[tuple[sqlite3.Row, float]]]:
+        self,
+        conn: sqlite3.Connection,
+        query: str,
+        plan: QueryPlan,
+        where: list[str],
+        params: list[Any],
+        limit: int,
+    ) -> VectorCandidateResult:
         settings = get_settings()
         config = embedding_config(settings)
         if not config.enabled:
-            return False, []
+            return VectorCandidateResult(error="embedding_not_configured")
         try:
             exists = conn.execute(
                 f"""
@@ -1601,15 +1866,66 @@ class KnowledgeStore:
                 [config.model, *params],
             ).fetchone()
         except sqlite3.OperationalError:
-            return False, []
+            return VectorCandidateResult(error="embedding_table_unavailable")
         if not exists:
-            return False, []
+            return VectorCandidateResult(error="embedding_scope_empty")
+        embedding_started = perf_counter()
         try:
             q_vec = EmbeddingProvider(config, timeout_seconds=settings.request_timeout_seconds).embed(
-                [query + " " + " ".join(query_terms(query))]
+                [query + " " + " ".join(query_terms(query, plan)[:24])]
             )[0]
-        except Exception:
-            return False, []
+        except Exception as error:
+            return VectorCandidateResult(
+                embedding_ms=(perf_counter() - embedding_started) * 1000,
+                error=type(error).__name__,
+            )
+        embedding_ms = (perf_counter() - embedding_started) * 1000
+
+        search_started = perf_counter()
+        if settings.ann_search_enabled:
+            try:
+                ann = get_ann_index(settings.ann_index_path, settings.ann_manifest_path)
+                manifest = ann.manifest()
+                if manifest and self._ann_manifest_matches(conn, manifest, config.model, len(q_vec)):
+                    matches = ann.search(q_vec, max(120, limit * 4))
+                    chunk_ids = [chunk_id for chunk_id, _ in matches]
+                    if chunk_ids:
+                        placeholders = ",".join("?" for _ in chunk_ids)
+                        rows = conn.execute(
+                            f"""
+                            select c.*, d.document_type, d.status, d.official_url, d.source_platform, 0.0 as rank
+                            from chunks c
+                            join documents d on d.document_id = c.document_id
+                            where c.chunk_id in ({placeholders}) and {' and '.join(where)}
+                            """,
+                            [*chunk_ids, *params],
+                        ).fetchall()
+                        row_map = {str(row["chunk_id"]): row for row in rows}
+                        candidates = tuple(
+                            (row_map[chunk_id], similarity)
+                            for chunk_id, similarity in matches
+                            if chunk_id in row_map and similarity > 0.15
+                        )[:limit]
+                        return VectorCandidateResult(
+                            candidates=candidates,
+                            route="ann",
+                            embedding_ms=embedding_ms,
+                            search_ms=(perf_counter() - search_started) * 1000,
+                        )
+            except (OSError, ValueError, KeyError, sqlite3.OperationalError) as error:
+                ann_error = type(error).__name__
+            except Exception as error:
+                ann_error = type(error).__name__
+        else:
+            ann_error = "ann_disabled"
+
+        if not self._has_narrow_sql_scope(where):
+            return VectorCandidateResult(
+                route="none",
+                embedding_ms=embedding_ms,
+                search_ms=(perf_counter() - search_started) * 1000,
+                error=locals().get("ann_error", "ann_unavailable"),
+            )
         try:
             rows = conn.execute(
                 f"""
@@ -1622,19 +1938,65 @@ class KnowledgeStore:
                 [config.model, *params],
             ).fetchall()
         except sqlite3.OperationalError:
-            return False, []
+            return VectorCandidateResult(
+                embedding_ms=embedding_ms,
+                search_ms=(perf_counter() - search_started) * 1000,
+                error="exact_dense_query_failed",
+            )
         scored = []
         for row in rows:
             score = cosine_dense(q_vec, parse_dense_vector(row["vector_json"]))
             if score > 0.2:
                 scored.append((row, score))
         scored.sort(key=lambda item: item[1], reverse=True)
-        return True, scored[:limit]
+        return VectorCandidateResult(
+            candidates=tuple(scored[:limit]),
+            route="exact_dense",
+            embedding_ms=embedding_ms,
+            search_ms=(perf_counter() - search_started) * 1000,
+            error=locals().get("ann_error"),
+        )
+
+    @staticmethod
+    def _has_narrow_sql_scope(where: list[str]) -> bool:
+        return any("d.document_id in" in clause or "d.standard_no =" in clause for clause in where)
+
+    @staticmethod
+    def _ann_manifest_matches(
+        conn: sqlite3.Connection,
+        manifest: AnnManifest,
+        model: str,
+        dimensions: int,
+    ) -> bool:
+        if manifest.model != model or manifest.dimensions != dimensions:
+            return False
+        row = conn.execute(
+            """
+            select count(*) as count, min(dimensions) as min_dimensions,
+                   max(dimensions) as max_dimensions, max(updated_at) as max_updated_at
+            from chunk_embeddings
+            where vector_model = ?
+            """,
+            (model,),
+        ).fetchone()
+        return bool(
+            row
+            and int(row["count"] or 0) == manifest.count
+            and int(row["min_dimensions"] or 0) == manifest.dimensions
+            and int(row["max_dimensions"] or 0) == manifest.dimensions
+            and str(row["max_updated_at"] or "") == manifest.max_updated_at
+        )
 
     def _local_hash_vector_candidates(
-        self, conn: sqlite3.Connection, query: str, where: list[str], params: list[Any], limit: int
+        self,
+        conn: sqlite3.Connection,
+        query: str,
+        plan: QueryPlan,
+        where: list[str],
+        params: list[Any],
+        limit: int,
     ) -> list[tuple[sqlite3.Row, float]]:
-        q_vec = hashed_vector(query + " " + " ".join(query_terms(query)))
+        q_vec = hashed_vector(query + " " + " ".join(query_terms(query, plan)))
         if not q_vec:
             return []
         try:
@@ -1659,30 +2021,69 @@ class KnowledgeStore:
         return scored[:limit]
 
     def _graph_candidates(
-        self, conn: sqlite3.Connection, query: str, where: list[str], params: list[Any], limit: int
+        self,
+        conn: sqlite3.Connection,
+        query: str,
+        plan: QueryPlan,
+        where: list[str],
+        params: list[Any],
+        limit: int,
     ) -> list[tuple[sqlite3.Row, float]]:
-        terms = [term for term in query_terms(query) if len(term) >= 2][:8]
+        preferred_terms = [
+            *plan.subject_terms,
+            *plan.required_terms,
+            *plan.alternative_terms,
+            *plan.candidate_title_terms,
+            *plan.standard_numbers,
+        ]
+        terms = [
+            term
+            for term in dict.fromkeys([*preferred_terms, *query_terms(query, plan)])
+            if 2 <= len(term) <= 80
+        ][:12]
         if not terms:
             return []
         term_where = " or ".join("e.name like ?" for _ in terms)
         term_params = [f"%{term}%" for term in terms]
-        try:
-            rows = conn.execute(
-                f"""
-                select c.*, d.document_type, d.status, d.official_url, d.source_platform, 0.0 as rank,
-                       max(r.confidence) as graph_score
-                from kg_entities e
-                join kg_relations r on r.target_entity_id = e.entity_id or r.source_entity_id = e.entity_id
-                join chunks c on c.chunk_id = r.evidence_chunk_id
-                join documents d on d.document_id = c.document_id
-                where ({term_where}) and {' and '.join(where)}
-                group by c.chunk_id
-                limit ?
-                """,
-                [*term_params, *params, limit],
-            ).fetchall()
-        except sqlite3.OperationalError:
-            return []
+        relation_map = {
+            "authority_responsibility": ("RESPONSIBLE_FOR", "STATES_RESPONSIBILITY"),
+            "legal_responsibility": ("RESPONSIBLE_FOR", "STATES_RESPONSIBILITY"),
+            "service_materials": ("REQUIRES_MATERIAL", "SPECIFIES_MATERIAL", "HAS_REQUIREMENT"),
+            "service_procedure_basis": ("APPLIES_TO", "DECIDED_BY", "SUPPORTS_GUIDE"),
+            "service_time_limit": ("HAS_TIME_LIMIT",),
+            "standard_selection": ("APPLIES_TO_MINERAL", "HAS_CODE"),
+            "related_documents": ("REFERENCES_STANDARD", "REPLACES"),
+        }
+        relation_types = relation_map.get(plan.intent, ())
+        relation_where = ""
+        relation_params: list[Any] = []
+        if relation_types:
+            placeholders = ",".join("?" for _ in relation_types)
+            relation_where = f" and r.relation_type in ({placeholders})"
+            relation_params.extend(relation_types)
+        def run_graph(extra_where: str, extra_params: list[Any]) -> list[sqlite3.Row]:
+            try:
+                return conn.execute(
+                    f"""
+                    select c.*, d.document_type, d.status, d.official_url, d.source_platform, 0.0 as rank,
+                           max(r.confidence) as graph_score
+                    from kg_entities e
+                    join kg_relations r on r.target_entity_id = e.entity_id or r.source_entity_id = e.entity_id
+                    join chunks c on c.chunk_id = r.evidence_chunk_id
+                    join documents d on d.document_id = c.document_id
+                    where ({term_where}){extra_where} and {' and '.join(where)}
+                    group by c.chunk_id
+                    order by graph_score desc
+                    limit ?
+                    """,
+                    [*term_params, *extra_params, *params, limit],
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return []
+
+        rows = run_graph(relation_where, relation_params)
+        if not rows and relation_types:
+            rows = run_graph("", [])
         return [(row, float(row["graph_score"] or 0.5)) for row in rows]
 
     def standards(self, params: dict[str, Any]) -> dict[str, Any]:

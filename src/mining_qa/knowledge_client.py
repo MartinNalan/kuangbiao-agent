@@ -3,7 +3,7 @@ from typing import Any
 import httpx
 
 from .config import Settings
-from .query_understanding import understand_query
+from .query_understanding import QueryPlan, understand_query
 from .schemas import KnowledgeSearchResponse, StandardsResponse
 
 
@@ -15,7 +15,14 @@ class KnowledgeClient:
     def enabled(self) -> bool:
         return bool(self.settings.knowledge_base_url.strip())
 
-    async def search(self, question: str, filters: dict[str, Any]) -> KnowledgeSearchResponse:
+    async def search(
+        self,
+        question: str,
+        filters: dict[str, Any],
+        plan: QueryPlan | None = None,
+        *,
+        retrieval_round: int = 1,
+    ) -> KnowledgeSearchResponse:
         if not self.enabled:
             return KnowledgeSearchResponse(
                 coverage={
@@ -25,14 +32,19 @@ class KnowledgeClient:
                 }
             )
 
-        plan = understand_query(question)
+        effective_plan = plan or understand_query(question)
         payload = {
             "query": question,
             "filters": filters,
+            "retrieval_plan": effective_plan.to_payload(),
             "options": {
-                "top_k": 30 if plan.exhaustive_search else 10,
+                "top_k": 30
+                if effective_plan.search_mode in {"comparison", "exhaustive"}
+                or effective_plan.exhaustive_search
+                else 12,
                 "include_full_text": False,
                 "allow_web_supplement": True,
+                "retrieval_round": retrieval_round,
             },
         }
         url = self.settings.knowledge_base_url.rstrip("/") + "/knowledge/search"

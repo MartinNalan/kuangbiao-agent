@@ -31,6 +31,26 @@ class Settings(BaseSettings):
     embedding_model: str = Field(default="", alias="EMBEDDING_MODEL")
     embedding_dimensions: int = Field(default=0, alias="EMBEDDING_DIMENSIONS")
     embedding_batch_size: int = Field(default=10, alias="EMBEDDING_BATCH_SIZE")
+    query_planner_enabled: bool = Field(default=True, alias="QUERY_PLANNER_ENABLED")
+    evidence_reranker_enabled: bool = Field(default=True, alias="EVIDENCE_RERANKER_ENABLED")
+    query_planner_max_tokens: int = Field(default=900, alias="QUERY_PLANNER_MAX_TOKENS")
+    evidence_reranker_max_tokens: int = Field(default=2000, alias="EVIDENCE_RERANKER_MAX_TOKENS")
+    answer_max_tokens: int = Field(default=1800, alias="ANSWER_MAX_TOKENS")
+    max_retrieval_rounds: int = Field(default=2, alias="MAX_RETRIEVAL_ROUNDS")
+    ann_search_enabled: bool = Field(default=True, alias="ANN_SEARCH_ENABLED")
+    ann_index_path: str = Field(
+        default=str(PROJECT_ROOT / "data" / "knowledge_base" / "indexes" / "dense.usearch"),
+        alias="ANN_INDEX_PATH",
+    )
+    ann_manifest_path: str = Field(
+        default=str(PROJECT_ROOT / "data" / "knowledge_base" / "indexes" / "dense_manifest.json"),
+        alias="ANN_MANIFEST_PATH",
+    )
+    retrieval_trace_enabled: bool = Field(default=True, alias="RETRIEVAL_TRACE_ENABLED")
+    retrieval_trace_path: str = Field(
+        default=str(PROJECT_ROOT / "data" / "app" / "retrieval_traces.jsonl"),
+        alias="RETRIEVAL_TRACE_PATH",
+    )
     app_db_path: str = Field(
         default=str(PROJECT_ROOT / "data" / "app" / "application.sqlite"),
         alias="APP_DB_PATH",

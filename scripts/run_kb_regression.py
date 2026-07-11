@@ -209,6 +209,37 @@ def assert_equivalent_engineering_distance_questions() -> None:
     print("OK search: equivalent engineering-distance questions")
 
 
+def assert_complex_relation_retrieval() -> None:
+    projection_query = "关于矿体无限外推所依据的间距，不同的标准是否有不同的规定？具体列出来代表性的。"
+    projection = post_json(
+        f"{KB_URL}/knowledge/search",
+        {"query": projection_query, "options": {"top_k": 10, "include_full_text": False}},
+    )
+    projection_hits = projection.get("results") or []
+    direct_projection_hits = [
+        hit
+        for hit in projection_hits
+        if any(term in (hit.get("quote") or "") for term in ("无限外推", "有限外推", "尖推", "平推"))
+        and "工程间距" in (hit.get("quote") or "")
+    ]
+    assert_true(
+        len({hit.get("document_id") for hit in direct_projection_hits}) >= 3,
+        f"projection relation query should retrieve at least three direct documents: {projection_hits}",
+    )
+    assert_true(projection.get("retrieval", {}).get("ann_used") == 1, "complex projection should use ANN")
+
+    eligibility_query = "哪些标准、制度规定了详查报告就可以转采？"
+    eligibility = post_json(
+        f"{KB_URL}/knowledge/search",
+        {"query": eligibility_query, "options": {"top_k": 20, "include_full_text": False}},
+    )
+    eligibility_hits = eligibility.get("results") or []
+    standard_numbers = {hit.get("standard_no") for hit in eligibility_hits}
+    assert_true("自然资规〔2023〕4号" in standard_numbers, "eligibility query should retrieve policy condition")
+    assert_true("DZ/T 0430-2023" in standard_numbers, "eligibility query should retrieve report-type limitation")
+    print("OK search: controlled complex-relation retrieval")
+
+
 def assert_high_value_intent_routes() -> None:
     cases = [
         (
@@ -495,6 +526,15 @@ def assert_api() -> None:
         any(source.get("source_role") == "parent_policy" for source in basis.get("sources") or []),
         "T018 basis API source should identify parent_policy",
     )
+    eligibility = post_json(
+        f"{API_URL}/api/ask",
+        {"question": "哪些标准、制度规定了详查报告就可以转采？"},
+        headers=headers,
+    )
+    assert_true(eligibility.get("status") == "answered", "eligibility API question should be answered")
+    eligibility_answer = eligibility.get("answer", "")
+    assert_true("经评审备案的矿产资源储量报告" in eligibility_answer, "eligibility answer missing policy precondition")
+    assert_true("不能替代探矿权转采矿权" in eligibility_answer, "eligibility answer missing report limitation")
     print("OK API: /api/ask end-to-end")
 
 
@@ -538,6 +578,7 @@ def main() -> int:
         assert_policy_authority()
         assert_background_context_does_not_trigger_authority()
         assert_equivalent_engineering_distance_questions()
+        assert_complex_relation_retrieval()
         assert_high_value_intent_routes()
         assert_service_guide_inventory()
         assert_service_guide_search()

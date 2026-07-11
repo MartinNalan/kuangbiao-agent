@@ -5,9 +5,16 @@ from pathlib import Path
 from unittest.mock import patch
 
 from mining_qa.agent import MiningQAAgent
-from mining_qa.knowledge_store import KnowledgeStore, table_quote
-from mining_qa.query_understanding import contextualize_follow_up, understand_query
+from mining_qa.config import Settings
+from mining_qa.evidence_reranker import EvidenceReranker
+from mining_qa.knowledge_store import KnowledgeStore, VectorCandidateResult, table_quote
+from mining_qa.query_understanding import (
+    apply_semantic_plan,
+    contextualize_follow_up,
+    understand_query,
+)
 from mining_qa.schemas import Source
+from mining_qa.retrieval_planner import RetrievalPlanner
 
 
 QUESTIONS = (
@@ -72,6 +79,49 @@ class QueryUnderstandingTests(unittest.TestCase):
         self.assertTrue(plan.exhaustive_search)
         self.assertFalse(plan.has_candidate_scope)
 
+    def test_infinite_projection_wording_uses_the_same_relation_profile(self) -> None:
+        regular = apply_semantic_plan(
+            understand_query("关于矿体外推所依据的间距，不同标准是否有不同规定？"),
+            None,
+        )
+        infinite = apply_semantic_plan(
+            understand_query("关于矿体无限外推所依据的间距，不同标准是否有不同规定？"),
+            None,
+        )
+
+        self.assertEqual(regular.intent, "projection_comparison")
+        self.assertEqual(infinite.intent, "projection_comparison")
+        self.assertEqual(regular.required_evidence_groups, infinite.required_evidence_groups)
+
+    def test_semantic_plan_can_identify_exploration_to_mining_eligibility(self) -> None:
+        plan = apply_semantic_plan(
+            understand_query("哪些标准、制度规定了详查报告就可以转采"),
+            {
+                "canonical_query": "详查阶段地质报告作为探矿权转采矿权依据的条件",
+                "intent": "exploration_to_mining_eligibility",
+                "search_mode": "exhaustive",
+                "subject_terms": ["详查报告", "探矿权转采矿权"],
+                "required_terms": ["勘查程度", "申请采矿权"],
+                "confidence": 0.92,
+            },
+        )
+
+        self.assertEqual(plan.intent, "exploration_to_mining_eligibility")
+        self.assertTrue(plan.planner_used)
+        self.assertTrue(plan.exhaustive_search)
+        self.assertIn("探矿权转采矿权", plan.retrieval_query)
+
+    def test_exploration_to_mining_intent_has_a_deterministic_fallback(self) -> None:
+        plan = apply_semantic_plan(
+            understand_query("哪些标准、制度规定了详查报告就可以转采？"),
+            None,
+        )
+
+        self.assertEqual(plan.intent, "exploration_to_mining_eligibility")
+        self.assertTrue(plan.exhaustive_search)
+        self.assertIn("探矿权转采矿权", plan.retrieval_query)
+        self.assertEqual(len(plan.required_evidence_groups), 3)
+
     def test_high_value_policy_and_numeric_intents_are_separate(self) -> None:
         cases = {
             "采矿证延续需要提交什么材料？": ("service_materials", "自然资规〔2023〕4号"),
@@ -126,9 +176,8 @@ class RetrievalStrategyTests(unittest.TestCase):
 
     def test_sufficient_scoped_fts_evidence_skips_vectors(self) -> None:
         row = engineering_row()
-        candidates = {
-            row["chunk_id"]: {"row": row, "hit_types": {"full_text"}, "boost": 2.0, "order": 0}
-        }
+        candidates = {}
+        self.store._add_candidate(candidates, row, "full_text", 1, 1.0)  # type: ignore[arg-type]
         with (
             patch.object(
                 self.store,
@@ -147,30 +196,110 @@ class RetrievalStrategyTests(unittest.TestCase):
 
     def test_dense_success_does_not_run_local_hash(self) -> None:
         dense_row = engineering_row()
+        plan = understand_query(QUESTIONS[0])
         with (
-            patch.object(self.store, "_dense_embedding_candidates", return_value=(True, [(dense_row, 0.7)])),
+            patch.object(
+                self.store,
+                "_dense_embedding_candidates",
+                return_value=VectorCandidateResult(candidates=((dense_row, 0.7),), route="ann"),
+            ),
             patch.object(self.store, "_local_hash_vector_candidates", return_value=[]) as local_hash,
         ):
-            result = self.store._vector_candidates(None, "query", ["1=1"], [], 10)  # type: ignore[arg-type]
+            result = self.store._vector_candidates(  # type: ignore[arg-type]
+                None,
+                "query",
+                plan,
+                ["d.document_id in (?)"],
+                ["doc-gold"],
+                10,
+            )
 
         local_hash.assert_not_called()
-        self.assertEqual(result[0][0]["chunk_id"], "chunk-f1")
-        self.assertAlmostEqual(result[0][1], 0.85)
+        self.assertEqual(result.route, "ann")
+        self.assertEqual(result.candidates[0][0]["chunk_id"], "chunk-f1")
+        self.assertAlmostEqual(result.candidates[0][1], 0.78)
 
     def test_dense_failure_falls_back_to_local_hash(self) -> None:
         local_row = engineering_row()
+        plan = understand_query(QUESTIONS[0])
         with (
-            patch.object(self.store, "_dense_embedding_candidates", return_value=(False, [])),
+            patch.object(
+                self.store,
+                "_dense_embedding_candidates",
+                return_value=VectorCandidateResult(error="ann_unavailable"),
+            ),
             patch.object(
                 self.store,
                 "_local_hash_vector_candidates",
                 return_value=[(local_row, 0.4)],
             ) as local_hash,
         ):
-            result = self.store._vector_candidates(None, "query", ["1=1"], [], 10)  # type: ignore[arg-type]
+            result = self.store._vector_candidates(  # type: ignore[arg-type]
+                None,
+                "query",
+                plan,
+                ["d.document_id in (?)"],
+                ["doc-gold"],
+                10,
+            )
 
         local_hash.assert_called_once()
-        self.assertEqual(result[0][0]["chunk_id"], "chunk-f1")
+        self.assertEqual(result.route, "local_hash")
+        self.assertEqual(result.candidates[0][0]["chunk_id"], "chunk-f1")
+
+
+class EvidenceRerankerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_projection_evidence_requires_the_relation_not_just_spacing_words(self) -> None:
+        question = "关于矿体无限外推所依据的间距，不同标准是否有不同规定？"
+        plan = apply_semantic_plan(understand_query(question), None)
+        hits = [
+            {
+                "document_id": "ordinary-table",
+                "title": "某矿产地质勘查规范",
+                "standard_no": "DZ/T 0000-2020",
+                "clause_no": "表1",
+                "quote": "推荐基本工程间距为走向100 m、倾向100 m，局部可按1/2加密。",
+            },
+            {
+                "document_id": "geometry",
+                "title": "固体矿产资源量估算规程 第2部分：几何法",
+                "standard_no": "DZ/T 0338.2-2020",
+                "clause_no": "5.4.2",
+                "quote": "有限外推时，若实际工程间距大于推断资源量工程间距，按推断资源量工程间距的1/2尖推。",
+            },
+            {
+                "document_id": "rock-gold",
+                "title": "矿产地质勘查规范 岩金",
+                "standard_no": "DZ/T 0205-2020",
+                "clause_no": "8.3.4.5.2",
+                "quote": "有限外推按理论工程间距的1/2尖推、1/4平推；实际间距较小时按实际工程间距计算。",
+            },
+        ]
+        settings = Settings(OPENAI_API_KEY="", EVIDENCE_RERANKER_ENABLED=True)
+        result = await EvidenceReranker(settings).judge(question, plan, hits)
+
+        self.assertTrue(result.sufficient)
+        self.assertEqual(result.direct_evidence_count, 2)
+        self.assertEqual({hit["document_id"] for hit in result.hits}, {"geometry", "rock-gold"})
+
+
+class PlannerFallbackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_planner_failure_preserves_a_safe_deterministic_plan(self) -> None:
+        class BrokenLLM:
+            enabled = True
+
+            async def complete_json(self, messages, **kwargs):  # noqa: ANN001
+                raise RuntimeError("provider unavailable")
+
+        question = "关于矿体无限外推所依据的间距，不同标准是否有不同规定？"
+        base = understand_query(question)
+        settings = Settings(OPENAI_API_KEY="configured", QUERY_PLANNER_ENABLED=True)
+        result = await RetrievalPlanner(settings, BrokenLLM()).plan(question, base)  # type: ignore[arg-type]
+
+        self.assertFalse(result.used)
+        self.assertEqual(result.plan.intent, "projection_comparison")
+        self.assertTrue(result.plan.required_evidence_groups)
+        self.assertEqual(result.error, "RuntimeError")
 
 
 class FastAnswerTests(unittest.TestCase):
@@ -227,6 +356,42 @@ class FastAnswerTests(unittest.TestCase):
 
         self.assertIn("矿业权人负责", answer)
         self.assertNotIn("许可证颁发层级", answer)
+
+    def test_exploration_to_mining_answer_distinguishes_degree_and_report_type(self) -> None:
+        agent = object.__new__(MiningQAAgent)
+        plan = apply_semantic_plan(
+            understand_query("哪些标准、制度规定了详查报告就可以转采？"),
+            None,
+        )
+        sources = [
+            Source(
+                title="自然资源部关于进一步完善矿产资源勘查开采登记管理的通知",
+                standard_no="自然资规〔2023〕4号",
+                chapter="二、#1",
+                quote=(
+                    "探矿权转采矿权，应当依据经评审备案的矿产资源储量报告。"
+                    "资源储量规模为大型的非煤矿山、大中型煤矿应当达到勘探程度，"
+                    "其他矿山应当达到详查（含）以上程度。"
+                ),
+                source_type="official_fulltext",
+                text_access="html_text",
+            ),
+            Source(
+                title="固体矿产资源储量核实报告编写规范",
+                standard_no="DZ/T 0430-2023",
+                chapter="A.9.5",
+                quote="矿产资源储量核实报告不能替代探矿权转采矿权时应提交的地质勘查报告。",
+                source_type="local_kb",
+                text_access="ocr_text",
+            ),
+        ]
+
+        answer = agent._fast_answer("哪些标准、制度规定了详查报告就可以转采？", sources, plan) or ""
+
+        self.assertIn("不能简单理解", answer)
+        self.assertIn("经评审备案的矿产资源储量报告", answer)
+        self.assertIn("详查（含）以上程度", answer)
+        self.assertIn("不能替代", answer)
 
 
 if __name__ == "__main__":

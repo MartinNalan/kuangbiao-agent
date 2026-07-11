@@ -58,6 +58,7 @@ from .schemas import (
 )
 from .usage_log import UsageLogger
 from .usage_stats import UsageStats
+from . import __version__
 
 
 logger = logging.getLogger(__name__)
@@ -75,7 +76,7 @@ OPENAPI_TAGS = [
 
 app = FastAPI(
     title="geowiki API",
-    version="0.3.0",
+    version=__version__,
     description=(
         "一款专注地质领域的百科全搜。公网客户端只应使用 "
         "`/api/*` 与 `/health`；私有知识库服务不得暴露到公网。"

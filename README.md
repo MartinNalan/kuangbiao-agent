@@ -4,7 +4,9 @@
 
 ## 当前阶段
 
-当前已具备私有知识库问答、邀请码与邮箱验证注册、登录会话、用户 API Key、每日次数配额、会话历史、标准目录、开发者控制台和管理员基础入口。
+当前版本为 **v1.0.0**。已具备私有知识库问答、受控 Agentic RAG、邀请码与邮箱验证注册、登录会话、用户 API Key、每日次数配额、会话历史、标准目录、开发者控制台和管理员基础入口。
+
+v1.0 检索链路为：领域门控 -> 机械归一 -> 复杂问题 DeepSeek 规划 -> Schema/FTS/KG/ANN 混合检索 -> 证据审查 -> 最多一次补充检索 -> 受证据约束的回答。目标明确的表格、权限和办事问题走已验证的快速路径，不额外调用规划模型。
 
 ## 文档
 
@@ -15,6 +17,7 @@
 - `docs/WIREFRAMES.md` - 页面原型说明
 - `docs/KNOWLEDGE_BASE_REQUIREMENTS.md` - 知识库构建要求
 - `docs/LICENSING_AND_REPOSITORIES.md` - 双许可证与仓库策略
+- `docs/V1_RELEASE.md` - v1.0 架构、验收结果与私有数据边界
 
 ## 本地配置
 
@@ -54,6 +57,14 @@ AGENTMAIL_BASE_URL=https://api.agentmail.to/v0
 ```
 
 `KNOWLEDGE_BASE_URL` 为空时，系统不会编造答案，会返回证据不足提示。知识库服务完成后，填入知识库后端地址即可接入 `/knowledge/search` 和 `/knowledge/standards`。
+
+稠密向量使用阿里云百炼 `text-embedding-v4`，运行时通过 USEARCH ANN 索引检索，不再逐条解析 SQLite 中的 JSON 向量。完成或更新 `chunk_embeddings` 后重建私有索引：
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/build_ann_index.py
+```
+
+索引默认写入 `data/knowledge_base/indexes/`，与 SQLite 知识库一样属于私有资产，不提交 Git。
 
 本地知识库证据不足时，默认快速返回证据不足，并记录知识库缺口任务；后台后续再进行官方来源补充、OCR 和候选入库审核。若设置 `ENABLE_SYNC_WEB_SUPPLEMENT=true`，同步请求会尝试查询国家标准公开系统和自然资源标准化信息服务平台，但仍不会在缺少正文证据时生成条款级结论。
 
@@ -182,7 +193,12 @@ PYTHONPATH=src uvicorn mining_qa.api:app --host 127.0.0.1 --port 8000
 自动回归测试：
 
 ```bash
-.venv/bin/python scripts/run_api_regression.py
+PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v
+PYTHONPATH=src .venv/bin/python scripts/evaluate_ann_recall.py
+KB_URL=http://127.0.0.1:18181 API_URL=http://127.0.0.1:18180 \
+  PYTHONPATH=src .venv/bin/python scripts/run_kb_regression.py
+KB_URL=http://127.0.0.1:18181 API_URL=http://127.0.0.1:18180 \
+  PYTHONPATH=src .venv/bin/python scripts/run_api_regression.py
 ```
 
 ## 许可证与数据边界

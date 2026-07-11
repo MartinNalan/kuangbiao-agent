@@ -1,6 +1,6 @@
 # Knowledge Base Requirements
 
-版本：v0.1
+版本：v1.0
 日期：2026-07-08
 状态：草案
 
@@ -27,7 +27,7 @@
 - OCR 结果接收或调用。
 - Schema 设计与结构化存储。
 - 全文索引。
-- 向量索引，二期接入。
+- 稠密向量表与私有 ANN 索引。
 - 知识图谱构建。
 - 证据检索。
 - 标准目录查询。
@@ -218,7 +218,7 @@ Hybrid Retrieval
   -> full-text + vector + graph merged evidence ranking
 ```
 
-增强架构用于解决关键词不一致、语义相似、标准关系复杂等问题。MVP 不强依赖 embedding 和图谱。
+增强架构用于解决关键词不一致、语义相似、标准关系复杂等问题。v1.0 已采用可配置 embedding、USEARCH ANN 和 SQLite KG；专用向量数据库与 Neo4j 仍可按规模替换。
 
 ### 6.4 外部知识库适配
 
@@ -466,20 +466,18 @@ validation_status
 
 检索结果必须统一排序并返回证据列表，不直接生成最终答案。
 
-MVP 阶段优先实现：
+v1.0 已实现：
 
 - Schema + 结构化存储。
 - 标准目录查询。
 - SQLite FTS5 或 Elasticsearch/OpenSearch 全文搜索。MVP 可先用 SQLite FTS5，后续按规模迁移到 Elasticsearch/OpenSearch。
 - 页码级或条款级证据返回。
 - 本地证据不足时返回 `needs_web_supplement: true`。
-
-二期接入：
-
-- ChromaDB 向量检索。
 - Embedding Provider 可配置，不绑定生成模型。
-- Neo4j 知识图谱。
-- 全文搜索、向量搜索、知识图谱的混合检索。
+- `text-embedding-v4` 稠密向量与 USEARCH HNSW ANN 索引。
+- SQLite 轻量知识图谱。
+- Schema、FTS、向量和知识图谱混合检索。
+- 复杂问题证据审查和最多两轮检索。
 
 推荐检索策略：
 
@@ -488,7 +486,7 @@ MVP 阶段优先实现：
 - 标准号、条号、术语优先走全文搜索。
 - 目标矿种、事项或标准明确时，先依据 schema 和文档元数据限定候选标准；候选证据不足时自动退回全库，不得直接判定无依据。
 - 自然语言问题先走全文搜索、结构化字段和知识图谱召回；已有可回答证据时早停，只有证据不足时才用向量搜索补充语义召回。
-- 稠密向量查询成功时不得再重复遍历本地 hash 向量；稠密向量未配置、目标范围无向量或调用失败时才回退本地 hash。
+- 稠密向量查询成功时不得再重复遍历本地 hash 向量；ANN 不可用时只允许在已锁定候选文档的范围内精确计算，禁止恢复无范围的全库 JSON 向量扫描。
 - 权限归属、标准适用、表格数值和条款差异类问题应使用意图路由，不应只按关键词相似度排序。
 - 涉及“哪个标准规定”“适用于哪个矿种”“是否替代”等关系问题时查询知识图谱。
 - 合并结果时保留每个证据的来源、得分和命中方式。
@@ -501,14 +499,13 @@ MVP 阶段优先实现：
 ```text
 User question
   -> domain relevance check
-  -> domain_lexicon normalization
-  -> intent routing
-  -> schema candidate-standard routing
-  -> scoped full-text / structured-field / KG retrieval
-  -> answerability early exit, or dense-vector fallback
-  -> global fallback when scoped evidence is insufficient
-  -> negative-term filtering and reranking
-  -> answerability check
+  -> mechanical normalization and deterministic fallback intent
+  -> validated LLM planner for ambiguous/complex questions
+  -> intent schema and document-type routing
+  -> evidence-group FTS + KG + USEARCH ANN
+  -> reciprocal-rank fusion
+  -> evidence sufficiency judge
+  -> optional second retrieval
   -> answer generation or insufficient-evidence response
 ```
 
@@ -538,7 +535,7 @@ Embedding Provider 应可配置：
 - API 型 embedding：省本地设备资源，按 token 付费。
 - 本地 embedding：不按 API 付费，但占用 CPU/GPU、内存、模型存储和批量入库时间。
 
-MVP 不强依赖正式 embedding。当前可使用本地 hash 字符 n-gram 向量作为 fallback；正式在线 embedding 首选阿里云百炼/DashScope `text-embedding-v4`，通过 OpenAI 兼容接口调用。
+v1.0 正式 embedding 使用阿里云百炼/DashScope `text-embedding-v4`，通过 OpenAI 兼容接口调用。文档向量写入 SQLite，查询通过私有 USEARCH ANN 索引完成。
 
 推荐配置：
 
@@ -550,7 +547,7 @@ EMBEDDING_DIMENSIONS=1024
 EMBEDDING_BATCH_SIZE=10
 ```
 
-`DASHSCOPE_API_KEY` 和 `EMBEDDING_API_KEY` 不得提交到 Git。批量构建正式 embedding 时，应先用 `--limit` 小样本验证，再全量写入独立向量表。正式 embedding 缺失或调用失败时，知识库检索应自动回退到本地 hash 向量。
+`DASHSCOPE_API_KEY` 和 `EMBEDDING_API_KEY` 不得提交到 Git。批量构建正式 embedding 时，应先用 `--limit` 小样本验证，再全量写入独立向量表并运行 `scripts/build_ann_index.py`。SQLite 向量表、ANN 文件和 manifest 必须作为同一版本私有资产发布。
 
 ## 12. 知识图谱要求
 
@@ -739,6 +736,13 @@ Request:
 ```json
 {
   "query": "哪个标准规定了金矿基本工程间距？",
+  "retrieval_plan": {
+    "intent": "engineering_distance_lookup",
+    "normalized_query": "金矿勘查Ⅰ类型的推荐工程间距是多少？",
+    "document_types": ["industry_standard"],
+    "required_evidence_groups": [["工程间距"], ["坑探", "钻探"]],
+    "search_mode": "scoped"
+  },
   "filters": {
     "standard_no": null,
     "document_types": ["standard", "specification"],
@@ -780,7 +784,16 @@ Response:
   "retrieval": {
     "full_text_hits": 3,
     "vector_hits": 8,
-    "graph_hits": 1
+    "graph_hits": 1,
+    "direct_evidence_hits": 2,
+    "ann_used": 1,
+    "vector_route": "ann",
+    "timings_ms": {
+      "lexical_graph": 120.0,
+      "embedding": 320.0,
+      "vector_search": 30.0,
+      "total": 500.0
+    }
   },
   "coverage": {
     "has_clause_level_evidence": true,

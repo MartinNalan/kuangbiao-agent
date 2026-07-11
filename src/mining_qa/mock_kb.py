@@ -66,6 +66,7 @@ async def health() -> dict[str, object]:
 @app.post("/knowledge/search")
 async def search(payload: dict[str, Any]) -> dict[str, Any]:
     query = str(payload.get("query", ""))
+    retrieval_plan = payload.get("retrieval_plan") or {}
 
     if "沙金" in query or "砂金" in query:
         return {
@@ -99,7 +100,7 @@ async def search(payload: dict[str, Any]) -> dict[str, Any]:
             },
         }
 
-    if "矿体外推" in query:
+    if retrieval_plan.get("intent") == "projection_comparison" or "矿体外推" in query:
         return {
             "results": [
                 {

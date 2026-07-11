@@ -13,7 +13,12 @@ class LLMClient:
     def enabled(self) -> bool:
         return bool(self.settings.openai_api_key.strip())
 
-    async def complete(self, messages: list[dict[str, str]]) -> str:
+    async def complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_tokens: int | None = None,
+    ) -> str:
         if not self.enabled:
             return "模型 API Key 未配置，当前只能返回检索证据和限制说明。"
 
@@ -22,6 +27,8 @@ class LLMClient:
             "messages": messages,
             "temperature": 0.2,
         }
+        if max_tokens and max_tokens > 0:
+            payload["max_tokens"] = int(max_tokens)
         headers = {
             "Authorization": f"Bearer {self.settings.openai_api_key}",
             "Content-Type": "application/json",
@@ -33,7 +40,12 @@ class LLMClient:
 
         return data["choices"][0]["message"]["content"].strip()
 
-    async def complete_json(self, messages: list[dict[str, str]]) -> str:
+    async def complete_json(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_tokens: int | None = None,
+    ) -> str:
         if not self.enabled:
             return ""
 
@@ -43,6 +55,8 @@ class LLMClient:
             "temperature": 0,
             "response_format": {"type": "json_object"},
         }
+        if max_tokens and max_tokens > 0:
+            payload["max_tokens"] = int(max_tokens)
         headers = {
             "Authorization": f"Bearer {self.settings.openai_api_key}",
             "Content-Type": "application/json",

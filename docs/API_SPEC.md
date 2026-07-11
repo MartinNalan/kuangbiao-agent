@@ -105,7 +105,17 @@ Authorization: Bearer your-api-key
     "full_text_hits": 5,
     "vector_hits": 8,
     "graph_hits": 2,
-    "web_hits": 1
+    "web_hits": 1,
+    "direct_evidence_hits": 3,
+    "retrieval_rounds": 1,
+    "planner_used": true,
+    "reranker_used": true,
+    "ann_used": true,
+    "planner_ms": 4200.0,
+    "knowledge_ms": 800.0,
+    "reranker_ms": 9200.0,
+    "synthesis_ms": 0.0,
+    "total_ms": 14200.0
   },
   "limitations": {
     "has_clause_level_evidence": true,

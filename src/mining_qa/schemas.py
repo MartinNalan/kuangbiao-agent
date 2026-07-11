@@ -76,6 +76,16 @@ class RetrievalStats(BaseModel):
     vector_hits: int = 0
     graph_hits: int = 0
     web_hits: int = 0
+    direct_evidence_hits: int = 0
+    retrieval_rounds: int = 0
+    planner_used: bool = False
+    reranker_used: bool = False
+    ann_used: bool = False
+    planner_ms: float = 0.0
+    knowledge_ms: float = 0.0
+    reranker_ms: float = 0.0
+    synthesis_ms: float = 0.0
+    total_ms: float = 0.0
 
 
 class Limitations(BaseModel):
@@ -162,7 +172,7 @@ class KnowledgeSearchRequest(BaseModel):
 
 class KnowledgeSearchResponse(BaseModel):
     results: list[dict[str, Any]] = Field(default_factory=list)
-    retrieval: dict[str, int] = Field(default_factory=dict)
+    retrieval: dict[str, Any] = Field(default_factory=dict)
     coverage: dict[str, Any] = Field(default_factory=dict)
 
 

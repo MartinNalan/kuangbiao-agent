@@ -27,8 +27,14 @@ if [[ "${CLOUD_APP_DIR}" != "/opt/kuangbiao-agent" ]]; then
 fi
 
 LOCAL_KB_DB="${PROJECT_ROOT}/data/knowledge_base/db/knowledge_base.sqlite"
+LOCAL_ANN_INDEX="${PROJECT_ROOT}/data/knowledge_base/indexes/dense.usearch"
+LOCAL_ANN_MANIFEST="${PROJECT_ROOT}/data/knowledge_base/indexes/dense_manifest.json"
 if [[ "${SYNC_KB_DB}" == "true" && ! -f "${LOCAL_KB_DB}" ]]; then
   echo "Missing private knowledge database: ${LOCAL_KB_DB}" >&2
+  exit 1
+fi
+if [[ "${SYNC_KB_DB}" == "true" && ( ! -f "${LOCAL_ANN_INDEX}" || ! -f "${LOCAL_ANN_MANIFEST}" ) ]]; then
+  echo "Missing private ANN index or manifest. Run scripts/build_ann_index.py first." >&2
   exit 1
 fi
 
@@ -42,7 +48,22 @@ SSH=(sshpass -e ssh -p "${CLOUD_SSH_PORT}" -o StrictHostKeyChecking=accept-new)
 RSYNC_SSH="ssh -p ${CLOUD_SSH_PORT} -o StrictHostKeyChecking=accept-new"
 REMOTE="${CLOUD_USER}@${CLOUD_HOST}"
 
-"${SSH[@]}" "${REMOTE}" "mkdir -p '${CLOUD_APP_DIR}/data/knowledge_base/db' '${CLOUD_APP_DIR}/data/app'"
+"${SSH[@]}" "${REMOTE}" "mkdir -p \
+  '${CLOUD_APP_DIR}/data/knowledge_base/db' \
+  '${CLOUD_APP_DIR}/data/knowledge_base/indexes' \
+  '${CLOUD_APP_DIR}/data/app' \
+  '${CLOUD_APP_DIR}/data/backups' && \
+  stamp=\$(date -u +%Y%m%dT%H%M%SZ); \
+  if [ -f '${CLOUD_APP_DIR}/data/knowledge_base/db/knowledge_base.sqlite' ]; then \
+    cp '${CLOUD_APP_DIR}/data/knowledge_base/db/knowledge_base.sqlite' \
+      '${CLOUD_APP_DIR}/data/backups/knowledge_base-'\"\${stamp}\"'.sqlite'; \
+  fi; \
+  if [ -f '${CLOUD_APP_DIR}/data/app/application.sqlite' ]; then \
+    cp '${CLOUD_APP_DIR}/data/app/application.sqlite' \
+      '${CLOUD_APP_DIR}/data/backups/application-'\"\${stamp}\"'.sqlite'; \
+  fi; \
+  ls -1t '${CLOUD_APP_DIR}'/data/backups/knowledge_base-*.sqlite 2>/dev/null | tail -n +4 | xargs -r rm -f; \
+  ls -1t '${CLOUD_APP_DIR}'/data/backups/application-*.sqlite 2>/dev/null | tail -n +4 | xargs -r rm -f"
 
 sshpass -e rsync -az --info=progress2 \
   -e "${RSYNC_SSH}" \
@@ -58,6 +79,10 @@ sshpass -e rsync -az --info=progress2 \
 if [[ "${SYNC_KB_DB}" == "true" ]]; then
   sshpass -e rsync -az --info=progress2 -e "${RSYNC_SSH}" \
     "${LOCAL_KB_DB}" "${REMOTE}:${CLOUD_APP_DIR}/data/knowledge_base/db/knowledge_base.sqlite"
+  sshpass -e rsync -az --info=progress2 -e "${RSYNC_SSH}" \
+    "${LOCAL_ANN_INDEX}" "${REMOTE}:${CLOUD_APP_DIR}/data/knowledge_base/indexes/dense.usearch"
+  sshpass -e rsync -az --info=progress2 -e "${RSYNC_SSH}" \
+    "${LOCAL_ANN_MANIFEST}" "${REMOTE}:${CLOUD_APP_DIR}/data/knowledge_base/indexes/dense_manifest.json"
 else
   echo "Skipping private knowledge database synchronization (SYNC_KB_DB=${SYNC_KB_DB})."
 fi
@@ -68,11 +93,17 @@ sshpass -e scp -P "${CLOUD_SSH_PORT}" -o StrictHostKeyChecking=accept-new \
 "${SSH[@]}" "${REMOTE}" "sed -i \
   -e 's|^KNOWLEDGE_BASE_URL=.*|KNOWLEDGE_BASE_URL=http://127.0.0.1:18081|' \
   -e 's|^APP_DB_PATH=.*|APP_DB_PATH=${CLOUD_APP_DIR}/data/app/application.sqlite|' \
+  -e 's|^ANN_INDEX_PATH=.*|ANN_INDEX_PATH=${CLOUD_APP_DIR}/data/knowledge_base/indexes/dense.usearch|' \
+  -e 's|^ANN_MANIFEST_PATH=.*|ANN_MANIFEST_PATH=${CLOUD_APP_DIR}/data/knowledge_base/indexes/dense_manifest.json|' \
+  -e 's|^RETRIEVAL_TRACE_PATH=.*|RETRIEVAL_TRACE_PATH=${CLOUD_APP_DIR}/data/app/retrieval_traces.jsonl|' \
   -e 's|^PUBLIC_BASE_URL=.*|PUBLIC_BASE_URL=http://${CLOUD_HOST}|' \
   -e 's|^SESSION_COOKIE_SECURE=.*|SESSION_COOKIE_SECURE=false|' \
   -e 's|^AGENTMAIL_PROXY_URL=.*|AGENTMAIL_PROXY_URL=${CLOUD_AGENTMAIL_PROXY_URL}|' \
   '${CLOUD_APP_DIR}/.env' && \
   grep -q '^KNOWLEDGE_DB_PATH=' '${CLOUD_APP_DIR}/.env' || echo 'KNOWLEDGE_DB_PATH=${CLOUD_APP_DIR}/data/knowledge_base/db/knowledge_base.sqlite' >> '${CLOUD_APP_DIR}/.env'; \
+  grep -q '^ANN_INDEX_PATH=' '${CLOUD_APP_DIR}/.env' || echo 'ANN_INDEX_PATH=${CLOUD_APP_DIR}/data/knowledge_base/indexes/dense.usearch' >> '${CLOUD_APP_DIR}/.env'; \
+  grep -q '^ANN_MANIFEST_PATH=' '${CLOUD_APP_DIR}/.env' || echo 'ANN_MANIFEST_PATH=${CLOUD_APP_DIR}/data/knowledge_base/indexes/dense_manifest.json' >> '${CLOUD_APP_DIR}/.env'; \
+  grep -q '^RETRIEVAL_TRACE_PATH=' '${CLOUD_APP_DIR}/.env' || echo 'RETRIEVAL_TRACE_PATH=${CLOUD_APP_DIR}/data/app/retrieval_traces.jsonl' >> '${CLOUD_APP_DIR}/.env'; \
   grep -q '^AGENTMAIL_PROXY_URL=' '${CLOUD_APP_DIR}/.env' || echo 'AGENTMAIL_PROXY_URL=${CLOUD_AGENTMAIL_PROXY_URL}' >> '${CLOUD_APP_DIR}/.env'"
 
 "${SSH[@]}" "${REMOTE}" "bash '${CLOUD_APP_DIR}/deploy/bootstrap_server.sh' '${CLOUD_APP_DIR}'"

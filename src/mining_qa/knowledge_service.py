@@ -5,7 +5,9 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.concurrency import run_in_threadpool
 
+from . import __version__
 from .knowledge_store import DEFAULT_DB_PATH, KnowledgeStore
 
 
@@ -14,7 +16,7 @@ def db_path_from_env() -> Path:
 
 
 store = KnowledgeStore(db_path_from_env())
-app = FastAPI(title="Mining Knowledge Base Service", version="0.1.0")
+app = FastAPI(title="geowiki Private Knowledge Service", version=__version__)
 
 
 @app.get("/knowledge/health")
@@ -24,7 +26,7 @@ async def health() -> dict[str, Any]:
 
 @app.post("/knowledge/search")
 async def search(payload: dict[str, Any]) -> dict[str, Any]:
-    return store.search(payload)
+    return await run_in_threadpool(store.search, payload)
 
 
 @app.get("/knowledge/standards")
