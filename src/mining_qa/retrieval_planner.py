@@ -7,7 +7,7 @@ from typing import Literal, get_args
 
 from .config import Settings
 from .llm_client import LLMClient
-from .query_understanding import QueryPlan, apply_semantic_plan
+from .query_understanding import PROTECTED_QUERY_INTENTS, QueryPlan, apply_semantic_plan
 
 
 PlannerIntent = Literal[
@@ -23,6 +23,9 @@ PlannerIntent = Literal[
     "service_time_limit",
     "legal_responsibility",
     "exploration_to_mining_eligibility",
+    "companion_resource_type",
+    "exploration_type_factors",
+    "basic_analysis_items",
     "regulation_lookup",
     "clause_comparison",
     "related_documents",
@@ -71,6 +74,7 @@ class RetrievalPlanner:
         if (
             not self.settings.query_planner_enabled
             or not self.llm.enabled
+            or base_plan.intent in PROTECTED_QUERY_INTENTS
             or (base_plan.intent not in MODEL_PLANNING_INTENTS and not base_plan.exhaustive_search)
         ):
             return PlannerResult(
@@ -124,6 +128,7 @@ class RetrievalPlanner:
                             "candidate_titles": [],
                             "standard_numbers": [],
                             "document_types": [],
+                            "output_mode": "default|table",
                             "required_evidence_groups": [["每组至少命中一个术语"]],
                             "comparison_dimensions": [],
                             "confidence": 0.0,

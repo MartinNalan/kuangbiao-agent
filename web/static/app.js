@@ -420,66 +420,11 @@ function appendAssistantLoading() {
   return node;
 }
 
-function tokenizeLinks(value) {
-  const tokens = [];
-  let text = String(value ?? "");
-  text = text.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, (_, label, url) => {
-    const href = safeUrl(url);
-    if (!href) return label;
-    const token = `@@KB_LINK_${tokens.length}@@`;
-    tokens.push(`<a href="${escapeHtml(href)}" target="_blank" rel="noreferrer">${escapeHtml(label)}</a>`);
-    return token;
-  });
-  text = escapeHtml(text);
-  text = text.replace(/(https?:\/\/[^\s<]+)/g, (url) => {
-    const normalized = safeUrl(url.replaceAll("&amp;", "&"));
-    return normalized ? `<a href="${escapeHtml(normalized)}" target="_blank" rel="noreferrer">${url}</a>` : url;
-  });
-  text = text.replace(/`([^`]+)`/g, "<code>$1</code>");
-  text = text.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-  tokens.forEach((link, index) => {
-    text = text.replace(`@@KB_LINK_${index}@@`, link);
-  });
-  return text;
-}
-
 function renderMarkdown(value) {
-  const lines = String(value ?? "").replaceAll("\r\n", "\n").split("\n");
-  const output = [];
-  let listType = null;
-  const closeList = () => {
-    if (listType) output.push(`</${listType}>`);
-    listType = null;
-  };
-  lines.forEach((line) => {
-    const trimmed = line.trim();
-    if (!trimmed) {
-      closeList();
-      return;
-    }
-    const heading = trimmed.match(/^#{2,3}\s+(.+)$/);
-    if (heading) {
-      closeList();
-      output.push(`<h3>${tokenizeLinks(heading[1])}</h3>`);
-      return;
-    }
-    const bullet = trimmed.match(/^[-*]\s+(.+)$/);
-    const ordered = trimmed.match(/^\d+[.)]\s+(.+)$/);
-    if (bullet || ordered) {
-      const nextType = bullet ? "ul" : "ol";
-      if (listType !== nextType) {
-        closeList();
-        listType = nextType;
-        output.push(`<${listType}>`);
-      }
-      output.push(`<li>${tokenizeLinks((bullet || ordered)[1])}</li>`);
-      return;
-    }
-    closeList();
-    output.push(`<p>${tokenizeLinks(trimmed)}</p>`);
-  });
-  closeList();
-  return output.join("");
+  if (window.GeowikiMarkdown?.render) {
+    return window.GeowikiMarkdown.render(value, { baseUrl: window.location.origin });
+  }
+  return `<p>${escapeHtml(value)}</p>`;
 }
 
 function renderSources(sources) {
@@ -885,39 +830,104 @@ function updateQuickstart(language) {
   $("#quickstartCode").textContent = quickstartExamples()[language];
 }
 
-async function copyText(value) {
+function legacyCopyText(value, sourceElement = null) {
+  const activeElement = document.activeElement;
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.setAttribute("aria-hidden", "true");
+  textarea.style.position = "fixed";
+  textarea.style.top = "0";
+  textarea.style.left = "0";
+  textarea.style.width = "2px";
+  textarea.style.height = "2px";
+  textarea.style.opacity = "0.01";
+  textarea.style.zIndex = "-1";
+  document.body.appendChild(textarea);
+
+  let copied = false;
+  const handleCopy = (event) => {
+    if (!event.clipboardData) return;
+    event.clipboardData.setData("text/plain", value);
+    event.preventDefault();
+  };
+  document.addEventListener("copy", handleCopy);
   try {
-    let copied = false;
-    if (window.isSecureContext && navigator.clipboard?.writeText) {
-      try {
-        await navigator.clipboard.writeText(value);
-        copied = true;
-      } catch {
-        copied = false;
-      }
-    }
-    if (!copied) {
-      const activeElement = document.activeElement;
-      const textarea = document.createElement("textarea");
-      textarea.value = value;
-      textarea.setAttribute("readonly", "");
-      textarea.style.position = "fixed";
-      textarea.style.inset = "0 auto auto -9999px";
-      document.body.appendChild(textarea);
-      textarea.focus();
-      textarea.select();
-      textarea.setSelectionRange(0, textarea.value.length);
+    textarea.focus({ preventScroll: true });
+    textarea.select();
+    textarea.setSelectionRange(0, textarea.value.length);
+    copied = typeof document.execCommand === "function" && document.execCommand("copy") === true;
+    if (!copied && sourceElement) {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(sourceElement);
+      selection.removeAllRanges();
+      selection.addRange(range);
       copied = document.execCommand("copy") === true;
-      textarea.remove();
-      if (activeElement instanceof HTMLElement) activeElement.focus();
+      selection.removeAllRanges();
     }
-    if (!copied) throw new Error("clipboard unavailable");
-    showToast("已复制到剪贴板");
-    return true;
   } catch {
-    showToast("复制失败，请手动选择内容复制", "error");
+    copied = false;
+  } finally {
+    document.removeEventListener("copy", handleCopy);
+    textarea.remove();
+    if (activeElement instanceof HTMLElement) activeElement.focus({ preventScroll: true });
+  }
+  return copied;
+}
+
+function markCopied(button) {
+  if (!button) return;
+  button.classList.add("copied");
+  const previousTitle = button.title;
+  const previousLabel = button.getAttribute("aria-label");
+  button.title = "已复制";
+  button.setAttribute("aria-label", "已复制");
+  window.setTimeout(() => {
+    button.classList.remove("copied");
+    button.title = previousTitle;
+    if (previousLabel === null) button.removeAttribute("aria-label");
+    else button.setAttribute("aria-label", previousLabel);
+  }, 1800);
+}
+
+async function copyText(value, options = {}) {
+  const text = String(value ?? "").trim();
+  if (!text) {
+    showToast("没有可复制的内容", "error");
     return false;
   }
+
+  let copied = false;
+  let copyMethod = "none";
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      copied = true;
+      copyMethod = "clipboard";
+    } catch {
+      copied = false;
+    }
+  }
+  if (!copied) {
+    copied = legacyCopyText(text, options.sourceElement || null);
+    if (copied) copyMethod = "legacy";
+  }
+  if (copied) {
+    if (options.button) options.button.dataset.copyMethod = copyMethod;
+    markCopied(options.button || null);
+    showToast("已复制到剪贴板");
+    return true;
+  }
+
+  if (options.sourceElement) {
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(options.sourceElement);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+  showToast("浏览器阻止了剪贴板访问，内容已选中，请按 Ctrl+C", "error");
+  return false;
 }
 
 async function loadAdminData() {
@@ -1264,13 +1274,22 @@ function bindEvents() {
 
   $("#createKeyButton").addEventListener("click", openKeyDialog);
   $("#confirmCreateKeyButton").addEventListener("click", createKey);
-  $("#copyKeyButton").addEventListener("click", () => copyText($("#newKeyValue").textContent));
+  $("#copyKeyButton").addEventListener("click", () => copyText($("#newKeyValue").textContent, {
+    button: $("#copyKeyButton"),
+    sourceElement: $("#newKeyValue"),
+  }));
   $$(".code-tab").forEach((button) => button.addEventListener("click", () => updateQuickstart(button.dataset.language)));
-  $("#copyCodeButton").addEventListener("click", () => copyText($("#quickstartCode").textContent));
+  $("#copyCodeButton").addEventListener("click", () => copyText($("#quickstartCode").textContent, {
+    button: $("#copyCodeButton"),
+    sourceElement: $("#quickstartCode"),
+  }));
 
   $("#createInviteButton").addEventListener("click", openInviteDialog);
   $("#confirmCreateInviteButton").addEventListener("click", createInvitation);
-  $("#copyInviteButton").addEventListener("click", () => copyText($("#newInviteValue").textContent));
+  $("#copyInviteButton").addEventListener("click", () => copyText($("#newInviteValue").textContent, {
+    button: $("#copyInviteButton"),
+    sourceElement: $("#newInviteValue"),
+  }));
   $$(".quota-mode").forEach((button) => button.addEventListener("click", () => setQuotaMode(button.dataset.mode, state.quotaUser)));
   $("#confirmQuotaButton").addEventListener("click", adjustQuota);
   $("#confirmFeedbackButton").addEventListener("click", updateFeedbackStatus);

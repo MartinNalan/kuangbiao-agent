@@ -1,4 +1,15 @@
-# geowiki v1.0.0
+# geowiki v1.0.1
+
+## v1.0.1 Bugfix Scope
+
+- Protected high-value relation intents cannot be overridden by LLM planning or reranking.
+- LLM-suggested document titles are soft ranking hints; only user-explicit or deterministic schema scopes filter documents.
+- Exploration-to-mining conversion paraphrases use the same policy/report evidence slots and deterministic answer.
+- Companion-mineral resource type questions cite `GB/T 25283-2023` clauses 9.2, 9.3 and 9.4.
+- Table references such as `表 E.1 至表 E.5` expand to the actual structured table chunks and render as GFM tables.
+- Basic-analysis answers retain only sources that directly support the selected mineral and analytical items.
+- API Key and invitation copy buttons include an HTTP-compatible clipboard fallback.
+- The web answer renderer supports responsive Markdown tables.
 
 ## Release Scope
 

@@ -31,6 +31,9 @@ DETERMINISTIC_FAST_INTENTS = {
     "authority_responsibility",
     "standard_selection",
     "exploration_to_mining_eligibility",
+    "companion_resource_type",
+    "exploration_type_factors",
+    "basic_analysis_items",
 }
 SYSTEM_PROMPT = """你是矿产资源标准知识问答 agent。
 
@@ -387,6 +390,34 @@ class MiningQAAgent:
             found = bool(sources)
             return found, found
 
+        if effective_plan.intent == "exploration_to_mining_eligibility":
+            has_policy = any(
+                "自然资规〔2023〕4号" in (source.standard_no or "")
+                and "经评审备案的矿产资源储量报告" in (source.quote or "")
+                and "详查（含）以上程度" in (source.quote or "")
+                for source in sources
+            )
+            has_report_limit = any(
+                "不能替代探矿权转采矿权" in (source.quote or "")
+                for source in sources
+            )
+            found = has_policy and has_report_limit
+            return found, found
+
+        if effective_plan.intent == "companion_resource_type":
+            clauses = {source.chapter for source in sources}
+            found = {"9.2", "9.3", "9.4"}.issubset(clauses)
+            return found, found
+
+        if effective_plan.intent == "exploration_type_factors":
+            tables = {
+                match.group(1)
+                for source in sources
+                if (match := re.search(r"表\s*E\.([1-5])", source.chapter or "", flags=re.IGNORECASE))
+            }
+            found = tables == {"1", "2", "3", "4", "5"}
+            return found, found
+
         validators = {
             "engineering_distance_lookup": self._is_engineering_distance_source,
             "authority_responsibility": self._is_policy_authority_source,
@@ -395,6 +426,7 @@ class MiningQAAgent:
             "service_time_limit": self._is_service_time_limit_source,
             "projection_numeric_rule": self._is_projection_numeric_source,
             "legal_responsibility": self._is_legal_responsibility_source,
+            "basic_analysis_items": self._is_basic_analysis_source,
         }
         validator = validators.get(effective_plan.intent)
         if validator:
@@ -503,6 +535,75 @@ class MiningQAAgent:
             catalog_hits = [hit for hit in hits if "catalog" in (hit.get("hit_type") or [])]
             if catalog_hits:
                 return catalog_hits[:1]
+
+        if effective_plan.intent == "exploration_to_mining_eligibility":
+            policy = next(
+                (
+                    hit
+                    for hit in hits
+                    if "自然资规〔2023〕4号" in str(hit.get("standard_no") or "")
+                    and "经评审备案的矿产资源储量报告" in self._hit_evidence_text(hit)
+                    and "详查（含）以上程度" in self._hit_evidence_text(hit)
+                ),
+                None,
+            )
+            report_limit = next(
+                (
+                    hit
+                    for hit in hits
+                    if str(hit.get("standard_no") or "").replace(" ", "").upper() == "DZ/T0430-2023"
+                    and "不能替代探矿权转采矿权" in self._hit_evidence_text(hit)
+                ),
+                None,
+            )
+            selected = [hit for hit in (policy, report_limit) if hit]
+            if selected:
+                return selected
+
+        if effective_plan.intent == "companion_resource_type":
+            selected = []
+            for clause in ("9.2", "9.3", "9.4"):
+                candidates = [
+                    hit
+                    for hit in hits
+                    if str(hit.get("standard_no") or "").replace(" ", "").upper() == "GB/T25283-2023"
+                    and str(hit.get("clause_no") or hit.get("section_path") or "") == clause
+                ]
+                if candidates:
+                    selected.append(max(candidates, key=lambda hit: len(self._hit_evidence_text(hit))))
+            if selected:
+                return selected
+
+        if effective_plan.intent == "exploration_type_factors":
+            tables = []
+            seen_tables: set[str] = set()
+            for hit in hits:
+                if str(hit.get("standard_no") or "").replace(" ", "").upper() != "DZ/T0205-2020":
+                    continue
+                chapter = str(hit.get("section_path") or hit.get("clause_no") or "")
+                match = re.search(r"表\s*E\.([1-5])", chapter, flags=re.IGNORECASE)
+                if not match or match.group(1) in seen_tables:
+                    continue
+                seen_tables.add(match.group(1))
+                tables.append(hit)
+            if tables:
+                return sorted(
+                    tables,
+                    key=lambda hit: int(re.search(r"表\s*E\.([1-5])", str(hit.get("section_path") or ""), flags=re.IGNORECASE).group(1)),
+                )
+
+        if effective_plan.intent == "basic_analysis_items":
+            exact = [
+                hit
+                for hit in hits
+                if self._is_basic_analysis_source(self._source_from_hit(hit))
+                and any(
+                    marker in self._hit_evidence_text(hit)
+                    for marker in ("铁矿石基本分析项目", "锰矿石基本分析项目", "铬矿石基本分析项目")
+                )
+            ]
+            if exact:
+                return [max(exact, key=lambda hit: len(self._hit_evidence_text(hit)))]
 
         strict_validators = {
             "service_materials": self._is_service_material_source,
@@ -638,6 +739,10 @@ class MiningQAAgent:
                 break
         return selected or hits[: min(3, len(hits))]
 
+    @staticmethod
+    def _hit_evidence_text(hit: dict) -> str:
+        return str(hit.get("quote") or hit.get("evidence_text") or hit.get("text") or "")
+
     def _is_comparison_question(self, question: str) -> bool:
         return any(term in question for term in CACHEABLE_COMPARISON_TERMS)
 
@@ -763,6 +868,15 @@ class MiningQAAgent:
             and "矿业权人" in quote
             and "储量报告的真实性负责" in quote
             and "不得弄虚作假" in quote
+        )
+
+    def _is_basic_analysis_source(self, source: Source) -> bool:
+        context = f"{source.title} {source.chapter or ''} {source.quote or ''}"
+        if "基本分析" not in context or "分析项目" not in context:
+            return False
+        return any(
+            marker in context
+            for marker in ("铁矿石基本分析项目", "锰矿石基本分析项目", "铬矿石基本分析项目")
         )
 
     def _is_policy_authority_source(self, source: Source) -> bool:
@@ -1148,6 +1262,57 @@ class MiningQAAgent:
                         ]
                     )
                 return "\n".join(lines)
+
+        if effective_plan.intent == "companion_resource_type":
+            clauses = {source.chapter: source for source in sources if source.chapter in {"9.2", "9.3", "9.4"}}
+            if all(clause in clauses for clause in ("9.2", "9.3", "9.4")):
+                return "\n".join(
+                    [
+                        "根据 **GB/T 25283-2023《矿产资源综合勘查评价规范》**，伴生矿产资源量类型按分析方式和研究程度确定：",
+                        "",
+                        "- **进行了基本分析且研究程度满足要求**：资源储量类型可以与主要矿产相同。研究内容包括地质研究程度、矿石加工选冶试验研究程度和可行性评价。",
+                        "- **进行了基本分析但未满足上述研究要求**：应降低资源储量类型。",
+                        "- **只进行了组合分析、未做基本分析**：划为推断资源量。",
+                        "",
+                        f"- **9.2 原文**：{clauses['9.2'].quote}",
+                        f"- **9.3 原文**：{clauses['9.3'].quote}",
+                        f"- **9.4 原文**：{clauses['9.4'].quote}",
+                    ]
+                )
+
+        if effective_plan.intent == "exploration_type_factors":
+            tables = [source for source in sources if re.search(r"表\s*E\.[1-5]", source.chapter or "", flags=re.IGNORECASE)]
+            if tables:
+                tables.sort(
+                    key=lambda source: int(re.search(r"表\s*E\.([1-5])", source.chapter or "", flags=re.IGNORECASE).group(1))
+                )
+                return "\n\n".join(
+                    [
+                        "根据 **DZ/T 0205-2020《矿产地质勘查规范 岩金》附录 E.1**，岩金矿床勘查类型按矿体规模、形态变化程度、厚度稳定程度、构造与脉岩影响程度、主要有用组分分布均匀程度五项因素划分。",
+                        *(source.quote or source.chapter or "" for source in tables),
+                    ]
+                )
+
+        if effective_plan.intent == "basic_analysis_items":
+            source = next((item for item in sources if self._is_basic_analysis_source(item)), None)
+            if source:
+                if "铁矿" in effective_plan.normalized_query:
+                    conclusion = (
+                        "- **磁性铁矿石**以及使用磁性铁含量圈定矿体的其他矿石：分析 **TFe、mFe**。\n"
+                        "- **赤铁矿石、褐铁矿石、菱铁矿石**：分析 **TFe**。"
+                    )
+                else:
+                    conclusion = source.quote or ""
+                return "\n".join(
+                    [
+                        f"根据 **{source.standard_no or '相关标准'}《{source.title}》**，基本分析项目如下：",
+                        "",
+                        conclusion,
+                        "",
+                        f"- **依据条款**：{source.chapter or '相关条款'}",
+                        f"- **直接依据**：{source.quote}",
+                    ]
+                )
 
         if effective_plan.intent == "standard_selection" and sources:
             source = sources[0]

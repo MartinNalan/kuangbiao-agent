@@ -1,0 +1,49 @@
+from __future__ import annotations
+
+import json
+import subprocess
+import unittest
+from pathlib import Path
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+class FrontendUiTests(unittest.TestCase):
+    def test_markdown_renderer_supports_tables_and_escapes_html(self) -> None:
+        script = r"""
+const renderer = require('./web/static/markdown.js');
+const input = '**表 E.1**\n\n| 项目 | 数值 |\n| --- | ---: |\n| 大型 | >500 |\n\n<script>alert(1)</script>';
+process.stdout.write(JSON.stringify({html: renderer.render(input, {baseUrl: 'http://localhost/'})}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=PROJECT_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        html = json.loads(completed.stdout)["html"]
+
+        self.assertIn('<table class="markdown-table">', html)
+        self.assertIn('style="text-align:right"', html)
+        self.assertIn("&gt;500", html)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", html)
+        self.assertNotIn("<script>", html)
+
+    def test_markdown_renderer_loads_before_application(self) -> None:
+        html = (PROJECT_ROOT / "web" / "index.html").read_text(encoding="utf-8")
+
+        self.assertLess(html.index("/static/markdown.js"), html.index("/static/app.js"))
+
+    def test_secret_copy_buttons_use_http_compatible_fallback(self) -> None:
+        script = (PROJECT_ROOT / "web" / "static" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('document.addEventListener("copy", handleCopy)', script)
+        self.assertIn('document.execCommand("copy")', script)
+        self.assertIn('sourceElement: $("#newKeyValue")', script)
+        self.assertIn('sourceElement: $("#newInviteValue")', script)
+
+
+if __name__ == "__main__":
+    unittest.main()

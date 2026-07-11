@@ -15,9 +15,15 @@ from .query_understanding import QueryPlan
 COMPLEX_INTENTS = {
     "projection_comparison",
     "clause_comparison",
-    "exploration_to_mining_eligibility",
     "regulation_lookup",
     "related_documents",
+}
+
+DETERMINISTIC_EVIDENCE_INTENTS = {
+    "exploration_to_mining_eligibility",
+    "companion_resource_type",
+    "exploration_type_factors",
+    "basic_analysis_items",
 }
 
 STRUCTURAL_GUARD_INTENTS = {
@@ -68,6 +74,8 @@ class EvidenceReranker:
 
     @staticmethod
     def needs_model(plan: QueryPlan) -> bool:
+        if plan.intent in DETERMINISTIC_EVIDENCE_INTENTS:
+            return False
         return (
             plan.intent in COMPLEX_INTENTS
             or plan.search_mode in {"comparison", "exhaustive"}

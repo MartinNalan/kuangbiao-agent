@@ -33,7 +33,7 @@ DOMAIN_LEXICON_PATH = Path(__file__).with_name("domain_lexicon.json")
 QUOTE_LIMIT = 260
 VECTOR_DIM = 512
 RRF_K = 60
-ROUTE_WEIGHTS = {"full_text": 1.15, "graph": 0.9, "vector": 1.0}
+ROUTE_WEIGHTS = {"full_text": 1.15, "graph": 0.9, "vector": 1.0, "reference": 1.2}
 
 
 @dataclass(frozen=True)
@@ -375,6 +375,132 @@ def normalize_table_cell(value: Any) -> str:
     return cell
 
 
+def markdown_table_cell(value: Any) -> str:
+    cell = re.sub(r"\s+", " ", str(value or "")).strip()
+    if cell == "工":
+        cell = "Ⅰ"
+    return cell.replace("\\", "\\\\").replace("|", "\\|")
+
+
+def _markdown_table_quote(matrix: list[Any], caption: str, limit: int) -> str | None:
+    rows = [
+        [markdown_table_cell(cell) for cell in row]
+        for row in matrix
+        if isinstance(row, list) and any(str(cell).strip() for cell in row)
+    ]
+    if not rows:
+        return None
+    width = max(len(row) for row in rows)
+    normalized = [row + [""] * (width - len(row)) for row in rows]
+    header = normalized[0]
+    lines = []
+    if caption:
+        lines.extend([f"**{str(caption).strip()}**", ""])
+    lines.append("| " + " | ".join(header) + " |")
+    lines.append("| " + " | ".join("---" for _ in header) + " |")
+    for row in normalized[1:]:
+        candidate = "| " + " | ".join(row) + " |"
+        if len("\n".join([*lines, candidate])) > limit:
+            break
+        lines.append(candidate)
+    return "\n".join(lines)
+
+
+def table_references(text: str) -> tuple[str, ...]:
+    compact = re.sub(r"\s+", "", text or "").upper()
+    references: list[str] = []
+    for start_letter, start_no, end_letter, end_no in re.findall(
+        r"表?([A-Z])\.(\d+)\s*(?:至|到|~|～|-)\s*表?([A-Z])\.(\d+)",
+        compact,
+    ):
+        if start_letter != end_letter:
+            continue
+        lower, upper = sorted((int(start_no), int(end_no)))
+        if upper - lower > 20:
+            continue
+        references.extend(f"{start_letter}.{number}" for number in range(lower, upper + 1))
+    references.extend(re.findall(r"表([A-Z]\.[0-9]+)", compact))
+    return tuple(dict.fromkeys(references))
+
+
+def transfer_evidence_quote(text: str) -> tuple[str | None, str | None]:
+    clean = re.sub(r"\s+", " ", text or "").strip()
+    policy = re.search(
+        r"(探矿权转采矿权，应当依据经评审备案的矿产资源储量报告。"
+        r"资源储量规模为大型的非煤矿山、大中型煤矿应当达到勘探程度，"
+        r"其他矿山应当达到详查（含）以上程度。)",
+        clean,
+    )
+    if policy:
+        return policy.group(1), "二、#1"
+    report_limit = re.search(
+        r"(矿产资源储量核实报告不能替代探矿权转采矿权时应提交的地质勘查报告。)",
+        clean,
+    )
+    if report_limit:
+        return report_limit.group(1), "A.9.5"
+    return None, None
+
+
+def companion_resource_type_quote(text: str) -> tuple[str | None, str | None]:
+    clean = re.sub(r"\s+", " ", text or "").strip()
+    intro = re.search(
+        r"(9\.2\s*当伴生矿产进行了基本分析，且研究工作达到以下程度时，"
+        r"其资源储量类型可与主要矿产相同：)",
+        clean,
+    )
+    if intro:
+        parts = [intro.group(1)]
+        patterns = (
+            r"(a[）)]\s*地质研究程度：伴生矿产的质量、赋存状态、分布规律等达到与主要矿产相同的查明程度；)",
+            r"(b[）)]\s*矿石加工选冶试验研究程度：伴生矿产的物质组成与回收利用的加工选冶试验研究等达到与\s*主要矿产相应的查明程度；)",
+            r"(c[）)]\s*可行性评价：对伴生矿产综合回收的经济意义作出了相应评价。)",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, clean)
+            if match:
+                parts.append(match.group(1))
+        if len(parts) >= 2:
+            return " ".join(parts), "9.2"
+    for clause, pattern in (
+        ("9.3", r"(9\.3\s*当伴生矿产进行了基本分析但未能满足9\.2中其他条件时，应降低资源储量类型。)"),
+        ("9.4", r"(9\.4\s*伴生矿产只进行了组合分析而未做基本分析时，划为推断资源量。)"),
+    ):
+        match = re.search(pattern, clean)
+        if match:
+            return match.group(1), clause
+    return None, None
+
+
+def basic_analysis_quote(text: str, plan: QueryPlan) -> tuple[str | None, str | None]:
+    clean = re.sub(r"\s+", " ", text or "").strip()
+    mineral_patterns = []
+    if "铁矿" in plan.normalized_query:
+        mineral_patterns.append(
+            r"(d[）)]?\s*铁矿石基本分析项目.*?赤铁矿石、褐铁矿石、菱铁矿石，分析项目为\s*TFe。)"
+        )
+    if "锰矿" in plan.normalized_query:
+        mineral_patterns.append(r"(e[）)]?\s*锰矿石基本分析项目.*?(?=\s*f[）)]|$))")
+    if "铬矿" in plan.normalized_query:
+        mineral_patterns.append(r"(f[）)]?\s*铬矿石基本分析项目.*?(?=\s*[g-z][）)]|$))")
+    for pattern in mineral_patterns:
+        match = re.search(pattern, clean, flags=re.IGNORECASE)
+        if match:
+            return match.group(1).strip(), "6.7.2.3"
+    return None, None
+
+
+def structured_intent_quote(row: sqlite3.Row, plan: QueryPlan) -> tuple[str | None, str | None]:
+    text = row["text"] or ""
+    if plan.intent == "exploration_to_mining_eligibility":
+        return transfer_evidence_quote(text)
+    if plan.intent == "companion_resource_type":
+        return companion_resource_type_quote(text)
+    if plan.intent == "basic_analysis_items":
+        return basic_analysis_quote(text, plan)
+    return None, None
+
+
 def _target_table_quote(matrix: list[Any], caption: str, plan: QueryPlan, limit: int) -> str | None:
     target_type = plan.target_exploration_type
     if not target_type:
@@ -472,6 +598,10 @@ def table_quote(
     caption = table.get("caption") or ""
     matrix = table.get("matrix") or []
     query_plan = plan or understand_query(query)
+    if query_plan.output_mode == "table":
+        markdown_quote = _markdown_table_quote(matrix, str(caption), limit)
+        if markdown_quote:
+            return markdown_quote
     target_quote = _target_table_quote(matrix, str(caption), query_plan, limit)
     if target_quote:
         return target_quote
@@ -880,6 +1010,10 @@ STRICT_EVIDENCE_INTENTS = {
     "projection_numeric_rule",
     "legal_responsibility",
     "authority_responsibility",
+    "exploration_to_mining_eligibility",
+    "companion_resource_type",
+    "exploration_type_factors",
+    "basic_analysis_items",
 }
 
 
@@ -1034,6 +1168,63 @@ def row_has_authority_evidence(row: sqlite3.Row) -> bool:
     )
 
 
+def row_has_transfer_eligibility_evidence(row: sqlite3.Row) -> bool:
+    standard_no = (row["standard_no"] or "").replace(" ", "")
+    text = re.sub(r"\s+", "", row["text"] or "")
+    policy = (
+        "自然资规〔2023〕4号" in standard_no
+        and "探矿权转采矿权" in text
+        and "经评审备案的矿产资源储量报告" in text
+        and "详查（含）以上程度" in text
+    )
+    report_limit = (
+        standard_no.upper() == "DZ/T0430-2023"
+        and "不能替代探矿权转采矿权时应提交的地质勘查报告" in text
+    )
+    return policy or report_limit
+
+
+def row_has_companion_resource_type_evidence(row: sqlite3.Row) -> bool:
+    standard_no = (row["standard_no"] or "").replace(" ", "").upper()
+    clause = row["clause_no"] or ""
+    text = re.sub(r"\s+", "", row["text"] or "")
+    if standard_no != "GB/T25283-2023":
+        return False
+    return clause in {"9.2", "9.3", "9.4"} or any(
+        marker in text
+        for marker in (
+            "9.2当伴生矿产进行了基本分析",
+            "9.3当伴生矿产进行了基本分析但未能满足",
+            "9.4伴生矿产只进行了组合分析",
+        )
+    )
+
+
+def row_has_exploration_factor_evidence(row: sqlite3.Row) -> bool:
+    standard_no = (row["standard_no"] or "").replace(" ", "").upper()
+    section = re.sub(r"\s+", "", row["section_path"] or "")
+    clause = re.sub(r"\s+", "", row["clause_no"] or "")
+    text = re.sub(r"\s+", "", row["text"] or "")
+    if standard_no != "DZ/T0205-2020":
+        return False
+    return bool(
+        re.search(r"表E\.[1-5](?:\D|$)", section)
+        or clause == "E.1"
+        or "矿床勘查类型划分因素见表E.1至表E.5" in text
+    )
+
+
+def row_has_basic_analysis_evidence(row: sqlite3.Row, plan: QueryPlan) -> bool:
+    context = row_context(row)
+    if "基本分析" not in context or "分析项目" not in context:
+        return False
+    if plan.standard_numbers:
+        expected = {number.replace(" ", "").upper() for number in plan.standard_numbers}
+        if (row["standard_no"] or "").replace(" ", "").upper() not in expected:
+            return False
+    return True
+
+
 def row_matches_query_plan_evidence(row: sqlite3.Row, plan: QueryPlan) -> bool:
     if plan.intent == "engineering_distance_lookup":
         return row_has_engineering_distance_evidence(row, plan)
@@ -1049,6 +1240,14 @@ def row_matches_query_plan_evidence(row: sqlite3.Row, plan: QueryPlan) -> bool:
         return row_has_legal_responsibility_evidence(row)
     if plan.intent == "authority_responsibility":
         return row_has_authority_evidence(row)
+    if plan.intent == "exploration_to_mining_eligibility":
+        return row_has_transfer_eligibility_evidence(row)
+    if plan.intent == "companion_resource_type":
+        return row_has_companion_resource_type_evidence(row)
+    if plan.intent == "exploration_type_factors":
+        return row_has_exploration_factor_evidence(row)
+    if plan.intent == "basic_analysis_items":
+        return row_has_basic_analysis_evidence(row, plan)
     return row_matches_required_evidence_groups(row, plan)
 
 
@@ -1072,8 +1271,10 @@ def query_plan_score(row: sqlite3.Row, plan: QueryPlan) -> float:
     if plan.candidate_title_terms:
         if any(term in title for term in plan.candidate_title_terms):
             score += 8.0
-        else:
+        elif plan.has_hard_candidate_scope:
             score -= 6.0
+    if plan.output_mode == "table" and row["chunk_type"] == "table":
+        score += 12.0
     if plan.intent == "engineering_distance_lookup":
         if any(term in f"{section} {text}" for term in ("表 F.1", "表F.1", "参考基本勘查工程间距")):
             score += 6.0
@@ -1144,6 +1345,14 @@ def query_plan_score(row: sqlite3.Row, plan: QueryPlan) -> float:
             score -= 12.0
     elif plan.intent == "authority_responsibility" and row_has_authority_evidence(row):
         score += 12.0
+    elif plan.intent == "exploration_to_mining_eligibility" and row_has_transfer_eligibility_evidence(row):
+        score += 18.0
+    elif plan.intent == "companion_resource_type" and row_has_companion_resource_type_evidence(row):
+        score += 18.0
+    elif plan.intent == "exploration_type_factors" and row_has_exploration_factor_evidence(row):
+        score += 18.0
+    elif plan.intent == "basic_analysis_items" and row_has_basic_analysis_evidence(row, plan):
+        score += 18.0
     elif plan.intent == "related_documents" and plan.focus_terms:
         anchor = max(plan.focus_terms, key=len)
         if anchor in context:
@@ -1417,6 +1626,14 @@ class KnowledgeStore:
                 for rank, (row, score) in enumerate(vector_result.candidates, start=1):
                     self._add_candidate(candidate_rows, row, "vector", rank, score)
 
+            self._add_referenced_table_candidates(
+                conn,
+                candidate_rows,
+                plan,
+                base_where,
+                base_params,
+            )
+
         items = []
         candidates = list(candidate_rows.values())
         for candidate in candidates:
@@ -1441,6 +1658,15 @@ class KnowledgeStore:
                         item[1]["row"]["table_json"],
                         plan.target_exploration_type,
                     ),
+                    item[1]["final_score"],
+                ),
+                reverse=True,
+            )
+        if plan.output_mode == "table":
+            ranked.sort(
+                key=lambda item: (
+                    item[1]["row"]["chunk_type"] == "table",
+                    "reference" in item[1]["hit_types"],
                     item[1]["final_score"],
                 ),
                 reverse=True,
@@ -1478,8 +1704,15 @@ class KnowledgeStore:
         for idx, (_, candidate) in enumerate(ranked[:top_k], 1):
             row = candidate["row"]
             score = min(0.99, max(0.05, float(candidate["final_score"])))
-            compact_quote = (
-                table_quote(row["table_json"], row["text"], plan.normalized_query, plan=plan)
+            structured_quote, structured_clause = structured_intent_quote(row, plan)
+            compact_quote = structured_quote or (
+                table_quote(
+                    row["table_json"],
+                    row["text"],
+                    plan.normalized_query,
+                    limit=1800 if plan.output_mode == "table" else QUOTE_LIMIT,
+                    plan=plan,
+                )
                 if row["chunk_type"] == "table"
                 else quote_text(row["text"], plan.retrieval_query)
             )
@@ -1489,20 +1722,22 @@ class KnowledgeStore:
                 "title": row["title"],
                 "standard_no": row["standard_no"],
                 "section_path": row["section_path"],
-                "clause_no": row["clause_no"],
+                "clause_no": structured_clause or row["clause_no"],
                 "page_start": row["page_start"],
                 "page_end": row["page_end"],
                 "page": row["page_start"],
                 "quote": compact_quote,
-                "evidence_text": table_quote(
-                    row["table_json"],
-                    row["text"],
-                    plan.retrieval_query,
-                    limit=800,
-                    plan=plan,
-                )
-                if row["chunk_type"] == "table"
-                else quote_text(row["text"], plan.retrieval_query, limit=800, max_sentences=6),
+                "evidence_text": structured_quote or (
+                    table_quote(
+                        row["table_json"],
+                        row["text"],
+                        plan.retrieval_query,
+                        limit=1800 if plan.output_mode == "table" else 800,
+                        plan=plan,
+                    )
+                    if row["chunk_type"] == "table"
+                    else quote_text(row["text"], plan.retrieval_query, limit=800, max_sentences=6)
+                ),
                 "score": round(score, 4),
                 "hit_type": sorted(candidate["hit_types"]),
                 "source_type": row["source_type"],
@@ -1593,7 +1828,7 @@ class KnowledgeStore:
         base_where: list[str],
         base_params: list[Any],
     ) -> tuple[list[str], list[Any], list[str]]:
-        if not plan.has_candidate_scope:
+        if not plan.has_hard_candidate_scope:
             return list(base_where), list(base_params), []
         if plan.search_mode in {"comparison", "exhaustive"} and not plan.standard_numbers:
             return list(base_where), list(base_params), []
@@ -1746,6 +1981,70 @@ class KnowledgeStore:
             float(candidate["route_scores"].get(hit_type, 0.0)),
             float(route_score),
         )
+
+    def _add_referenced_table_candidates(
+        self,
+        conn: sqlite3.Connection,
+        candidate_rows: dict[str, dict[str, Any]],
+        plan: QueryPlan,
+        base_where: list[str],
+        base_params: list[Any],
+    ) -> None:
+        if plan.output_mode != "table" or not candidate_rows:
+            return
+
+        expected_numbers = {number.replace(" ", "").upper() for number in plan.standard_numbers}
+        target_document_ids = {
+            str(candidate["row"]["document_id"])
+            for candidate in candidate_rows.values()
+            if (
+                not expected_numbers
+                or (candidate["row"]["standard_no"] or "").replace(" ", "").upper() in expected_numbers
+            )
+        }
+        if not target_document_ids:
+            target_document_ids = {
+                str(candidate["row"]["document_id"])
+                for candidate in candidate_rows.values()
+            }
+
+        reference_context = " ".join(
+            [
+                plan.retrieval_query,
+                *(
+                    row_context(candidate["row"])
+                    for candidate in candidate_rows.values()
+                    if str(candidate["row"]["document_id"]) in target_document_ids
+                ),
+            ]
+        )
+        references = table_references(reference_context)
+        if not references:
+            return
+
+        document_placeholders = ",".join("?" for _ in target_document_ids)
+        reference_where = " or ".join(
+            "replace(upper(c.section_path), ' ', '') like ?" for _ in references
+        )
+        rows = conn.execute(
+            f"""
+            select c.*, d.document_type, d.status, d.official_url, d.source_platform, 0.0 as rank
+            from chunks c
+            join documents d on d.document_id = c.document_id
+            where {' and '.join(base_where)}
+              and c.document_id in ({document_placeholders})
+              and c.chunk_type = 'table'
+              and ({reference_where})
+            order by c.section_path
+            """,
+            [
+                *base_params,
+                *sorted(target_document_ids),
+                *(f"%表{reference}%" for reference in references),
+            ],
+        ).fetchall()
+        for rank, row in enumerate(rows, start=1):
+            self._add_candidate(candidate_rows, row, "reference", rank, 1.0)
 
     def _candidate_fusion_score(self, candidate: dict[str, Any], plan: QueryPlan) -> float:
         row = candidate["row"]

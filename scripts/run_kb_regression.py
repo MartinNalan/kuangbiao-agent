@@ -526,15 +526,58 @@ def assert_api() -> None:
         any(source.get("source_role") == "parent_policy" for source in basis.get("sources") or []),
         "T018 basis API source should identify parent_policy",
     )
-    eligibility = post_json(
+    eligibility_answers = []
+    for eligibility_question in (
+        "哪些标准、制度规定了详查报告就可以转采？",
+        "哪个标准或文件规定了，详查报告就可以转采",
+    ):
+        eligibility = post_json(
+            f"{API_URL}/api/ask",
+            {"question": eligibility_question},
+            headers=headers,
+        )
+        assert_true(eligibility.get("status") == "answered", "eligibility API question should be answered")
+        eligibility_answer = eligibility.get("answer", "")
+        assert_true("经评审备案的矿产资源储量报告" in eligibility_answer, "eligibility answer missing policy precondition")
+        assert_true("不能替代探矿权转采矿权" in eligibility_answer, "eligibility answer missing report limitation")
+        assert_true(eligibility.get("retrieval", {}).get("planner_used") is False, "eligibility should skip planner")
+        assert_true(eligibility.get("retrieval", {}).get("reranker_used") is False, "eligibility should skip reranker")
+        eligibility_answers.append(eligibility_answer)
+    assert_true(len(set(eligibility_answers)) == 1, "eligibility paraphrases should produce one stable answer")
+
+    companion = post_json(
         f"{API_URL}/api/ask",
-        {"question": "哪些标准、制度规定了详查报告就可以转采？"},
+        {"question": "伴生矿产资源量类型如何确定"},
         headers=headers,
     )
-    assert_true(eligibility.get("status") == "answered", "eligibility API question should be answered")
-    eligibility_answer = eligibility.get("answer", "")
-    assert_true("经评审备案的矿产资源储量报告" in eligibility_answer, "eligibility answer missing policy precondition")
-    assert_true("不能替代探矿权转采矿权" in eligibility_answer, "eligibility answer missing report limitation")
+    assert_true(companion.get("status") == "answered", "companion resource type should be answered")
+    assert_true("9.2 原文" in companion.get("answer", ""), "companion answer missing clause 9.2")
+    assert_true("9.4 原文" in companion.get("answer", ""), "companion answer missing clause 9.4")
+    assert_true(
+        {source.get("standard_no") for source in companion.get("sources") or []} == {"GB/T 25283-2023"},
+        "companion answer should only cite the comprehensive exploration standard",
+    )
+
+    factors = post_json(
+        f"{API_URL}/api/ask",
+        {"question": "岩金矿勘查类型划分因素表格"},
+        headers=headers,
+    )
+    assert_true(factors.get("status") == "answered", "gold exploration factor tables should be answered")
+    for number in range(1, 6):
+        assert_true(f"表 E.{number}" in factors.get("answer", ""), f"factor answer missing table E.{number}")
+
+    basic_analysis = post_json(
+        f"{API_URL}/api/ask",
+        {"question": "铁矿勘查基本分析项目有哪些"},
+        headers=headers,
+    )
+    assert_true(basic_analysis.get("status") == "answered", "iron basic analysis should be answered")
+    assert_true("TFe、mFe" in basic_analysis.get("answer", ""), "iron answer missing TFe/mFe")
+    assert_true(
+        {source.get("standard_no") for source in basic_analysis.get("sources") or []} == {"DZ/T 0200-2020"},
+        "iron basic analysis should not cite unrelated standards",
+    )
     print("OK API: /api/ask end-to-end")
 
 

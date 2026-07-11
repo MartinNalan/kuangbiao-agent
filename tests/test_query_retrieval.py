@@ -7,10 +7,11 @@ from unittest.mock import patch
 from mining_qa.agent import MiningQAAgent
 from mining_qa.config import Settings
 from mining_qa.evidence_reranker import EvidenceReranker
-from mining_qa.knowledge_store import KnowledgeStore, VectorCandidateResult, table_quote
+from mining_qa.knowledge_store import KnowledgeStore, VectorCandidateResult, connect, table_quote, table_references
 from mining_qa.query_understanding import (
     apply_semantic_plan,
     contextualize_follow_up,
+    query_plan_from_payload,
     understand_query,
 )
 from mining_qa.schemas import Source
@@ -108,7 +109,7 @@ class QueryUnderstandingTests(unittest.TestCase):
 
         self.assertEqual(plan.intent, "exploration_to_mining_eligibility")
         self.assertTrue(plan.planner_used)
-        self.assertTrue(plan.exhaustive_search)
+        self.assertFalse(plan.exhaustive_search)
         self.assertIn("探矿权转采矿权", plan.retrieval_query)
 
     def test_exploration_to_mining_intent_has_a_deterministic_fallback(self) -> None:
@@ -118,9 +119,57 @@ class QueryUnderstandingTests(unittest.TestCase):
         )
 
         self.assertEqual(plan.intent, "exploration_to_mining_eligibility")
-        self.assertTrue(plan.exhaustive_search)
+        self.assertFalse(plan.exhaustive_search)
         self.assertIn("探矿权转采矿权", plan.retrieval_query)
         self.assertEqual(len(plan.required_evidence_groups), 3)
+        self.assertEqual(plan.scope_origin, "deterministic")
+        self.assertTrue(plan.has_hard_candidate_scope)
+
+    def test_feedback_topics_use_protected_relation_intents(self) -> None:
+        cases = {
+            "伴生矿产资源量类型如何确定": ("companion_resource_type", "GB/T 25283-2023", "default"),
+            "岩金矿勘查类型划分因素表格": ("exploration_type_factors", "DZ/T 0205-2020", "table"),
+            "铁矿勘查基本分析项目有哪些": ("basic_analysis_items", "DZ/T 0200-2020", "default"),
+        }
+        for question, (intent, standard_no, output_mode) in cases.items():
+            with self.subTest(question=question):
+                plan = understand_query(question)
+                self.assertEqual(plan.intent, intent)
+                self.assertIn(standard_no, plan.standard_numbers)
+                self.assertEqual(plan.scope_origin, "deterministic")
+                self.assertEqual(plan.output_mode, output_mode)
+
+    def test_model_suggested_title_is_a_soft_hint(self) -> None:
+        base = understand_query("某固体矿产资源分类问题")
+        plan = apply_semantic_plan(
+            base,
+            {
+                "canonical_query": base.normalized_query,
+                "intent": "general",
+                "candidate_titles": ["模型猜测的标准"],
+                "confidence": 0.7,
+            },
+        )
+
+        self.assertEqual(plan.scope_origin, "llm")
+        self.assertFalse(plan.has_hard_candidate_scope)
+
+    def test_restored_protected_plan_rejects_external_candidate_scope(self) -> None:
+        question = "哪些标准、制度规定了详查报告就可以转采"
+        plan = query_plan_from_payload(
+            question,
+            {
+                "intent": "general",
+                "candidate_title_terms": ["无关标准"],
+                "standard_numbers": ["DZ/T 9999-2099"],
+                "exhaustive_search": True,
+            },
+        )
+
+        self.assertEqual(plan.intent, "exploration_to_mining_eligibility")
+        self.assertNotIn("无关标准", plan.candidate_title_terms)
+        self.assertNotIn("DZ/T 9999-2099", plan.standard_numbers)
+        self.assertFalse(plan.exhaustive_search)
 
     def test_high_value_policy_and_numeric_intents_are_separate(self) -> None:
         cases = {
@@ -165,6 +214,28 @@ class TableExtractionTests(unittest.TestCase):
             self.assertIn(f"{label} 40～80 m", quote)
         self.assertNotIn("穿脉-80", quote)
 
+    def test_table_output_mode_emits_gfm_markdown(self) -> None:
+        plan = understand_query("岩金矿勘查类型划分因素表格")
+        table = json.dumps(
+            {
+                "caption": "表 E.1 矿体规模",
+                "matrix": [["规模等级", "走向/m"], ["大型", ">500"], ["中型", "200~500"]],
+            },
+            ensure_ascii=False,
+        )
+
+        quote = table_quote(table, "", plan.normalized_query, limit=1000, plan=plan)
+
+        self.assertIn("| 规模等级 | 走向/m |", quote)
+        self.assertIn("| --- | --- |", quote)
+        self.assertIn("| 大型 | >500 |", quote)
+
+    def test_table_reference_range_is_expanded(self) -> None:
+        self.assertEqual(
+            table_references("矿床勘查类型划分因素见表 E.1 至表 E.5。"),
+            ("E.1", "E.2", "E.3", "E.4", "E.5"),
+        )
+
 
 class RetrievalStrategyTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -193,6 +264,25 @@ class RetrievalStrategyTests(unittest.TestCase):
         self.assertEqual(result["retrieval"]["scoped_search"], 1)
         self.assertEqual(result["retrieval"]["vector_skipped"], 1)
         self.assertEqual(result["results"][0]["standard_no"], "DZ/T 0205-2020")
+
+    def test_llm_title_hint_does_not_apply_sql_document_scope(self) -> None:
+        base = understand_query("某固体矿产资源分类问题")
+        plan = apply_semantic_plan(
+            base,
+            {
+                "canonical_query": base.normalized_query,
+                "intent": "general",
+                "candidate_titles": ["模型猜测的标准"],
+                "confidence": 0.8,
+            },
+        )
+        base_where = ["d.visibility in ('internal', 'public')"]
+        with connect(self.store.db_path) as connection:
+            where, params, document_ids = self.store._candidate_scope(connection, plan, base_where, [])
+
+        self.assertEqual(where, base_where)
+        self.assertEqual(params, [])
+        self.assertEqual(document_ids, [])
 
     def test_dense_success_does_not_run_local_hash(self) -> None:
         dense_row = engineering_row()
@@ -301,6 +391,31 @@ class PlannerFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.plan.required_evidence_groups)
         self.assertEqual(result.error, "RuntimeError")
 
+    async def test_protected_transfer_intent_skips_model_planning(self) -> None:
+        class CountingLLM:
+            enabled = True
+
+            def __init__(self):
+                self.calls = 0
+
+            async def complete_json(self, messages, **kwargs):  # noqa: ANN001
+                self.calls += 1
+                raise AssertionError("protected intent must not call planner")
+
+        question = "哪些标准、制度规定了详查报告就可以转采"
+        llm = CountingLLM()
+        settings = Settings(OPENAI_API_KEY="configured", QUERY_PLANNER_ENABLED=True)
+        result = await RetrievalPlanner(settings, llm).plan(question, understand_query(question))  # type: ignore[arg-type]
+
+        self.assertFalse(result.used)
+        self.assertEqual(llm.calls, 0)
+        self.assertEqual(result.plan.intent, "exploration_to_mining_eligibility")
+
+    async def test_protected_transfer_intent_skips_model_reranking(self) -> None:
+        plan = understand_query("哪些标准、制度规定了详查报告就可以转采")
+
+        self.assertFalse(EvidenceReranker.needs_model(plan))
+
 
 class FastAnswerTests(unittest.TestCase):
     def test_equivalent_questions_produce_identical_structured_answer(self) -> None:
@@ -392,6 +507,102 @@ class FastAnswerTests(unittest.TestCase):
         self.assertIn("经评审备案的矿产资源储量报告", answer)
         self.assertIn("详查（含）以上程度", answer)
         self.assertIn("不能替代", answer)
+
+    def test_transfer_paraphrases_produce_the_same_answer(self) -> None:
+        agent = object.__new__(MiningQAAgent)
+        sources = [
+            Source(
+                title="自然资源部关于进一步完善矿产资源勘查开采登记管理的通知",
+                standard_no="自然资规〔2023〕4号",
+                chapter="二、#1",
+                quote=(
+                    "探矿权转采矿权，应当依据经评审备案的矿产资源储量报告。"
+                    "资源储量规模为大型的非煤矿山、大中型煤矿应当达到勘探程度，"
+                    "其他矿山应当达到详查（含）以上程度。"
+                ),
+                source_type="official_fulltext",
+                text_access="html_text",
+            ),
+            Source(
+                title="固体矿产资源储量核实报告编写规范",
+                standard_no="DZ/T 0430-2023",
+                chapter="A.9.5",
+                quote="矿产资源储量核实报告不能替代探矿权转采矿权时应提交的地质勘查报告。",
+                source_type="local_kb",
+                text_access="ocr_text",
+            ),
+        ]
+        questions = (
+            "哪些标准、制度规定了详查报告就可以转采",
+            "哪个标准或文件规定了，详查报告就可以转采",
+            "达到详查程度后能不能申请探矿权转采矿权",
+        )
+
+        answers = [agent._fast_answer(question, sources, understand_query(question)) for question in questions]
+
+        self.assertEqual(len(set(answers)), 1)
+
+    def test_companion_resource_type_answer_uses_three_clause_slots(self) -> None:
+        agent = object.__new__(MiningQAAgent)
+        sources = [
+            Source(title="矿产资源综合勘查评价规范", standard_no="GB/T 25283-2023", chapter="9.2", quote="9.2 基本分析且研究工作达到要求时，资源储量类型可与主要矿产相同。", source_type="local_kb", text_access="ocr_text"),
+            Source(title="矿产资源综合勘查评价规范", standard_no="GB/T 25283-2023", chapter="9.3", quote="9.3 基本分析但未满足其他条件时，应降低资源储量类型。", source_type="local_kb", text_access="ocr_text"),
+            Source(title="矿产资源综合勘查评价规范", standard_no="GB/T 25283-2023", chapter="9.4", quote="9.4 只进行组合分析而未做基本分析时，划为推断资源量。", source_type="local_kb", text_access="ocr_text"),
+        ]
+
+        answer = agent._fast_answer("伴生矿产资源量类型如何确定", sources) or ""
+
+        self.assertIn("GB/T 25283-2023", answer)
+        self.assertIn("降低资源储量类型", answer)
+        self.assertIn("推断资源量", answer)
+
+    def test_factor_table_answer_keeps_all_five_tables(self) -> None:
+        agent = object.__new__(MiningQAAgent)
+        sources = [
+            Source(
+                title="矿产地质勘查规范 岩金",
+                standard_no="DZ/T 0205-2020",
+                chapter=f"表 E.{number} 测试表",
+                quote=f"**表 E.{number} 测试表**\n\n| 项目 | 值 |\n| --- | --- |\n| A | {number} |",
+                source_type="local_kb",
+                text_access="ocr_text",
+            )
+            for number in range(1, 6)
+        ]
+
+        answer = agent._fast_answer("岩金矿勘查类型划分因素表格", sources) or ""
+
+        for number in range(1, 6):
+            self.assertIn(f"表 E.{number}", answer)
+
+    def test_basic_analysis_selection_drops_unrelated_standards(self) -> None:
+        agent = object.__new__(MiningQAAgent)
+        question = "铁矿勘查基本分析项目有哪些"
+        plan = understand_query(question)
+        hits = [
+            {
+                "document_id": "iron",
+                "standard_no": "DZ/T 0200-2020",
+                "title": "矿产地质勘查规范 铁、锰、铬",
+                "clause_no": "6.7.2.3",
+                "quote": "铁矿石基本分析项目，磁性铁矿石分析TFe、mFe，赤铁矿石分析TFe。",
+                "source_type": "local_kb",
+                "text_access": "ocr_text",
+            },
+            {
+                "document_id": "bauxite",
+                "standard_no": "DZ/T 0202-2020",
+                "title": "矿产地质勘查规范 铝土矿",
+                "clause_no": "7.7.4.3",
+                "quote": "铝土矿基本分析项目。",
+                "source_type": "local_kb",
+                "text_access": "ocr_text",
+            },
+        ]
+
+        selected = agent._select_evidence_hits(hits, question, plan)
+
+        self.assertEqual([item["standard_no"] for item in selected], ["DZ/T 0200-2020"])
 
 
 if __name__ == "__main__":

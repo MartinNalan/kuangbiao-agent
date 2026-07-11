@@ -51,6 +51,11 @@ AUTHENTICITY_TERMS = ("真实性", "真实准确", "弄虚作假", "真实性负
 RESERVE_REPORT_TERMS = ("资源储量报告", "矿产资源储量报告", "储量报告")
 EXPLORATION_STAGE_TERMS = ("详查", "勘探", "普查", "勘查程度", "勘查阶段")
 MINING_CONVERSION_TERMS = ("转采", "探矿权转采矿权", "申请采矿权", "采矿权新立")
+COMPANION_MINERAL_TERMS = ("伴生矿产", "伴生矿", "伴生资源")
+RESOURCE_TYPE_TERMS = ("资源量类型", "资源储量类型", "类型如何确定", "类型怎么确定", "类型划分")
+EXPLORATION_FACTOR_TERMS = ("划分因素", "因素表格", "因素表", "划分表格", "划分表")
+BASIC_ANALYSIS_TERMS = ("基本分析项目", "基本分析的项目", "基本分析")
+TABLE_OUTPUT_TERMS = ("表格", "因素表", "划分表", "指标表", "工程间距表")
 RELATED_DOCUMENT_TERMS = ("其他文件", "还有哪些文件", "还有什么文件", "其他规定", "还有其他规定")
 FOLLOW_UP_MARKERS = (
     "还有吗",
@@ -123,6 +128,8 @@ class QueryPlan:
     required_evidence_groups: tuple[tuple[str, ...], ...] = ()
     search_mode: str = "default"
     comparison_dimensions: tuple[str, ...] = ()
+    scope_origin: str = "none"
+    output_mode: str = "default"
     planner_used: bool = False
     planner_confidence: float = 0.0
     exhaustive_search: bool = False
@@ -130,6 +137,10 @@ class QueryPlan:
     @property
     def has_candidate_scope(self) -> bool:
         return bool(self.candidate_title_terms or self.standard_numbers)
+
+    @property
+    def has_hard_candidate_scope(self) -> bool:
+        return self.has_candidate_scope and self.scope_origin in {"user", "deterministic"}
 
     def to_payload(self) -> dict[str, Any]:
         return asdict(self)
@@ -174,6 +185,19 @@ DEFAULT_EVIDENCE_GROUPS: dict[str, tuple[tuple[str, ...], ...]] = {
         ("探矿权转采矿权", "转采", "申请采矿权", "采矿权新立"),
         ("依据", "条件", "符合", "达到", "不能替代", "应提交"),
     ),
+    "companion_resource_type": (
+        ("伴生矿产", "伴生矿"),
+        ("资源储量类型", "资源量类型", "推断资源量", "降低资源储量类型"),
+        ("基本分析", "组合分析"),
+    ),
+    "exploration_type_factors": (
+        ("勘查类型划分因素", "矿体规模", "形态变化", "厚度稳定", "构造", "组分分布"),
+        ("附录E", "表 E.", "表E."),
+    ),
+    "basic_analysis_items": (
+        ("基本分析项目", "基本分析"),
+        ("分析项目", "TFe", "mFe", "全铁", "磁性铁"),
+    ),
 }
 
 DEFAULT_DOCUMENT_TYPES: dict[str, tuple[str, ...]] = {
@@ -206,6 +230,25 @@ DEFAULT_DOCUMENT_TYPES: dict[str, tuple[str, ...]] = {
         "national_standard",
         "industry_standard",
     ),
+    "companion_resource_type": ("standard", "national_standard", "industry_standard"),
+    "exploration_type_factors": ("standard", "national_standard", "industry_standard"),
+    "basic_analysis_items": ("standard", "national_standard", "industry_standard"),
+}
+
+
+PROTECTED_QUERY_INTENTS = {
+    "engineering_distance_lookup",
+    "projection_numeric_rule",
+    "authority_responsibility",
+    "legal_responsibility",
+    "service_materials",
+    "service_procedure_basis",
+    "service_time_limit",
+    "standard_selection",
+    "exploration_to_mining_eligibility",
+    "companion_resource_type",
+    "exploration_type_factors",
+    "basic_analysis_items",
 }
 
 
@@ -254,12 +297,24 @@ def apply_semantic_plan(base: QueryPlan, payload: dict[str, Any] | None) -> Quer
     except (TypeError, ValueError):
         confidence = 0.0
     intent = base.intent
-    if semantic_intent and (base.intent in {"general", "projection_rule"} or confidence >= 0.6):
+    if (
+        semantic_intent
+        and base.intent not in PROTECTED_QUERY_INTENTS
+        and (base.intent in {"general", "projection_rule"} or confidence >= 0.6)
+    ):
         intent = semantic_intent
 
     search_mode = str(payload.get("search_mode") or "default").strip().lower()
     if search_mode not in {"default", "scoped", "comparison", "exhaustive", "catalog"}:
         search_mode = "default"
+    if base.intent in PROTECTED_QUERY_INTENTS:
+        search_mode = base.search_mode
+
+    output_mode = str(payload.get("output_mode") or base.output_mode or "default").strip().lower()
+    if output_mode not in {"default", "table"}:
+        output_mode = base.output_mode
+    if base.output_mode == "table":
+        output_mode = "table"
 
     subject_terms = _clean_terms(payload.get("subject_terms"))
     required_terms = _clean_terms(payload.get("required_terms"))
@@ -280,6 +335,9 @@ def apply_semantic_plan(base: QueryPlan, payload: dict[str, Any] | None) -> Quer
         )
     candidate_titles = tuple(dict.fromkeys((*base.candidate_title_terms, *semantic_titles)))
     standards = tuple(dict.fromkeys((*base.standard_numbers, *semantic_standards)))
+    scope_origin = base.scope_origin
+    if scope_origin == "none" and (semantic_titles or semantic_standards):
+        scope_origin = "llm"
     raw_document_types = _clean_terms(payload.get("document_types"), limit=12)
     document_types_list: list[str] = []
     for document_type in raw_document_types:
@@ -324,9 +382,17 @@ def apply_semantic_plan(base: QueryPlan, payload: dict[str, Any] | None) -> Quer
         required_evidence_groups=groups,
         search_mode=search_mode,
         comparison_dimensions=dimensions,
+        scope_origin=scope_origin,
+        output_mode=output_mode,
         planner_used=True,
         planner_confidence=confidence,
-        exhaustive_search=base.exhaustive_search or search_mode in {"comparison", "exhaustive"},
+        exhaustive_search=(
+            base.exhaustive_search
+            or (
+                base.intent not in PROTECTED_QUERY_INTENTS
+                and search_mode in {"comparison", "exhaustive"}
+            )
+        ),
     )
 
 
@@ -334,11 +400,14 @@ def query_plan_from_payload(query: str, payload: dict[str, Any] | None) -> Query
     base = understand_query(query)
     if not payload:
         return apply_semantic_plan(base, None)
+    protected = base.intent in PROTECTED_QUERY_INTENTS
     allowed = {
         "canonical_query": payload.get("normalized_query") or payload.get("canonical_query"),
         "intent": payload.get("intent"),
-        "candidate_titles": payload.get("candidate_title_terms") or payload.get("candidate_titles"),
-        "standard_numbers": payload.get("standard_numbers"),
+        "candidate_titles": None if protected else (
+            payload.get("candidate_title_terms") or payload.get("candidate_titles")
+        ),
+        "standard_numbers": None if protected else payload.get("standard_numbers"),
         "document_types": payload.get("document_types"),
         "subject_terms": payload.get("subject_terms"),
         "required_terms": payload.get("required_terms"),
@@ -347,6 +416,7 @@ def query_plan_from_payload(query: str, payload: dict[str, Any] | None) -> Query
         "required_evidence_groups": payload.get("required_evidence_groups"),
         "search_mode": payload.get("search_mode"),
         "comparison_dimensions": payload.get("comparison_dimensions"),
+        "output_mode": payload.get("output_mode"),
         "confidence": payload.get("planner_confidence") or payload.get("confidence"),
     }
     plan = apply_semantic_plan(base, allowed)
@@ -357,7 +427,11 @@ def query_plan_from_payload(query: str, payload: dict[str, Any] | None) -> Query
         target_exploration_type=target_type or plan.target_exploration_type,
         focus_terms=focus_terms or plan.focus_terms,
         planner_used=bool(payload.get("planner_used", plan.planner_used)),
-        exhaustive_search=bool(payload.get("exhaustive_search", plan.exhaustive_search)),
+        exhaustive_search=(
+            plan.exhaustive_search
+            if protected
+            else bool(payload.get("exhaustive_search", plan.exhaustive_search))
+        ),
     )
 
 
@@ -467,6 +541,15 @@ def understand_query(query: str) -> QueryPlan:
     has_exploration_to_mining = any(term in normalized for term in EXPLORATION_STAGE_TERMS) and any(
         term in normalized for term in MINING_CONVERSION_TERMS
     )
+    has_companion_resource_type = any(term in normalized for term in COMPANION_MINERAL_TERMS) and any(
+        term in normalized for term in RESOURCE_TYPE_TERMS
+    )
+    has_exploration_type_factors = "勘查类型" in normalized and any(
+        term in normalized for term in EXPLORATION_FACTOR_TERMS
+    )
+    has_basic_analysis_items = any(term in normalized for term in BASIC_ANALYSIS_TERMS) and any(
+        term in normalized for term in ("项目", "哪些", "什么", "包括", "内容")
+    )
     has_authority = any(term in normalized for term in AUTHORITY_INTENT_TERMS) and any(
         term in normalized for term in AUTHORITY_TOPIC_TERMS
     )
@@ -478,8 +561,10 @@ def understand_query(query: str) -> QueryPlan:
     candidate_titles: list[str] = []
     intent = "general"
     retrieval_terms: list[str] = []
-    standards = list(_standard_numbers(normalized))
+    explicit_standards = list(_standard_numbers(normalized))
+    standards = list(explicit_standards)
     focus_terms: list[str] = []
+    output_mode = "table" if any(term in normalized for term in TABLE_OUTPUT_TERMS) else "default"
 
     if has_authenticity:
         intent = "legal_responsibility"
@@ -543,6 +628,7 @@ def understand_query(query: str) -> QueryPlan:
         retrieval_terms.extend([*time_limit_titles, "办结时限", "工作日"])
     elif has_exploration_to_mining:
         intent = "exploration_to_mining_eligibility"
+        standards.extend(["自然资规〔2023〕4号", "DZ/T 0430-2023"])
         retrieval_terms.extend(
             [
                 "探矿权转采矿权",
@@ -553,6 +639,46 @@ def understand_query(query: str) -> QueryPlan:
                 "核实报告不能替代",
             ]
         )
+    elif has_companion_resource_type:
+        intent = "companion_resource_type"
+        candidate_titles.append("矿产资源综合勘查评价规范")
+        standards.append("GB/T 25283-2023")
+        retrieval_terms.extend(
+            [
+                "矿产资源综合勘查评价规范",
+                "共生伴生矿产资源储量类型确定",
+                "9.2",
+                "9.3",
+                "9.4",
+                "伴生矿产基本分析",
+                "伴生矿产组合分析",
+                "推断资源量",
+            ]
+        )
+    elif has_exploration_type_factors:
+        intent = "exploration_type_factors"
+        output_mode = "table"
+        if any(term in normalized for term in ("金矿", "岩金")):
+            candidate_titles.append("岩金")
+            standards.append("DZ/T 0205-2020")
+            retrieval_terms.extend(
+                [
+                    "岩金矿床勘查类型划分因素",
+                    "附录E",
+                    "E.1",
+                    "表 E.1",
+                    "表 E.2",
+                    "表 E.3",
+                    "表 E.4",
+                    "表 E.5",
+                ]
+            )
+    elif has_basic_analysis_items:
+        intent = "basic_analysis_items"
+        if any(term in normalized for term in ("铁矿", "锰矿", "铬矿")):
+            candidate_titles.append("铁、锰、铬")
+            standards.append("DZ/T 0200-2020")
+        retrieval_terms.extend([normalized, "基本分析项目", "化学分析项目"])
     elif has_engineering_distance:
         intent = "engineering_distance_lookup"
         if any(term in normalized for term in ("金矿", "岩金")):
@@ -631,6 +757,9 @@ def understand_query(query: str) -> QueryPlan:
             deduped_terms.append(clean)
             seen_terms.add(clean)
 
+    scope_origin = "user" if explicit_standards else (
+        "deterministic" if candidate_titles or standards else "none"
+    )
     return QueryPlan(
         original_query=original,
         normalized_query=normalized,
@@ -640,5 +769,10 @@ def understand_query(query: str) -> QueryPlan:
         candidate_title_terms=tuple(dict.fromkeys(candidate_titles)),
         standard_numbers=tuple(dict.fromkeys(standards)),
         focus_terms=tuple(dict.fromkeys(focus_terms)),
-        exhaustive_search=broad_comparison or has_related_documents,
+        scope_origin=scope_origin,
+        output_mode=output_mode,
+        exhaustive_search=(
+            (broad_comparison and intent not in PROTECTED_QUERY_INTENTS)
+            or has_related_documents
+        ),
     )
