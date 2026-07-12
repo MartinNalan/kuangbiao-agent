@@ -9,7 +9,6 @@ import uuid
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from functools import lru_cache
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -19,6 +18,14 @@ import numpy as np
 
 from .ann_index import AnnManifest, get_ann_index
 from .config import get_settings
+from .domain_lexicon import (
+    domain_lexicon,
+    lexicon_evidence_patterns,
+    lexicon_negative_terms,
+    lexicon_query_expansions,
+    matched_lexicon_entries,
+    query_has_intent,
+)
 from .embedding_provider import EmbeddingProvider, cosine_dense, embedding_config
 from .query_understanding import (
     QueryPlan,
@@ -31,7 +38,6 @@ from .query_understanding import (
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_KB_ROOT = PROJECT_ROOT / "data" / "knowledge_base"
 DEFAULT_DB_PATH = DEFAULT_KB_ROOT / "db" / "knowledge_base.sqlite"
-DOMAIN_LEXICON_PATH = Path(__file__).with_name("domain_lexicon.json")
 QUOTE_LIMIT = 260
 VECTOR_DIM = 512
 RRF_K = 60
@@ -294,56 +300,6 @@ def hydrate_official_urls(conn: sqlite3.Connection) -> None:
                 "update documents set official_url = ?, source_platform = ? where document_id = ?",
                 (url, platform, row["document_id"]),
             )
-
-
-@lru_cache(maxsize=1)
-def domain_lexicon() -> list[dict[str, Any]]:
-    if not DOMAIN_LEXICON_PATH.exists():
-        return []
-    try:
-        data = json.loads(DOMAIN_LEXICON_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-    if not isinstance(data, list):
-        return []
-    entries = [entry for entry in data if isinstance(entry, dict) and entry.get("status") == "active"]
-    return sorted(entries, key=lambda entry: int(entry.get("priority") or 0), reverse=True)
-
-
-def matched_lexicon_entries(query: str, intent_label: str | None = None) -> list[dict[str, Any]]:
-    matched = []
-    for entry in domain_lexicon():
-        if intent_label and entry.get("intent_label") != intent_label:
-            continue
-        probes = [entry.get("user_expression"), entry.get("canonical_term")]
-        if any(probe and str(probe) in query for probe in probes):
-            matched.append(entry)
-    return matched
-
-
-def lexicon_query_expansions(query: str) -> list[str]:
-    expansions: list[str] = []
-    for entry in matched_lexicon_entries(query):
-        expansions.append(str(entry.get("canonical_term") or ""))
-        expansions.extend(str(term) for term in (entry.get("positive_expansions") or []) if term)
-    return [term for term in expansions if term]
-
-
-def query_has_intent(query: str, intent_label: str) -> bool:
-    return bool(matched_lexicon_entries(query, intent_label=intent_label))
-
-
-def lexicon_negative_terms(query: str, intent_label: str | None = None) -> list[str]:
-    terms: list[str] = []
-    for entry in matched_lexicon_entries(query, intent_label=intent_label):
-        terms.extend(str(term) for term in (entry.get("negative_terms") or []) if term)
-    deduped: list[str] = []
-    seen = set()
-    for term in terms:
-        if term not in seen:
-            deduped.append(term)
-            seen.add(term)
-    return deduped
 
 
 def split_evidence_sentences(text: str) -> list[str]:
@@ -913,6 +869,7 @@ def query_terms(query: str, plan: QueryPlan | None = None) -> list[str]:
         ascii_type = {"Ⅰ": "I", "Ⅱ": "II", "Ⅲ": "III"}[effective_plan.target_exploration_type]
         terms.extend([f"{effective_plan.target_exploration_type}类型", ascii_type])
     terms.extend(lexicon_query_expansions(normalized_query))
+    terms.extend(lexicon_evidence_patterns(normalized_query))
     terms.extend(effective_plan.subject_terms)
     terms.extend(effective_plan.required_terms)
     terms.extend(effective_plan.alternative_terms)

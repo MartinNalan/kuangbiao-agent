@@ -38,6 +38,12 @@ from .email_sender import EmailDeliveryError, send_verification_email
 from .domain_gate import DomainGate
 from .feedback_log import FeedbackLogger
 from .knowledge_client import KnowledgeClient
+from .lexicon_governance import (
+    LexiconGovernanceError,
+    LexiconRecordNotFoundError,
+    LexiconReviewError,
+    get_lexicon_governance_store,
+)
 from .query_understanding import contextualize_follow_up
 from .rate_limit import RateLimiter
 from .schemas import (
@@ -51,6 +57,10 @@ from .schemas import (
     FeedbackResponse,
     FeedbackStatusUpdateRequest,
     InvitationCreateRequest,
+    LexiconCandidateRequest,
+    LexiconEntryStatusRequest,
+    LexiconPreviewRequest,
+    LexiconReviewRequest,
     LoginRequest,
     PasswordChangeRequest,
     QuotaInfo,
@@ -122,6 +132,10 @@ async def enforce_rate_limit(rate_limit_key: str) -> None:
 @app.on_event("startup")
 async def recover_research_queue() -> None:
     settings = get_settings()
+    try:
+        get_lexicon_governance_store(settings).publish_runtime()
+    except OSError:
+        logger.exception("Unable to publish governed domain lexicon during startup")
     for task_id in get_account_store(settings).recover_research_tasks():
         research_runner.schedule(task_id)
 
@@ -209,6 +223,23 @@ def account_error(error: Exception) -> HTTPException:
     )
 
 
+def lexicon_error(error: Exception) -> HTTPException:
+    if isinstance(error, LexiconRecordNotFoundError):
+        return HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "LEXICON_NOT_FOUND", "message": "词典记录不存在。"},
+        )
+    if isinstance(error, LexiconReviewError):
+        return HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "LEXICON_REVIEW_ERROR", "message": str(error)},
+        )
+    return HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail={"code": "LEXICON_ERROR", "message": "领域词典操作失败。"},
+    )
+
+
 def spa_index() -> FileResponse:
     return FileResponse(PROJECT_ROOT / "web" / "index.html")
 
@@ -224,6 +255,7 @@ async def index() -> FileResponse:
 @app.get("/usage", include_in_schema=False)
 @app.get("/standards", include_in_schema=False)
 @app.get("/admin", include_in_schema=False)
+@app.get("/admin/lexicon", include_in_schema=False)
 async def spa_page() -> FileResponse:
     return spa_index()
 
@@ -237,6 +269,7 @@ async def spa_page() -> FileResponse:
 async def health() -> dict[str, object]:
     settings = get_settings()
     store = get_account_store(settings)
+    lexicon_summary = get_lexicon_governance_store(settings).summary()
     registry_path = Path(settings.api_key_registry_path) if settings.api_key_registry_path else None
     return {
         "ok": True,
@@ -258,6 +291,7 @@ async def health() -> dict[str, object]:
         "qa_modes": {"basic": 1, "deep": 3},
         "research_max_documents": settings.research_max_documents,
         "research_global_concurrency": settings.research_global_concurrency,
+        "domain_lexicon": lexicon_summary,
     }
 
 
@@ -989,6 +1023,119 @@ async def admin_feedback_status(
         )
     except AccountStoreError as error:
         raise account_error(error) from error
+    return {"ok": True, "item": item}
+
+
+@app.get("/api/admin/lexicon", tags=["admin"], summary="List governed domain lexicon records")
+async def admin_lexicon(
+    principal: Annotated[Principal, Depends(admin_principal)],
+    entry_status: Annotated[str | None, Query()] = None,
+    candidate_status: Annotated[str | None, Query()] = None,
+    q: Annotated[str | None, Query()] = None,
+) -> dict[str, object]:
+    store = get_lexicon_governance_store()
+    return {
+        "summary": store.summary(),
+        "entries": store.list_entries(status=entry_status, query=q),
+        "candidates": store.list_candidates(status=candidate_status),
+        "audit": store.list_audit(limit=80),
+    }
+
+
+@app.post("/api/admin/lexicon/candidates", tags=["admin"], summary="Create a lexicon candidate")
+async def admin_create_lexicon_candidate(
+    payload: LexiconCandidateRequest,
+    principal: Annotated[Principal, Depends(admin_principal)],
+) -> dict[str, object]:
+    try:
+        item = get_lexicon_governance_store().create_candidate(
+            payload.model_dump(mode="json"),
+            principal.user_id or "",
+        )
+    except LexiconGovernanceError as error:
+        raise lexicon_error(error) from error
+    return {"ok": True, "item": item}
+
+
+@app.put(
+    "/api/admin/lexicon/candidates/{candidate_id}",
+    tags=["admin"],
+    summary="Update a lexicon candidate",
+)
+async def admin_update_lexicon_candidate(
+    candidate_id: str,
+    payload: LexiconCandidateRequest,
+    principal: Annotated[Principal, Depends(admin_principal)],
+) -> dict[str, object]:
+    try:
+        item = get_lexicon_governance_store().update_candidate(
+            candidate_id,
+            payload.model_dump(mode="json"),
+            principal.user_id or "",
+        )
+    except LexiconGovernanceError as error:
+        raise lexicon_error(error) from error
+    return {"ok": True, "item": item}
+
+
+@app.post("/api/admin/lexicon/preview", tags=["admin"], summary="Preview a lexicon candidate")
+async def admin_preview_lexicon_candidate(
+    payload: LexiconPreviewRequest,
+    principal: Annotated[Principal, Depends(admin_principal)],
+) -> dict[str, object]:
+    try:
+        preview = get_lexicon_governance_store().preview_candidate(
+            payload.query,
+            payload.candidate.model_dump(mode="json"),
+            candidate_id=payload.candidate_id,
+            actor_user_id=principal.user_id or "",
+        )
+    except LexiconGovernanceError as error:
+        raise lexicon_error(error) from error
+    return {"ok": True, **preview}
+
+
+@app.post(
+    "/api/admin/lexicon/candidates/{candidate_id}/review",
+    tags=["admin"],
+    summary="Approve or reject a lexicon candidate",
+)
+async def admin_review_lexicon_candidate(
+    candidate_id: str,
+    payload: LexiconReviewRequest,
+    principal: Annotated[Principal, Depends(admin_principal)],
+) -> dict[str, object]:
+    try:
+        item = get_lexicon_governance_store().review_candidate(
+            candidate_id,
+            payload.action,
+            payload.note,
+            principal.user_id or "",
+        )
+    except LexiconGovernanceError as error:
+        raise lexicon_error(error) from error
+    return {"ok": True, "item": item}
+
+
+@app.post(
+    "/api/admin/lexicon/entries/{lexicon_id}/status",
+    tags=["admin"],
+    summary="Activate or disable a governed lexicon entry",
+)
+async def admin_set_lexicon_entry_status(
+    lexicon_id: str,
+    payload: LexiconEntryStatusRequest,
+    principal: Annotated[Principal, Depends(admin_principal)],
+) -> dict[str, object]:
+    try:
+        item = get_lexicon_governance_store().set_entry_status(
+            lexicon_id,
+            payload.status,
+            payload.note,
+            principal.user_id or "",
+        )
+    except LexiconGovernanceError as error:
+        raise lexicon_error(error) from error
     return {"ok": True, "item": item}
 
 

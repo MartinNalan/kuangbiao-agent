@@ -441,6 +441,23 @@ POST /api/admin/feedback/{feedback_id}/status
 
 The status update body accepts `open`, `in_progress`, `kb_review`, `resolved`, `dismissed`, or `closed`, plus an optional `resolution_note`.
 
+Domain lexicon governance:
+
+```text
+GET  /api/admin/lexicon
+POST /api/admin/lexicon/candidates
+PUT  /api/admin/lexicon/candidates/{candidate_id}
+POST /api/admin/lexicon/preview
+POST /api/admin/lexicon/candidates/{candidate_id}/review
+POST /api/admin/lexicon/entries/{lexicon_id}/status
+```
+
+Candidate creation and update accept the governed expression, canonical term, intent/domain labels, aliases, positive expansions, negative terms, evidence-required patterns, required/forbidden context, positive/hard-negative examples, independent domain-gate and intent switches, priority, risk, source, and `draft`/`pending` status.
+
+Preview requests include the saved `candidate_id`, a test query, and the current candidate payload. The response compares current and proposed domain-gate, intent, retrieval-expansion, and evidence-pattern behavior, then reports every positive/negative example check. A preview is approval-ready only when the submitted payload matches the saved candidate and all examples pass.
+
+Approval requires `status=pending`, positive examples, hard-negative examples, a current successful preview, and a non-empty review note. Any behavior-changing update invalidates the previous preview. Approval atomically publishes the governed runtime lexicon; entry disable/activate operations also require a reason and are audited. These administrator APIs never expose the private knowledge base.
+
 ## POST /api/uploads
 
 用户上传资料。上传资料默认进入上传用户的私有库。

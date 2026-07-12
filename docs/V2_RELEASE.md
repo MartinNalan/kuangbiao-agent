@@ -1,4 +1,14 @@
-# geowiki v2.0.0
+# geowiki v2.x Releases
+
+## v2.1.0 Domain Lexicon Governance
+
+- Added an administrator-only “领域词典” workspace for candidate review, runtime entries, status control, and audit history.
+- Separated domain-gate, deterministic-intent, retrieval-expansion, context, negative-term, and evidence-pattern responsibilities.
+- Added candidate creation from answer feedback, explicit positive and hard-negative examples, risk levels, priorities, and source records.
+- Approval now requires a saved `pending` candidate, review note, and a current preview in which all positive/negative examples pass. Any behavior change invalidates the preview.
+- Approved, disabled, or restored entries are atomically published to a private runtime JSON file and reloaded by API/KB processes without restart.
+- Generic administrative phrases no longer pass the geological domain gate without governed context terms.
+- Added SQLite migrations, audit records, admin APIs, responsive UI, and automated lifecycle tests. Runtime data remains excluded from Git.
 
 ## v2.0.1 Patch
 

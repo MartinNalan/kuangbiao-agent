@@ -1,6 +1,7 @@
 import unittest
 
-from mining_qa.domain_gate import DomainGate, governed_domain_terms
+from mining_qa.domain_gate import DomainGate
+from mining_qa.domain_lexicon import clear_domain_lexicon_cache, governed_domain_terms
 from mining_qa.knowledge_store import domain_lexicon, lexicon_query_expansions, matched_lexicon_entries
 from mining_qa.query_understanding import understand_query
 
@@ -24,8 +25,7 @@ REQUIRED_FIELDS = {
 class DomainLexiconTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        domain_lexicon.cache_clear()
-        governed_domain_terms.cache_clear()
+        clear_domain_lexicon_cache()
 
     def test_active_entries_have_complete_unique_schema(self) -> None:
         entries = domain_lexicon()
@@ -69,6 +69,38 @@ class DomainLexiconTests(unittest.TestCase):
         matches = matched_lexicon_entries("岩金工程间距是多少")
         self.assertNotIn("lex-authority-background-scale", {entry["lexicon_id"] for entry in matches})
 
+    def test_background_context_expands_retrieval_without_overriding_intent(self) -> None:
+        plan = understand_query("大型金矿有哪些勘查标准")
+
+        self.assertNotEqual(plan.intent, "background_context")
+        self.assertIn("岩金", plan.retrieval_query)
+
+    def test_retrieval_only_entry_still_contributes_expansions(self) -> None:
+        entries = [
+            {
+                "lexicon_id": "lex-retrieval-only",
+                "user_expression": "矿证",
+                "canonical_term": "采矿许可证",
+                "intent_label": "license_reference",
+                "domain": "mining_right_registration",
+                "aliases": [],
+                "positive_expansions": ["采矿权"],
+                "negative_terms": [],
+                "evidence_required_patterns": [],
+                "required_context_terms": [],
+                "forbidden_context_terms": [],
+                "match_type": "phrase",
+                "domain_gate_enabled": False,
+                "intent_trigger_enabled": False,
+                "priority": 50,
+                "risk_level": "low",
+                "status": "active",
+            }
+        ]
+
+        self.assertIn("采矿权", lexicon_query_expansions("矿证怎么办", entries=entries))
+        self.assertFalse(matched_lexicon_entries("矿证怎么办", entries=entries))
+
     def test_no_overly_broad_single_mining_right_token_is_active(self) -> None:
         expressions = {entry["user_expression"] for entry in domain_lexicon()}
         self.assertNotIn("矿权", expressions)
@@ -80,6 +112,10 @@ class DomainLexiconTests(unittest.TestCase):
 
         self.assertTrue(decision.in_scope)
         self.assertIn("探转采", decision.matched_terms)
+
+    def test_generic_action_phrase_needs_domain_context(self) -> None:
+        self.assertFalse(DomainGate().check("护照应该去哪里申请").in_scope)
+        self.assertTrue(DomainGate().check("采矿证应该去哪里申请").in_scope)
 
 
 if __name__ == "__main__":

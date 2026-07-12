@@ -32,7 +32,7 @@ Backend API
 - 调用后端 API
 - 提供邀请码注册、登录和账号状态展示
 - 管理用户 API Key、每日配额、调整记录和调用示例
-- 管理员处理邀请码、用户状态和每日配额，后续扩展补库任务和候选审核
+- 管理员处理邀请码、用户状态、每日配额、回答反馈和领域词典候选审核
 
 ## 3. 后端
 
@@ -98,6 +98,7 @@ Create research task
 - 用户 API Key 哈希、前缀和吊销状态。
 - 用户长期日上限、当日使用单位、预留单位和管理员追加次数。
 - 配额调整审计记录、会话消息、请求 ID、调用渠道和最终消费状态。
+- 领域词典正式条目、候选版本、预览状态和不可变审核记录。
 
 密码采用 `scrypt`；会话令牌、邀请码、邮箱验证码和 API Key 均不保存明文。问答前以 SQLite `BEGIN IMMEDIATE` 原子预留配额单位：基本模式 1 个，深度模式 3 个，同一基本答案升级深度模式追加 2 个。领域外拒答不预留；系统异常和排队阶段取消退回。网页会话和账号下全部 API Key 共用配额，日期按 `Asia/Shanghai` 计算。`research_tasks` 持久化阶段、进度、覆盖、研究计划和结果；部分唯一索引保证每名用户只有一个活动深度任务。旧 `API_KEYS` 和 JSON registry 仅作为内部兼容通道，不属于公开用户体系。
 
@@ -164,7 +165,23 @@ User question
   -> async web/OCR enrichment when evidence remains insufficient
 ```
 
-`domain_lexicon` 可以先由静态配置或 SQLite 表实现，后续迁移为管理员可维护的词库。字段至少包含用户表达、规范术语、意图标签、正向扩展、负面降权词、证据要求和优先级。
+`domain_lexicon` 在 v2.1.0 由 SQLite 治理表和运行时 JSON 两层组成。内置词条在应用数据库初始化时登记；管理员新增或修改内容先进入候选表。候选记录用户表达、规范术语、意图标签、领域、别名、上下文条件、正向扩展、负面降权词、证据要求、优先级、风险等级、正例和反例。
+
+发布流程：
+
+```text
+Feedback / query mining / KB Schema / manual input
+  -> candidate draft
+  -> administrator completes mapping and risk controls
+  -> save as pending
+  -> preview current vs proposed behavior
+  -> validate every positive and hard-negative example
+  -> approve or reject with review note
+  -> atomic runtime JSON publication
+  -> API and private KB reload by file mtime
+```
+
+领域门控、确定性意图和检索扩展使用独立运行开关。通用表达不能单独通过领域门控，除非同时出现受治理的地质/矿业上下文。候选指纹覆盖所有会影响匹配的字段；字段变化会使旧预览失效。正式词条停用或恢复后重新原子发布，并保留完整审计记录。运行时文件默认位于 `data/app/domain_lexicon_runtime.json`，与应用数据库一样属于私有运行数据。
 
 ## 5. OCR 与版面解析
 

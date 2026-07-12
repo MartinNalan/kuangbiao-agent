@@ -4,7 +4,7 @@
 
 ## 当前阶段
 
-当前版本为 **v2.0.1**。已具备私有知识库问答、受控 Agentic RAG、基本/深度双模式、持久化跨文档研究任务、邀请码与邮箱验证注册、登录会话、用户 API Key、每日次数配额、会话历史、标准目录、开发者控制台和管理员基础入口。
+当前版本为 **v2.1.0**。已具备私有知识库问答、受控 Agentic RAG、基本/深度双模式、持久化跨文档研究任务、邀请码与邮箱验证注册、登录会话、用户 API Key、每日次数配额、会话历史、标准目录、开发者控制台，以及由管理员审核发布的领域词典治理入口。
 
 基本模式检索链路为：领域门控 -> 机械归一/定义槽位 -> 复杂问题 DeepSeek 规划 -> Schema/FTS/KG/ANN 混合检索 -> 证据审查 -> 最多一次补充检索 -> 受证据约束的回答。深度模式使用独立异步流程：研究规划 -> Schema/目录候选枚举 -> 逐文件限定检索 -> AND 证据组校验 -> 分批结构化事实抽取 -> 对比矩阵与覆盖说明。
 
@@ -47,6 +47,7 @@ REDIS_URL=redis://127.0.0.1:6379/0
 RATE_LIMIT_ENABLED=true
 RATE_LIMIT_PER_MINUTE=30
 APP_DB_PATH=data/app/application.sqlite
+DOMAIN_LEXICON_RUNTIME_PATH=data/app/domain_lexicon_runtime.json
 AUTH_REQUIRED=true
 REGISTRATION_ENABLED=true
 SESSION_COOKIE_NAME=kb_session
@@ -124,6 +125,10 @@ PYTHONPATH=src .venv/bin/python scripts/manage_accounts.py create-invite --label
 PYTHONPATH=src .venv/bin/python scripts/manage_accounts.py set-daily-limit --account user@example.com --limit 20 --reason "扩大测试范围" --admin-account admin
 PYTHONPATH=src .venv/bin/python scripts/manage_accounts.py add-quota --account user@example.com --count 5 --reason "专项测试" --admin-account admin
 ```
+
+管理员侧栏中的“领域词典”用于治理用户口语表达、规范术语、意图触发、检索扩展和证据约束。新表达只能先保存为候选；候选必须处于待审核状态，包含正向示例、容易误判的反例和审核记录，并通过最新规则的上线前预览后才能批准。批准、驳回、停用和恢复均写入审计记录；正式词条的修改会生成新候选，不直接覆盖运行规则。
+
+批准或停用后，系统原子更新 `DOMAIN_LEXICON_RUNTIME_PATH`，API 与私有知识库按文件修改时间自动重载，无需重启。该运行时文件、应用数据库和审核数据位于 `data/`，不得提交 Git。
 
 健康检查：
 

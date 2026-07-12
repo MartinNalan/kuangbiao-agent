@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 TEST_DATA = tempfile.TemporaryDirectory()
 os.environ["APP_DB_PATH"] = os.path.join(TEST_DATA.name, "api-application.sqlite")
+os.environ["DOMAIN_LEXICON_RUNTIME_PATH"] = os.path.join(TEST_DATA.name, "domain-lexicon-runtime.json")
 os.environ["AUTH_REQUIRED"] = "true"
 os.environ["REGISTRATION_ENABLED"] = "true"
 os.environ["RATE_LIMIT_ENABLED"] = "false"
@@ -299,6 +300,70 @@ class ApiAccountTests(unittest.TestCase):
         self.assertEqual(users.status_code, 200, users.text)
         target = next(item for item in users.json()["items"] if item["user_id"] == user["user_id"])
         self.assertEqual(target["quota"]["remaining"], 25)
+
+    def test_admin_can_preview_approve_and_disable_lexicon_candidate(self) -> None:
+        login = self.client.post(
+            "/api/auth/login",
+            json={"account": "admin-api-test", "password": "admin-password-2026"},
+        )
+        self.assertEqual(login.status_code, 200, login.text)
+
+        initial = self.client.get("/api/admin/lexicon")
+        self.assertEqual(initial.status_code, 200, initial.text)
+        self.assertGreaterEqual(initial.json()["summary"]["active_entries"], 23)
+
+        payload = {
+            "user_expression": "矿证测试词",
+            "canonical_term": "采矿许可证",
+            "intent_label": "license_reference",
+            "domain": "mining_right_registration",
+            "aliases": ["测试矿证"],
+            "positive_expansions": ["采矿许可证", "采矿权"],
+            "negative_terms": ["毕业证"],
+            "evidence_required_patterns": ["采矿许可证"],
+            "required_context_terms": ["矿"],
+            "forbidden_context_terms": ["毕业"],
+            "positive_examples": ["矿证测试词应该去哪里备案"],
+            "negative_examples": ["毕业证应该去哪里补办"],
+            "match_type": "phrase",
+            "domain_gate_enabled": True,
+            "intent_trigger_enabled": True,
+            "priority": 88,
+            "risk_level": "medium",
+            "status": "pending",
+            "source_type": "manual",
+            "review_note": "API 审核测试",
+        }
+        created = self.client.post("/api/admin/lexicon/candidates", json=payload)
+        self.assertEqual(created.status_code, 200, created.text)
+        candidate_id = created.json()["item"]["candidate_id"]
+
+        preview = self.client.post(
+            "/api/admin/lexicon/preview",
+            json={
+                "candidate_id": candidate_id,
+                "query": "矿证测试词应该去哪里备案",
+                "candidate": payload,
+            },
+        )
+        self.assertEqual(preview.status_code, 200, preview.text)
+        self.assertTrue(preview.json()["proposed"]["domain_gate_passed"])
+        self.assertTrue(preview.json()["verification_passed"])
+
+        approved = self.client.post(
+            f"/api/admin/lexicon/candidates/{candidate_id}/review",
+            json={"action": "approve", "note": "正反例和上下文均已核验"},
+        )
+        self.assertEqual(approved.status_code, 200, approved.text)
+        lexicon_id = approved.json()["item"]["target_lexicon_id"]
+        self.assertTrue(os.path.exists(os.environ["DOMAIN_LEXICON_RUNTIME_PATH"]))
+
+        disabled = self.client.post(
+            f"/api/admin/lexicon/entries/{lexicon_id}/status",
+            json={"status": "disabled", "note": "完成停用测试"},
+        )
+        self.assertEqual(disabled.status_code, 200, disabled.text)
+        self.assertEqual(disabled.json()["item"]["status"], "disabled")
 
     def test_email_code_requires_a_valid_invitation(self) -> None:
         response = self.client.post(

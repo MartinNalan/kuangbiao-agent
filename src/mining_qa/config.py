@@ -74,6 +74,10 @@ class Settings(BaseSettings):
         default=str(PROJECT_ROOT / "data" / "app" / "retrieval_traces.jsonl"),
         alias="RETRIEVAL_TRACE_PATH",
     )
+    domain_lexicon_runtime_path: str = Field(
+        default=str(PROJECT_ROOT / "data" / "app" / "domain_lexicon_runtime.json"),
+        alias="DOMAIN_LEXICON_RUNTIME_PATH",
+    )
     app_db_path: str = Field(
         default=str(PROJECT_ROOT / "data" / "app" / "application.sqlite"),
         alias="APP_DB_PATH",

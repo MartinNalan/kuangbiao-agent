@@ -112,6 +112,7 @@ sshpass -e scp -P "${CLOUD_SSH_PORT}" -o StrictHostKeyChecking=accept-new \
   -e 's|^ANN_INDEX_PATH=.*|ANN_INDEX_PATH=${CLOUD_APP_DIR}/data/knowledge_base/indexes/dense.usearch|' \
   -e 's|^ANN_MANIFEST_PATH=.*|ANN_MANIFEST_PATH=${CLOUD_APP_DIR}/data/knowledge_base/indexes/dense_manifest.json|' \
   -e 's|^RETRIEVAL_TRACE_PATH=.*|RETRIEVAL_TRACE_PATH=${CLOUD_APP_DIR}/data/app/retrieval_traces.jsonl|' \
+  -e 's|^DOMAIN_LEXICON_RUNTIME_PATH=.*|DOMAIN_LEXICON_RUNTIME_PATH=${CLOUD_APP_DIR}/data/app/domain_lexicon_runtime.json|' \
   -e 's|^PUBLIC_BASE_URL=.*|PUBLIC_BASE_URL=http://${CLOUD_HOST}|' \
   -e 's|^SESSION_COOKIE_SECURE=.*|SESSION_COOKIE_SECURE=false|' \
   -e 's|^AGENTMAIL_PROXY_URL=.*|AGENTMAIL_PROXY_URL=${CLOUD_AGENTMAIL_PROXY_URL}|' \
@@ -120,6 +121,7 @@ sshpass -e scp -P "${CLOUD_SSH_PORT}" -o StrictHostKeyChecking=accept-new \
   grep -q '^ANN_INDEX_PATH=' '${CLOUD_APP_DIR}/.env' || echo 'ANN_INDEX_PATH=${CLOUD_APP_DIR}/data/knowledge_base/indexes/dense.usearch' >> '${CLOUD_APP_DIR}/.env'; \
   grep -q '^ANN_MANIFEST_PATH=' '${CLOUD_APP_DIR}/.env' || echo 'ANN_MANIFEST_PATH=${CLOUD_APP_DIR}/data/knowledge_base/indexes/dense_manifest.json' >> '${CLOUD_APP_DIR}/.env'; \
   grep -q '^RETRIEVAL_TRACE_PATH=' '${CLOUD_APP_DIR}/.env' || echo 'RETRIEVAL_TRACE_PATH=${CLOUD_APP_DIR}/data/app/retrieval_traces.jsonl' >> '${CLOUD_APP_DIR}/.env'; \
+  grep -q '^DOMAIN_LEXICON_RUNTIME_PATH=' '${CLOUD_APP_DIR}/.env' || echo 'DOMAIN_LEXICON_RUNTIME_PATH=${CLOUD_APP_DIR}/data/app/domain_lexicon_runtime.json' >> '${CLOUD_APP_DIR}/.env'; \
   grep -q '^AGENTMAIL_PROXY_URL=' '${CLOUD_APP_DIR}/.env' || echo 'AGENTMAIL_PROXY_URL=${CLOUD_AGENTMAIL_PROXY_URL}' >> '${CLOUD_APP_DIR}/.env'"
 
 "${SSH[@]}" "${REMOTE}" "bash '${CLOUD_APP_DIR}/deploy/bootstrap_server.sh' '${CLOUD_APP_DIR}'"

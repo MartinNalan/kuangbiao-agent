@@ -13,6 +13,9 @@ const state = {
   registrationEnabled: true,
   qaMode: "basic",
   activeResearchTask: null,
+  lexiconData: null,
+  lexiconCandidate: null,
+  lexiconStatusEntry: null,
 };
 
 const qaModes = {
@@ -38,6 +41,7 @@ const viewMeta = {
   developer: ["开发者", "API Key、调用示例与接口说明"],
   usage: ["配额与用量", "网页与 API 共用账号每日配额"],
   admin: ["管理后台", "邀请码、用户与每日配额"],
+  lexicon: ["领域词典", "候选审核、运行时规则与版本记录"],
 };
 
 const viewPaths = {
@@ -46,6 +50,7 @@ const viewPaths = {
   developer: "/developer",
   usage: "/usage",
   admin: "/admin",
+  lexicon: "/admin/lexicon",
 };
 
 const pathViews = Object.fromEntries(Object.entries(viewPaths).map(([key, value]) => [value, key]));
@@ -219,8 +224,9 @@ async function showApp(user) {
   $("#accountRole").textContent = user.role === "admin" ? "管理员" : "内测用户";
   $("#accountAvatar").textContent = (user.display_name || user.account || "U").slice(0, 1).toUpperCase();
   $("#adminNavItem").classList.toggle("hidden", user.role !== "admin");
+  $("#lexiconNavItem").classList.toggle("hidden", user.role !== "admin");
   const requestedView = pathViews[window.location.pathname] || "chat";
-  navigate(requestedView === "admin" && user.role !== "admin" ? "chat" : requestedView, false);
+  navigate(["admin", "lexicon"].includes(requestedView) && user.role !== "admin" ? "chat" : requestedView, false);
   await Promise.allSettled([loadAccountSummary(), loadConversations()]);
   void resumeStoredResearchTask();
   refreshIcons();
@@ -323,7 +329,7 @@ async function sendEmailCode() {
 
 function navigate(view, push = true) {
   if (!viewMeta[view]) view = "chat";
-  if (view === "admin" && state.user?.role !== "admin") view = "chat";
+  if (["admin", "lexicon"].includes(view) && state.user?.role !== "admin") view = "chat";
   state.currentView = view;
   $$(".workspace-view").forEach((node) => node.classList.toggle("active", node.id === `${view}View`));
   $$(".nav-item").forEach((node) => node.classList.toggle("active", node.dataset.view === view));
@@ -335,6 +341,7 @@ function navigate(view, push = true) {
   if (view === "developer") loadApiKeys();
   if (view === "usage") loadAccountSummary(true);
   if (view === "admin") loadAdminData();
+  if (view === "lexicon") loadLexiconData();
 }
 
 function openSidebar() {
@@ -1189,6 +1196,435 @@ async function copyText(value, options = {}) {
   return false;
 }
 
+function splitLexiconList(value) {
+  return [...new Set(String(value || "").split(/[\n,，;；]+/).map((item) => item.trim()).filter(Boolean))];
+}
+
+function joinLexiconList(value) {
+  return Array.isArray(value) ? value.join("\n") : "";
+}
+
+function lexiconStatusLabel(status) {
+  return {
+    active: "已启用",
+    disabled: "已停用",
+    draft: "草稿",
+    pending: "待审核",
+    approved: "已批准",
+    rejected: "已驳回",
+  }[status] || status || "--";
+}
+
+function lexiconRiskLabel(risk) {
+  return { low: "低", medium: "中", high: "高" }[risk] || risk || "--";
+}
+
+function lexiconSourceLabel(source) {
+  return {
+    manual: "管理员录入",
+    user_feedback: "用户反馈",
+    query_mining: "问题挖掘",
+    kb_schema: "知识库 Schema",
+  }[source] || source || "--";
+}
+
+function lexiconActionLabel(action) {
+  return {
+    candidate_created: "创建候选",
+    candidate_updated: "修改候选",
+    candidate_previewed: "上线前预览",
+    candidate_approved: "批准生效",
+    candidate_rejected: "驳回候选",
+    entry_active: "恢复词条",
+    entry_disabled: "停用词条",
+  }[action] || action || "--";
+}
+
+function lexiconStatusClass(status) {
+  if (["active", "approved"].includes(status)) return "answered";
+  if (["draft", "pending"].includes(status)) return "queued_for_enrichment";
+  return "out_of_scope";
+}
+
+async function loadLexiconData() {
+  if (state.user?.role !== "admin") return;
+  try {
+    const data = await apiRequest("/api/admin/lexicon");
+    state.lexiconData = data;
+    renderLexiconSummary(data.summary || {});
+    renderLexiconCandidates(data.candidates || []);
+    renderLexiconEntries(data.entries || []);
+    renderLexiconAudit(data.audit || []);
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+function renderLexiconSummary(summary) {
+  $("#lexiconActiveCount").textContent = displayCount(summary.active_entries);
+  $("#lexiconPendingCount").textContent = displayCount(
+    Number(summary.pending_candidates || 0) + Number(summary.draft_candidates || 0),
+  );
+  $("#lexiconDisabledCount").textContent = displayCount(summary.disabled_entries);
+  $("#lexiconHighRiskCount").textContent = displayCount(summary.high_risk_candidates);
+}
+
+function renderLexiconCandidates(items) {
+  const body = $("#lexiconCandidateTableBody");
+  body.innerHTML = "";
+  if (!items.length) {
+    body.innerHTML = '<tr><td colspan="8" class="empty-row">暂无候选词条。</td></tr>';
+    return;
+  }
+  items.forEach((item) => {
+    const row = document.createElement("tr");
+    row.innerHTML = `
+      <td><strong>${escapeHtml(item.user_expression)}</strong>${item.aliases?.length ? `<span class="table-subtext">${escapeHtml(item.aliases.join("、"))}</span>` : ""}</td>
+      <td>${escapeHtml(item.canonical_term)}</td>
+      <td><code>${escapeHtml(item.intent_label)}</code><span class="table-subtext">${escapeHtml(item.domain)}</span></td>
+      <td>${item.domain_gate_enabled ? "领域 + 意图" : item.intent_trigger_enabled ? "仅意图" : "仅扩展"}</td>
+      <td>${escapeHtml(lexiconRiskLabel(item.risk_level))}<span class="table-subtext">${escapeHtml(item.preview_ready ? "预览已通过" : lexiconSourceLabel(item.source_type))}</span></td>
+      <td><span class="status-chip ${lexiconStatusClass(item.status)}">${escapeHtml(lexiconStatusLabel(item.status))}</span></td>
+      <td>${escapeHtml(formatDate(item.updated_at))}</td>
+      <td><button class="table-action lexicon-review-action" type="button">${item.status === "approved" ? "查看" : "审核"}</button></td>
+    `;
+    $(".lexicon-review-action", row).addEventListener("click", () => openLexiconCandidateDialog(item));
+    body.appendChild(row);
+  });
+}
+
+function renderLexiconEntries(items) {
+  const body = $("#lexiconEntryTableBody");
+  body.innerHTML = "";
+  if (!items.length) {
+    body.innerHTML = '<tr><td colspan="8" class="empty-row">暂无正式词条。</td></tr>';
+    return;
+  }
+  items.forEach((item) => {
+    const row = document.createElement("tr");
+    const contexts = item.required_context_terms?.length ? item.required_context_terms.join("、") : "无";
+    row.innerHTML = `
+      <td><strong>${escapeHtml(item.user_expression)}</strong>${item.aliases?.length ? `<span class="table-subtext">${escapeHtml(item.aliases.join("、"))}</span>` : ""}</td>
+      <td>${escapeHtml(item.canonical_term)}</td>
+      <td><code>${escapeHtml(item.intent_label)}</code><span class="table-subtext">${escapeHtml(item.domain)}</span></td>
+      <td title="${escapeHtml(contexts)}">${escapeHtml(contexts)}</td>
+      <td>${item.domain_gate_enabled ? "领域 + 意图" : item.intent_trigger_enabled ? "仅意图" : "仅扩展"}</td>
+      <td>v${displayCount(item.version)}</td>
+      <td><span class="status-chip ${lexiconStatusClass(item.status)}">${escapeHtml(lexiconStatusLabel(item.status))}</span></td>
+      <td><div class="table-actions"><button class="table-action lexicon-edit-action" type="button">提修改</button><button class="table-action ${item.status === "active" ? "danger" : ""} lexicon-status-action" type="button">${item.status === "active" ? "停用" : "恢复"}</button></div></td>
+    `;
+    $(".lexicon-edit-action", row).addEventListener("click", () => openLexiconCandidateDialog(null, {
+      ...item,
+      target_lexicon_id: item.lexicon_id,
+      positive_examples: [],
+      negative_examples: [],
+      status: "draft",
+      source_type: "manual",
+      source_reference: `修改正式词条 ${item.lexicon_id}`,
+      review_note: "",
+    }));
+    $(".lexicon-status-action", row).addEventListener("click", () => openLexiconStatusDialog(item));
+    body.appendChild(row);
+  });
+}
+
+function renderLexiconAudit(items) {
+  const body = $("#lexiconAuditTableBody");
+  body.innerHTML = "";
+  if (!items.length) {
+    body.innerHTML = '<tr><td colspan="5" class="empty-row">暂无审核记录。</td></tr>';
+    return;
+  }
+  items.forEach((item) => {
+    const row = document.createElement("tr");
+    row.innerHTML = `
+      <td>${escapeHtml(formatDate(item.created_at))}</td>
+      <td>${escapeHtml(lexiconActionLabel(item.action))}</td>
+      <td><code>${escapeHtml(item.lexicon_id || item.candidate_id || "--")}</code></td>
+      <td><code>${escapeHtml(item.actor_user_id || "--")}</code></td>
+      <td>${escapeHtml(item.note || "--")}</td>
+    `;
+    body.appendChild(row);
+  });
+}
+
+function lexiconFormPayload() {
+  return {
+    target_lexicon_id: state.lexiconCandidate?.target_lexicon_id || null,
+    user_expression: $("#lexiconExpressionInput").value.trim(),
+    canonical_term: $("#lexiconCanonicalInput").value.trim(),
+    intent_label: $("#lexiconIntentInput").value.trim(),
+    domain: $("#lexiconDomainInput").value.trim(),
+    aliases: splitLexiconList($("#lexiconAliasesInput").value),
+    positive_expansions: splitLexiconList($("#lexiconExpansionsInput").value),
+    negative_terms: splitLexiconList($("#lexiconNegativeTermsInput").value),
+    evidence_required_patterns: splitLexiconList($("#lexiconEvidencePatternsInput").value),
+    required_context_terms: splitLexiconList($("#lexiconRequiredContextInput").value),
+    forbidden_context_terms: splitLexiconList($("#lexiconForbiddenContextInput").value),
+    positive_examples: splitLexiconList($("#lexiconPositiveExamplesInput").value),
+    negative_examples: splitLexiconList($("#lexiconNegativeExamplesInput").value),
+    match_type: $("#lexiconMatchTypeInput").value,
+    domain_gate_enabled: $("#lexiconDomainGateInput").checked,
+    intent_trigger_enabled: $("#lexiconIntentTriggerInput").checked,
+    priority: Number($("#lexiconPriorityInput").value),
+    risk_level: $("#lexiconRiskInput").value,
+    status: $("#lexiconCandidateStatusInput").value,
+    source_type: $("#lexiconSourceTypeInput").value,
+    source_reference: $("#lexiconSourceReferenceInput").value.trim() || null,
+    review_note: $("#lexiconReviewNoteInput").value.trim() || null,
+  };
+}
+
+function fillLexiconForm(item) {
+  $("#lexiconExpressionInput").value = item.user_expression || "";
+  $("#lexiconCanonicalInput").value = item.canonical_term || "";
+  $("#lexiconIntentInput").value = item.intent_label || "";
+  $("#lexiconDomainInput").value = item.domain || "";
+  $("#lexiconAliasesInput").value = joinLexiconList(item.aliases);
+  $("#lexiconMatchTypeInput").value = item.match_type || "phrase";
+  $("#lexiconCandidateStatusInput").value = ["draft", "pending"].includes(item.status) ? item.status : "draft";
+  $("#lexiconPriorityInput").value = String(item.priority ?? 50);
+  $("#lexiconRiskInput").value = item.risk_level || "medium";
+  $("#lexiconDomainGateInput").checked = Boolean(item.domain_gate_enabled);
+  $("#lexiconIntentTriggerInput").checked = item.intent_trigger_enabled !== false;
+  $("#lexiconRequiredContextInput").value = joinLexiconList(item.required_context_terms);
+  $("#lexiconForbiddenContextInput").value = joinLexiconList(item.forbidden_context_terms);
+  $("#lexiconExpansionsInput").value = joinLexiconList(item.positive_expansions);
+  $("#lexiconNegativeTermsInput").value = joinLexiconList(item.negative_terms);
+  $("#lexiconEvidencePatternsInput").value = joinLexiconList(item.evidence_required_patterns);
+  $("#lexiconPositiveExamplesInput").value = joinLexiconList(item.positive_examples);
+  $("#lexiconNegativeExamplesInput").value = joinLexiconList(item.negative_examples);
+  $("#lexiconSourceTypeInput").value = item.source_type || "manual";
+  $("#lexiconSourceReferenceInput").value = item.source_reference || "";
+  $("#lexiconReviewNoteInput").value = item.review_note || "";
+  $("#lexiconPreviewQueryInput").value = item.positive_examples?.[0] || "";
+  $("#lexiconPreviewResult").textContent = "尚未运行预览。";
+}
+
+function updateLexiconApprovalState() {
+  const candidate = state.lexiconCandidate;
+  const button = $("#approveLexiconButton");
+  const reviewable = Boolean(candidate?.candidate_id) && candidate?.status !== "approved";
+  const pending = $("#lexiconCandidateStatusInput").value === "pending";
+  const previewReady = Boolean(candidate?.preview_ready);
+  button.classList.toggle("hidden", !reviewable);
+  button.disabled = !pending || !previewReady;
+  if (!pending) {
+    button.title = "先将候选状态设为待审核并保存预览";
+  } else if (!previewReady) {
+    button.title = "必须先通过正向示例和反例的上线前预览";
+  } else {
+    button.title = "批准后立即发布到运行时词典";
+  }
+}
+
+function openLexiconCandidateDialog(candidate = null, initial = {}) {
+  const item = candidate || {
+    target_lexicon_id: null,
+    user_expression: "",
+    canonical_term: "",
+    intent_label: "",
+    domain: "",
+    aliases: [],
+    positive_expansions: [],
+    negative_terms: [],
+    evidence_required_patterns: [],
+    required_context_terms: [],
+    forbidden_context_terms: [],
+    positive_examples: [],
+    negative_examples: [],
+    match_type: "phrase",
+    domain_gate_enabled: false,
+    intent_trigger_enabled: true,
+    priority: 50,
+    risk_level: "medium",
+    status: "draft",
+    source_type: "manual",
+    source_reference: null,
+    review_note: null,
+    ...initial,
+  };
+  state.lexiconCandidate = item;
+  $("#lexiconDialogTitle").textContent = candidate?.candidate_id
+    ? "审核词典候选"
+    : item.target_lexicon_id ? "提出词条修改" : "新增词典候选";
+  fillLexiconForm(item);
+  const approved = candidate?.status === "approved";
+  $$("#lexiconDialog .lexicon-dialog-body input, #lexiconDialog .lexicon-dialog-body select, #lexiconDialog .lexicon-dialog-body textarea").forEach((control) => {
+    control.disabled = approved;
+  });
+  $("#previewLexiconButton").classList.toggle("hidden", approved);
+  $("#rejectLexiconButton").classList.toggle("hidden", !candidate?.candidate_id || approved);
+  $("#saveLexiconCandidateButton").classList.toggle("hidden", approved);
+  updateLexiconApprovalState();
+  $("#lexiconDialog").showModal();
+  $("#lexiconExpressionInput").focus();
+  refreshIcons();
+}
+
+function validateLexiconForm(payload) {
+  if (!payload.user_expression || !payload.canonical_term || !payload.intent_label || !payload.domain) {
+    showToast("请填写用户表达、规范术语、意图标签和适用领域", "error");
+    return false;
+  }
+  if (!Number.isInteger(payload.priority) || payload.priority < 0 || payload.priority > 100) {
+    showToast("优先级应为 0 至 100 的整数", "error");
+    return false;
+  }
+  return true;
+}
+
+async function saveLexiconCandidate() {
+  const payload = lexiconFormPayload();
+  if (!validateLexiconForm(payload)) return;
+  const button = $("#saveLexiconCandidateButton");
+  setBusy(button, true, "保存中");
+  try {
+    const candidateId = state.lexiconCandidate?.candidate_id;
+    await apiRequest(candidateId
+      ? `/api/admin/lexicon/candidates/${encodeURIComponent(candidateId)}`
+      : "/api/admin/lexicon/candidates", {
+      method: candidateId ? "PUT" : "POST",
+      body: JSON.stringify(payload),
+    });
+    $("#lexiconDialog").close();
+    showToast(payload.status === "pending" ? "候选已提交审核" : "候选草稿已保存");
+    await loadLexiconData();
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    setBusy(button, false);
+  }
+}
+
+function formatLexiconPreview(label, result) {
+  const matches = (result.intent_matches || []).map((item) => `${item.user_expression} → ${item.intent_label}`).join("；") || "无";
+  const expansions = (result.expansions || []).join("、") || "无";
+  const evidencePatterns = (result.evidence_patterns || []).join("、") || "无";
+  return `${label}\n领域门控：${result.domain_gate_passed ? "通过" : "不通过"}\n意图命中：${matches}\n检索扩展：${expansions}\n证据约束：${evidencePatterns}`;
+}
+
+async function previewLexiconCandidate() {
+  const payload = lexiconFormPayload();
+  const query = $("#lexiconPreviewQueryInput").value.trim();
+  if (!validateLexiconForm(payload) || !query) {
+    if (!query) showToast("请输入上线前测试问题", "error");
+    return;
+  }
+  const button = $("#previewLexiconButton");
+  setBusy(button, true, "测试中");
+  try {
+    const candidateId = state.lexiconCandidate?.candidate_id;
+    const saved = await apiRequest(candidateId
+      ? `/api/admin/lexicon/candidates/${encodeURIComponent(candidateId)}`
+      : "/api/admin/lexicon/candidates", {
+      method: candidateId ? "PUT" : "POST",
+      body: JSON.stringify(payload),
+    });
+    state.lexiconCandidate = saved.item;
+    const data = await apiRequest("/api/admin/lexicon/preview", {
+      method: "POST",
+      body: JSON.stringify({ candidate_id: saved.item.candidate_id, query, candidate: payload }),
+    });
+    state.lexiconCandidate = { ...saved.item, preview_ready: data.verification_passed };
+    $("#lexiconDialogTitle").textContent = "审核词典候选";
+    $("#rejectLexiconButton").classList.remove("hidden");
+    updateLexiconApprovalState();
+    const checks = (data.example_checks || []).map((item) => (
+      `${item.passed ? "通过" : "失败"} · ${item.kind === "positive" ? "正例" : "反例"} · ${item.query}`
+    ));
+    const warnings = data.warnings?.length ? `\n\n风险提示\n- ${data.warnings.join("\n- ")}` : "";
+    const verification = `\n\n正反例校验：${data.verification_passed ? "全部通过" : "未通过"}${checks.length ? `\n${checks.join("\n")}` : ""}`;
+    $("#lexiconPreviewResult").textContent = `${formatLexiconPreview("当前规则", data.current)}\n\n${formatLexiconPreview("候选生效后", data.proposed)}${verification}${warnings}`;
+    showToast(data.verification_passed ? "候选已保存，正反例预览通过" : "候选已保存，但预览仍有未通过项", data.verification_passed ? "success" : "error");
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    setBusy(button, false);
+  }
+}
+
+async function reviewLexiconCandidate(action) {
+  const candidateId = state.lexiconCandidate?.candidate_id;
+  const note = $("#lexiconReviewNoteInput").value.trim();
+  if (!candidateId || !note) {
+    showToast("批准或驳回前必须填写审核记录", "error");
+    return;
+  }
+  const button = action === "approve" ? $("#approveLexiconButton") : $("#rejectLexiconButton");
+  setBusy(button, true, action === "approve" ? "发布中" : "驳回中");
+  try {
+    if (action === "approve") {
+      const payload = lexiconFormPayload();
+      if (!validateLexiconForm(payload)) return;
+      await apiRequest(`/api/admin/lexicon/candidates/${encodeURIComponent(candidateId)}`, {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      });
+    }
+    await apiRequest(`/api/admin/lexicon/candidates/${encodeURIComponent(candidateId)}/review`, {
+      method: "POST",
+      body: JSON.stringify({ action, note }),
+    });
+    $("#lexiconDialog").close();
+    showToast(action === "approve" ? "候选已批准并发布" : "候选已驳回");
+    await loadLexiconData();
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    setBusy(button, false);
+  }
+}
+
+function openLexiconStatusDialog(entry) {
+  state.lexiconStatusEntry = entry;
+  const activating = entry.status !== "active";
+  $("#lexiconStatusDialogTitle").textContent = activating ? "恢复词条" : "停用词条";
+  $("#lexiconStatusTarget").textContent = `${entry.user_expression} → ${entry.canonical_term}`;
+  $("#lexiconStatusNoteInput").value = "";
+  $("#lexiconStatusDialog").showModal();
+  $("#lexiconStatusNoteInput").focus();
+}
+
+async function updateLexiconEntryStatus() {
+  const entry = state.lexiconStatusEntry;
+  const note = $("#lexiconStatusNoteInput").value.trim();
+  if (!entry || !note) {
+    showToast("请输入操作原因", "error");
+    return;
+  }
+  const status = entry.status === "active" ? "disabled" : "active";
+  const button = $("#confirmLexiconStatusButton");
+  setBusy(button, true, "保存中");
+  try {
+    await apiRequest(`/api/admin/lexicon/entries/${encodeURIComponent(entry.lexicon_id)}/status`, {
+      method: "POST",
+      body: JSON.stringify({ status, note }),
+    });
+    $("#lexiconStatusDialog").close();
+    state.lexiconStatusEntry = null;
+    showToast(status === "active" ? "词条已恢复" : "词条已停用");
+    await loadLexiconData();
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    setBusy(button, false);
+  }
+}
+
+function createLexiconCandidateFromFeedback() {
+  const item = state.feedbackItem;
+  if (!item) return;
+  $("#feedbackDialog").close();
+  navigate("lexicon");
+  openLexiconCandidateDialog(null, {
+    source_type: "user_feedback",
+    source_reference: item.feedback_id,
+    positive_examples: item.question ? [item.question] : [],
+    review_note: item.comment || "",
+  });
+}
+
 async function loadAdminData() {
   if (state.user?.role !== "admin") return;
   try {
@@ -1554,6 +1990,22 @@ function bindEvents() {
   $$(".quota-mode").forEach((button) => button.addEventListener("click", () => setQuotaMode(button.dataset.mode, state.quotaUser)));
   $("#confirmQuotaButton").addEventListener("click", adjustQuota);
   $("#confirmFeedbackButton").addEventListener("click", updateFeedbackStatus);
+  $("#createLexiconFromFeedbackButton").addEventListener("click", createLexiconCandidateFromFeedback);
+
+  $("#createLexiconCandidateButton").addEventListener("click", () => openLexiconCandidateDialog());
+  $("#refreshLexiconButton").addEventListener("click", loadLexiconData);
+  $("#saveLexiconCandidateButton").addEventListener("click", saveLexiconCandidate);
+  $("#previewLexiconButton").addEventListener("click", previewLexiconCandidate);
+  $("#approveLexiconButton").addEventListener("click", () => reviewLexiconCandidate("approve"));
+  $("#rejectLexiconButton").addEventListener("click", () => reviewLexiconCandidate("reject"));
+  $("#confirmLexiconStatusButton").addEventListener("click", updateLexiconEntryStatus);
+  $("#lexiconDialog").addEventListener("input", (event) => {
+    if (!state.lexiconCandidate?.candidate_id) return;
+    if (["lexiconPreviewQueryInput", "lexiconReviewNoteInput"].includes(event.target.id)) return;
+    state.lexiconCandidate.preview_ready = false;
+    updateLexiconApprovalState();
+  });
+  $("#lexiconCandidateStatusInput").addEventListener("change", updateLexiconApprovalState);
 
   window.addEventListener("popstate", () => {
     if (!state.user) {

@@ -218,6 +218,47 @@ class FeedbackStatusUpdateRequest(BaseModel):
     resolution_note: str | None = Field(default=None, max_length=1000)
 
 
+class LexiconCandidateRequest(BaseModel):
+    target_lexicon_id: str | None = Field(default=None, max_length=120)
+    user_expression: str = Field(min_length=2, max_length=120)
+    canonical_term: str = Field(min_length=2, max_length=200)
+    intent_label: str = Field(min_length=2, max_length=80)
+    domain: str = Field(min_length=2, max_length=80)
+    aliases: list[str] = Field(default_factory=list, max_length=30)
+    positive_expansions: list[str] = Field(default_factory=list, max_length=40)
+    negative_terms: list[str] = Field(default_factory=list, max_length=40)
+    evidence_required_patterns: list[str] = Field(default_factory=list, max_length=30)
+    required_context_terms: list[str] = Field(default_factory=list, max_length=30)
+    forbidden_context_terms: list[str] = Field(default_factory=list, max_length=30)
+    positive_examples: list[str] = Field(default_factory=list, max_length=20)
+    negative_examples: list[str] = Field(default_factory=list, max_length=20)
+    match_type: Literal["phrase", "exact"] = "phrase"
+    domain_gate_enabled: bool = False
+    intent_trigger_enabled: bool = True
+    priority: int = Field(default=50, ge=0, le=100)
+    risk_level: Literal["low", "medium", "high"] = "medium"
+    status: Literal["draft", "pending"] = "draft"
+    source_type: Literal["manual", "user_feedback", "query_mining", "kb_schema"] = "manual"
+    source_reference: str | None = Field(default=None, max_length=1000)
+    review_note: str | None = Field(default=None, max_length=1000)
+
+
+class LexiconReviewRequest(BaseModel):
+    action: Literal["approve", "reject"]
+    note: str = Field(min_length=2, max_length=1000)
+
+
+class LexiconEntryStatusRequest(BaseModel):
+    status: Literal["active", "disabled"]
+    note: str = Field(min_length=2, max_length=1000)
+
+
+class LexiconPreviewRequest(BaseModel):
+    candidate_id: str | None = Field(default=None, max_length=120)
+    query: str = Field(min_length=1, max_length=1000)
+    candidate: LexiconCandidateRequest
+
+
 class StandardItem(BaseModel):
     document_id: str
     title: str

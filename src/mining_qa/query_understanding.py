@@ -5,6 +5,8 @@ import unicodedata
 from dataclasses import asdict, dataclass, replace
 from typing import Any
 
+from .domain_lexicon import matched_lexicon_entries
+
 
 EXPLORATION_TYPE_LABELS = {
     "1": "Ⅰ",
@@ -437,7 +439,11 @@ def extract_authority_roles(query: str) -> tuple[str, str, str, bool]:
 
 def apply_semantic_plan(base: QueryPlan, payload: dict[str, Any] | None) -> QueryPlan:
     if not payload:
-        groups = base.required_evidence_groups or default_evidence_groups(base.intent)
+        groups = tuple(
+            dict.fromkeys(
+                (*default_evidence_groups(base.intent), *base.required_evidence_groups)
+            )
+        )
         document_types = base.document_types or default_document_types(base.intent)
         return replace(base, required_evidence_groups=groups, document_types=document_types)
 
@@ -506,13 +512,17 @@ def apply_semantic_plan(base: QueryPlan, payload: dict[str, Any] | None) -> Quer
     )
     default_groups = default_evidence_groups(intent)
     semantic_groups = _clean_groups(payload.get("required_evidence_groups"))
-    groups = default_groups or semantic_groups
+    protected_groups = tuple(
+        dict.fromkeys((*default_groups, *base.required_evidence_groups))
+    )
+    groups = protected_groups or semantic_groups
     protected_terms = {term for group in groups for term in group}
-    negative_terms = () if default_groups else tuple(
+    semantic_negative_terms = () if protected_groups else tuple(
         term
         for term in _clean_terms(payload.get("negative_terms"))
         if not any(term in protected or protected in term for protected in protected_terms)
     )
+    negative_terms = tuple(dict.fromkeys((*base.negative_terms, *semantic_negative_terms)))
     dimensions = _clean_terms(payload.get("comparison_dimensions"), limit=8)
     semantic_issuer = _authority_level(payload.get("license_issuer_level"))
     semantic_granting = _authority_level(payload.get("mining_right_granting_level"))
@@ -783,6 +793,8 @@ def extract_definition_request(
 def understand_query(query: str) -> QueryPlan:
     original = (query or "").strip()
     normalized = normalize_user_query(original)
+    governed_intent_matches = matched_lexicon_entries(normalized, purpose="intent")
+    governed_retrieval_matches = matched_lexicon_entries(normalized, purpose="retrieval")
     target_type_match = re.search(r"([ⅠⅡⅢ])类型", normalized)
     target_type = target_type_match.group(1) if target_type_match else None
 
@@ -1043,6 +1055,45 @@ def understand_query(query: str) -> QueryPlan:
         candidate_titles.append("金属砂矿类")
         retrieval_terms.extend(["金属砂矿类", "砂金", "DZ/T 0208-2020"])
 
+    if intent == "general" and governed_intent_matches:
+        primary_match = governed_intent_matches[0]
+        intent = primary_match["intent_label"]
+
+    for match in governed_retrieval_matches:
+        retrieval_terms.append(match["canonical_term"])
+        retrieval_terms.extend(match.get("positive_expansions") or [])
+        retrieval_terms.extend(match.get("evidence_required_patterns") or [])
+
+    governed_constraint_matches = [
+        match
+        for match in governed_retrieval_matches
+        if match.get("intent_label") == intent
+    ]
+    governed_negative_terms = tuple(
+        dict.fromkeys(
+            term
+            for match in governed_constraint_matches
+            for term in (match.get("negative_terms") or [])
+            if term
+        )
+    )
+    default_evidence_terms = {
+        term for group in default_evidence_groups(intent) for term in group
+    }
+    governed_evidence_groups = tuple(
+        (pattern,)
+        for pattern in dict.fromkeys(
+            pattern
+            for match in governed_constraint_matches
+            for pattern in (match.get("evidence_required_patterns") or [])
+            if pattern
+        )
+        if not any(
+            pattern in default_term or default_term in pattern
+            for default_term in default_evidence_terms
+        )
+    )
+
     if not retrieval_terms:
         retrieval_terms.append(normalized)
     elif normalized and intent != "related_documents":
@@ -1069,6 +1120,8 @@ def understand_query(query: str) -> QueryPlan:
         candidate_title_terms=tuple(dict.fromkeys(candidate_titles)),
         standard_numbers=tuple(dict.fromkeys(standards)),
         focus_terms=tuple(dict.fromkeys(focus_terms)),
+        negative_terms=governed_negative_terms,
+        required_evidence_groups=governed_evidence_groups,
         scope_origin=scope_origin,
         output_mode=output_mode,
         search_mode=search_mode,

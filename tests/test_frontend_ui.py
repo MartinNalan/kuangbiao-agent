@@ -68,6 +68,23 @@ process.stdout.write(JSON.stringify({html: renderer.render(input, {baseUrl: 'htt
         self.assertIn("quota.consumed_units", script)
         self.assertIn("本次使用 ${displayCount(units)} 次", script)
 
+    def test_admin_lexicon_governance_ui_is_wired(self) -> None:
+        html = (PROJECT_ROOT / "web" / "index.html").read_text(encoding="utf-8")
+        script = (PROJECT_ROOT / "web" / "static" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="lexiconNavItem"', html)
+        self.assertIn('id="lexiconView"', html)
+        self.assertIn('id="lexiconDialog"', html)
+        self.assertIn('id="lexiconStatusDialog"', html)
+        self.assertIn('id="createLexiconFromFeedbackButton"', html)
+        self.assertIn("操作人", html)
+        self.assertIn('apiRequest("/api/admin/lexicon")', script)
+        self.assertIn('addEventListener("click", saveLexiconCandidate)', script)
+        self.assertIn('addEventListener("click", previewLexiconCandidate)', script)
+        self.assertIn('reviewLexiconCandidate("approve")', script)
+        self.assertIn('reviewLexiconCandidate("reject")', script)
+        self.assertIn('addEventListener("click", updateLexiconEntryStatus)', script)
+
 
 if __name__ == "__main__":
     unittest.main()

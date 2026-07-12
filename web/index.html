@@ -124,6 +124,7 @@
           <button class="nav-item" data-view="developer" type="button"><i data-lucide="braces"></i><span>开发者</span></button>
           <button class="nav-item" data-view="usage" type="button"><i data-lucide="chart-no-axes-combined"></i><span>配额与用量</span></button>
           <button id="adminNavItem" class="nav-item hidden" data-view="admin" type="button"><i data-lucide="shield-check"></i><span>管理后台</span></button>
+          <button id="lexiconNavItem" class="nav-item hidden" data-view="lexicon" type="button"><i data-lucide="tags"></i><span>领域词典</span></button>
         </nav>
 
         <section class="conversation-section">
@@ -321,6 +322,52 @@
             </div>
           </section>
         </section>
+
+        <section id="lexiconView" class="workspace-view content-view">
+          <div class="view-heading with-action">
+            <div><p class="eyebrow">LEXICON</p><h1>领域词典</h1><p>审核用户表达、规范术语、意图路由和领域门控规则。</p></div>
+            <button id="createLexiconCandidateButton" class="primary-command" type="button"><i data-lucide="plus"></i><span>新增候选</span></button>
+          </div>
+          <div class="metric-strip lexicon-metrics">
+            <div><span>已启用词条</span><strong id="lexiconActiveCount">--</strong><small>当前参与运行时匹配</small></div>
+            <div><span>待审核候选</span><strong id="lexiconPendingCount">--</strong><small>草稿与已提交候选</small></div>
+            <div><span>已停用词条</span><strong id="lexiconDisabledCount">--</strong><small>保留版本，可随时恢复</small></div>
+            <div><span>高风险候选</span><strong id="lexiconHighRiskCount">--</strong><small>需重点检查门控与反例</small></div>
+          </div>
+
+          <section class="content-section">
+            <div class="section-heading with-action">
+              <div><h2>审核队列</h2><p>候选不会直接生效；批准前必须提供正向示例、反例和审核记录。</p></div>
+              <button id="refreshLexiconButton" class="icon-text-button" type="button"><i data-lucide="refresh-cw"></i><span>刷新</span></button>
+            </div>
+            <div class="data-table-wrap">
+              <table class="data-table lexicon-table">
+                <thead><tr><th>用户表达</th><th>规范术语</th><th>意图与领域</th><th>门控</th><th>风险</th><th>状态</th><th>更新时间</th><th>操作</th></tr></thead>
+                <tbody id="lexiconCandidateTableBody"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="content-section">
+            <div class="section-heading"><div><h2>正式词条</h2><p>修改正式词条时先生成候选版本；停用和恢复立即写入审计记录。</p></div></div>
+            <div class="data-table-wrap">
+              <table class="data-table lexicon-table">
+                <thead><tr><th>用户表达</th><th>规范术语</th><th>意图与领域</th><th>上下文</th><th>运行开关</th><th>版本</th><th>状态</th><th>操作</th></tr></thead>
+                <tbody id="lexiconEntryTableBody"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="content-section">
+            <div class="section-heading"><div><h2>审核记录</h2><p>记录候选创建、修改、批准、驳回、停用和恢复操作。</p></div></div>
+            <div class="data-table-wrap">
+              <table class="data-table">
+                <thead><tr><th>时间</th><th>操作</th><th>词条/候选</th><th>操作人</th><th>审核记录</th></tr></thead>
+                <tbody id="lexiconAuditTableBody"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
       </main>
     </div>
 
@@ -397,8 +444,67 @@
           <label><span>状态</span><select id="feedbackStatusInput"><option value="open">待处理</option><option value="in_progress">处理中</option><option value="kb_review">待 KB 审核</option><option value="resolved">已解决</option><option value="dismissed">已忽略</option></select></label>
           <label><span>处理记录</span><textarea id="feedbackResolutionInput" maxlength="1000" rows="4" placeholder="记录定位结果、修改内容或审核结论"></textarea></label>
         </div>
-        <div class="dialog-actions"><button class="secondary-command" value="cancel">取消</button><button id="confirmFeedbackButton" class="primary-command" type="button"><i data-lucide="save"></i><span>保存</span></button></div>
+        <div class="dialog-actions"><button id="createLexiconFromFeedbackButton" class="secondary-command" type="button"><i data-lucide="tags"></i><span>转词典候选</span></button><button class="secondary-command" value="cancel">取消</button><button id="confirmFeedbackButton" class="primary-command" type="button"><i data-lucide="save"></i><span>保存</span></button></div>
       </form>
     </dialog>
+
+    <dialog id="lexiconDialog" class="app-dialog lexicon-dialog">
+      <form method="dialog" class="dialog-shell">
+        <div class="dialog-header"><div><p class="eyebrow">LEXICON REVIEW</p><h2 id="lexiconDialogTitle">新增词典候选</h2></div><button class="icon-button" value="cancel" title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></div>
+        <div class="dialog-body lexicon-dialog-body">
+          <div class="lexicon-form-grid">
+            <label><span>用户表达</span><input id="lexiconExpressionInput" maxlength="120" placeholder="例如：矿证" /></label>
+            <label><span>规范术语</span><input id="lexiconCanonicalInput" maxlength="200" placeholder="例如：采矿许可证" /></label>
+            <label><span>意图标签</span><input id="lexiconIntentInput" list="lexiconIntentOptions" maxlength="80" placeholder="例如：license_reference" /></label>
+            <label><span>适用领域</span><input id="lexiconDomainInput" list="lexiconDomainOptions" maxlength="80" placeholder="例如：mining_right_registration" /></label>
+            <label class="span-two"><span>别名，每行一个</span><textarea id="lexiconAliasesInput" rows="2" placeholder="矿山证&#10;采矿证件"></textarea></label>
+            <label><span>匹配方式</span><select id="lexiconMatchTypeInput"><option value="phrase">短语包含</option><option value="exact">整句精确</option></select></label>
+            <label><span>候选状态</span><select id="lexiconCandidateStatusInput"><option value="draft">草稿</option><option value="pending">待审核</option></select></label>
+            <label><span>优先级</span><input id="lexiconPriorityInput" type="number" min="0" max="100" value="50" /></label>
+            <label><span>风险级别</span><select id="lexiconRiskInput"><option value="low">低</option><option value="medium" selected>中</option><option value="high">高</option></select></label>
+            <div class="span-two lexicon-switches">
+              <label><input id="lexiconDomainGateInput" type="checkbox" /><span>允许触发领域门控</span></label>
+              <label><input id="lexiconIntentTriggerInput" type="checkbox" checked /><span>允许触发确定性意图</span></label>
+            </div>
+            <label><span>必要上下文，每行一个</span><textarea id="lexiconRequiredContextInput" rows="3" placeholder="矿&#10;储量&#10;采矿"></textarea></label>
+            <label><span>禁止上下文，每行一个</span><textarea id="lexiconForbiddenContextInput" rows="3" placeholder="护照&#10;毕业证"></textarea></label>
+            <label><span>检索扩展，每行一个</span><textarea id="lexiconExpansionsInput" rows="3"></textarea></label>
+            <label><span>负面降权词，每行一个</span><textarea id="lexiconNegativeTermsInput" rows="3"></textarea></label>
+            <label class="span-two"><span>证据必须满足的表达，每行一个</span><textarea id="lexiconEvidencePatternsInput" rows="3"></textarea></label>
+            <label><span>正向示例，每行一个</span><textarea id="lexiconPositiveExamplesInput" rows="4" placeholder="我的矿证是省里发的"></textarea></label>
+            <label><span>容易误判的反例，每行一个</span><textarea id="lexiconNegativeExamplesInput" rows="4" placeholder="毕业证去哪里补办"></textarea></label>
+            <label><span>候选来源</span><select id="lexiconSourceTypeInput"><option value="manual">管理员录入</option><option value="user_feedback">用户反馈</option><option value="query_mining">问题挖掘</option><option value="kb_schema">知识库 Schema</option></select></label>
+            <label><span>来源说明</span><input id="lexiconSourceReferenceInput" maxlength="1000" /></label>
+            <label class="span-two"><span>审核记录</span><textarea id="lexiconReviewNoteInput" rows="3" maxlength="1000" placeholder="说明判断依据、风险和验证结果"></textarea></label>
+          </div>
+          <div class="lexicon-preview-toolbar">
+            <label><span>上线前测试问题</span><input id="lexiconPreviewQueryInput" maxlength="1000" placeholder="输入一个真实问题，对比当前与候选规则" /></label>
+            <button id="previewLexiconButton" class="secondary-command" type="button"><i data-lucide="scan-search"></i><span>预览命中</span></button>
+          </div>
+          <pre id="lexiconPreviewResult" class="lexicon-preview-result">尚未运行预览。</pre>
+        </div>
+        <div class="dialog-actions">
+          <button id="rejectLexiconButton" class="secondary-command danger-text hidden" type="button"><i data-lucide="x"></i><span>驳回</span></button>
+          <button class="secondary-command" value="cancel">取消</button>
+          <button id="saveLexiconCandidateButton" class="secondary-command" type="button"><i data-lucide="save"></i><span>保存候选</span></button>
+          <button id="approveLexiconButton" class="primary-command hidden" type="button"><i data-lucide="badge-check"></i><span>批准并生效</span></button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="lexiconStatusDialog" class="app-dialog">
+      <form method="dialog" class="dialog-shell">
+        <div class="dialog-header"><div><p class="eyebrow">LEXICON STATUS</p><h2 id="lexiconStatusDialogTitle">停用词条</h2></div><button class="icon-button" value="cancel" title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></div>
+        <div class="dialog-body"><p id="lexiconStatusTarget"></p><label><span>操作原因</span><textarea id="lexiconStatusNoteInput" rows="4" maxlength="1000"></textarea></label></div>
+        <div class="dialog-actions"><button class="secondary-command" value="cancel">取消</button><button id="confirmLexiconStatusButton" class="primary-command" type="button"><i data-lucide="save"></i><span>确认</span></button></div>
+      </form>
+    </dialog>
+
+    <datalist id="lexiconIntentOptions">
+      <option value="authority_responsibility"></option><option value="license_reference"></option><option value="standard_selection"></option><option value="numeric_table_lookup"></option><option value="clause_comparison"></option><option value="definition_explanation"></option><option value="document_lookup"></option><option value="policy_procedure"></option><option value="service_materials"></option><option value="status_verification"></option><option value="exploration_to_mining_eligibility"></option>
+    </datalist>
+    <datalist id="lexiconDomainOptions">
+      <option value="solid_mineral"></option><option value="policy_authority"></option><option value="exploration_standard"></option><option value="reserve_estimation"></option><option value="reserve_management"></option><option value="mining_right_registration"></option><option value="mineral_resource_development"></option><option value="geological_exploration"></option>
+    </datalist>
   </body>
 </html>
