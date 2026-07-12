@@ -10,10 +10,23 @@ from .schemas import KnowledgeSearchResponse, StandardsResponse
 class KnowledgeClient:
     def __init__(self, settings: Settings):
         self.settings = settings
+        self._client: httpx.AsyncClient | None = None
 
     @property
     def enabled(self) -> bool:
         return bool(self.settings.knowledge_base_url.strip())
+
+    def _http_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                timeout=self.settings.request_timeout_seconds,
+                trust_env=False,
+            )
+        return self._client
+
+    async def aclose(self) -> None:
+        if self._client is not None and not self._client.is_closed:
+            await self._client.aclose()
 
     async def search(
         self,
@@ -48,20 +61,18 @@ class KnowledgeClient:
             },
         }
         url = self.settings.knowledge_base_url.rstrip("/") + "/knowledge/search"
-        async with httpx.AsyncClient(timeout=self.settings.request_timeout_seconds, trust_env=False) as client:
-            response = await client.post(url, json=payload)
-            response.raise_for_status()
-            return KnowledgeSearchResponse.model_validate(response.json())
+        response = await self._http_client().post(url, json=payload)
+        response.raise_for_status()
+        return KnowledgeSearchResponse.model_validate(response.json())
 
     async def standards(self, params: dict[str, Any]) -> StandardsResponse:
         if not self.enabled:
             return StandardsResponse()
 
         url = self.settings.knowledge_base_url.rstrip("/") + "/knowledge/standards"
-        async with httpx.AsyncClient(timeout=self.settings.request_timeout_seconds, trust_env=False) as client:
-            response = await client.get(url, params=params)
-            response.raise_for_status()
-            return StandardsResponse.model_validate(response.json())
+        response = await self._http_client().get(url, params=params)
+        response.raise_for_status()
+        return StandardsResponse.model_validate(response.json())
 
     async def create_candidates(self, question: str, sources: list[dict[str, Any]]) -> int:
         if not self.enabled or not sources:
@@ -69,23 +80,22 @@ class KnowledgeClient:
 
         url = self.settings.knowledge_base_url.rstrip("/") + "/knowledge/candidates"
         created = 0
-        async with httpx.AsyncClient(timeout=self.settings.request_timeout_seconds, trust_env=False) as client:
-            for source in sources:
-                payload = {
-                    "triggering_question": question,
-                    "standard_no": source.get("standard_no"),
-                    "title": source.get("title"),
-                    "source_url": source.get("url"),
-                    "source_type": source.get("source_type"),
-                    "text_access": source.get("text_access"),
-                    "extracted_text": source.get("quote"),
-                    "review_status": "candidate_found",
-                    "copyright_note": "Candidate discovered from official source lookup; admin approval required before public KB ingestion.",
-                }
-                try:
-                    response = await client.post(url, json=payload)
-                    response.raise_for_status()
-                except httpx.HTTPError:
-                    continue
-                created += 1
+        for source in sources:
+            payload = {
+                "triggering_question": question,
+                "standard_no": source.get("standard_no"),
+                "title": source.get("title"),
+                "source_url": source.get("url"),
+                "source_type": source.get("source_type"),
+                "text_access": source.get("text_access"),
+                "extracted_text": source.get("quote"),
+                "review_status": "candidate_found",
+                "copyright_note": "Candidate discovered from official source lookup; admin approval required before public KB ingestion.",
+            }
+            try:
+                response = await self._http_client().post(url, json=payload)
+                response.raise_for_status()
+            except httpx.HTTPError:
+                continue
+            created += 1
         return created

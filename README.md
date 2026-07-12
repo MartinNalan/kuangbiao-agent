@@ -4,9 +4,9 @@
 
 ## 当前阶段
 
-当前版本为 **v1.0.5**。已具备私有知识库问答、受控 Agentic RAG、邀请码与邮箱验证注册、登录会话、用户 API Key、每日次数配额、会话历史、标准目录、开发者控制台和管理员基础入口。
+当前版本为 **v1.0.6**。已具备私有知识库问答、受控 Agentic RAG、邀请码与邮箱验证注册、登录会话、用户 API Key、每日次数配额、会话历史、标准目录、开发者控制台和管理员基础入口。
 
-v1.0 检索链路为：领域门控 -> 机械归一 -> 复杂问题 DeepSeek 规划 -> Schema/FTS/KG/ANN 混合检索 -> 证据审查 -> 最多一次补充检索 -> 受证据约束的回答。v1.0.1 增加受保护关系意图、模型软范围提示、证据槽位校验、表格引用展开和最终来源过滤。v1.0.2 加入分级召回预算、ANN 校验缓存、KG 小候选连接、向量回退上限和结构化 LLM 关闭思考等延迟优化。v1.0.3 将受治理领域词典接入最前置领域门控。v1.0.4 修复政策附件召回。v1.0.5 修复已吊销 API Key 仍显示为可操作记录的问题。
+v1.0 检索链路为：领域门控 -> 机械归一 -> 复杂问题 DeepSeek 规划 -> Schema/FTS/KG/ANN 混合检索 -> 证据审查 -> 最多一次补充检索 -> 受证据约束的回答。v1.0.1 增加受保护关系意图、模型软范围提示、证据槽位校验、表格引用展开和最终来源过滤。v1.0.2 加入分级召回预算、ANN 校验缓存、KG 小候选连接、向量回退上限和结构化 LLM 关闭思考等延迟优化。v1.0.3 将受治理领域词典接入最前置领域门控。v1.0.4 修复政策附件召回。v1.0.5 修复 API Key 吊销生命周期。v1.0.6 增加权限角色解析、受控 Multi-Query、阈值触发 MMR、批量 embedding 和 ANN 参数基准。
 
 ## 文档
 
@@ -18,6 +18,7 @@ v1.0 检索链路为：领域门控 -> 机械归一 -> 复杂问题 DeepSeek 规
 - `docs/KNOWLEDGE_BASE_REQUIREMENTS.md` - 知识库构建要求
 - `docs/LICENSING_AND_REPOSITORIES.md` - 双许可证与仓库策略
 - `docs/V1_RELEASE.md` - v1.0 架构、验收结果与私有数据边界
+- `docs/M10_RETRIEVAL_EVALUATION.md` - v1.0.6 查询改写、Multi-Query、MMR 与 ANN 评估结果
 
 ## 本地配置
 
@@ -58,7 +59,7 @@ AGENTMAIL_BASE_URL=https://api.agentmail.to/v0
 
 `KNOWLEDGE_BASE_URL` 为空时，系统不会编造答案，会返回证据不足提示。知识库服务完成后，填入知识库后端地址即可接入 `/knowledge/search` 和 `/knowledge/standards`。
 
-稠密向量使用阿里云百炼 `text-embedding-v4`，运行时通过 USEARCH ANN 索引检索，不再逐条解析 SQLite 中的 JSON 向量。完成或更新 `chunk_embeddings` 后重建私有索引：
+稠密向量使用阿里云百炼 `text-embedding-v4`，运行时通过 USEARCH ANN 索引检索，不再逐条解析 SQLite 中的 JSON 向量。v1.0.6 默认使用 `ANN_EXPANSION_SEARCH=64`；embedding 请求按 `EMBEDDING_BATCH_SIZE` 分批并复用连接。完成或更新 `chunk_embeddings` 后重建私有索引：
 
 ```bash
 PYTHONPATH=src .venv/bin/python scripts/build_ann_index.py

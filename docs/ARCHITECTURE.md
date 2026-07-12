@@ -108,10 +108,12 @@ v1.0 当前实现：
 - Scoped vector fallback：ANN 缺失或失效时，只允许在已限定到少量候选文档的范围内精确计算；无范围的全库 JSON 向量扫描被禁用。
 - Controlled hybrid retrieval：Schema 文档类型过滤、证据关系 FTS、知识图谱和 ANN 多路召回，通过 reciprocal-rank fusion 与意图得分统一排序。
 - Intent-aware retrieval：通过领域术语归一、查询扩展和证据可回答性校验，优先处理权限归属、标准适用、表格数值和条款差异类问题。
-- Query plan：本地确定性规则统一 `1/I/Ⅰ/一类型` 等写法；模糊、比较和跨文件问题在检索前由 DeepSeek 输出受校验的结构化计划。模型猜测的标准号、文档类型和证据组不能绕过系统 Schema。
-- Conversation resolver：仅对包含代词、承接词或“其他文件”等标记的追问拼接上一轮用户问题；保存原问题，检索使用补全后的问题。
+- Authority roles：权限问题分别提取许可证颁发层级、矿业权出让层级和评审备案机关；回答按许可证颁发机关判断，不能把“自然资源部出让”误读为“自然资源部颁证”。
+- Query plan：本地确定性规则统一 `1/I/Ⅰ/一类型` 等写法；模糊、比较和跨文件问题在检索前由 DeepSeek 输出受校验的结构化计划。受保护问题保留原始检索问题和输出模式，模型只能增加结构化术语和证据目标，不能用自由改写覆盖系统 Schema。
+- Conversation resolver：对包含代词、承接词、“其他文件”、“我的情况”或“这种情况”等标记的追问拼接上一轮用户问题；保存原问题，检索使用补全后的问题。
 - Evidence judge：复杂问题由 DeepSeek 审查前 10 个候选是否直接回答目标关系，并同时生成受证据约束的答案草稿。
-- Second retrieval：证据不足时，根据缺口执行最多一次补充检索；仍不足则创建异步补库任务。
+- Second retrieval：证据不足时，根据缺口执行最多一次补充检索；复杂问题可以在该轮并发执行最多 2 条受控查询，仍不足则创建异步补库任务。
+- Candidate diversity：仅当适用意图的前 5 条候选至少 4 条来自同一文档时，以 MMR 重排已召回的最多 80 条候选；精确标准、表格、附件材料和硬 Schema 范围禁用。
 - Retrieval trace：记录规划、各轮检索、ANN 路线、候选来源、证据审查和耗时，不记录密钥。
 
 Elasticsearch/OpenSearch、ChromaDB/FAISS 和 Neo4j 仍是后续规模化或质量升级方向。Embedding Provider 必须可配置，不使用 `deepseek-v4-flash` 作为 embedding 模型；当前在线 embedding 默认适配阿里云百炼 OpenAI 兼容接口。

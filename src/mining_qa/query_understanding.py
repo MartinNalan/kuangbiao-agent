@@ -50,8 +50,35 @@ SERVICE_PROCEDURE_TERMS = (
     "按哪个文件",
 )
 SERVICE_TIME_LIMIT_TERMS = ("办结时限", "办理时限", "需要多久", "多久办结", "多少个工作日", "时限是多久")
-AUTHORITY_INTENT_TERMS = ("哪个机构", "去哪个机构", "谁负责", "哪一级部门", "哪个部门", "权限归属")
-AUTHORITY_TOPIC_TERMS = ("储量评审", "储量报告评审", "储量备案", "评审备案", "矿产资源储量评审备案")
+AUTHORITY_INTENT_TERMS = (
+    "哪个机构",
+    "去哪个机构",
+    "谁负责",
+    "哪一级部门",
+    "哪个部门",
+    "权限归属",
+    "去哪里申请",
+    "向哪里申请",
+    "在哪里申请",
+    "申请机关",
+    "受理机关",
+    "受理部门",
+    "去哪里备案",
+    "在哪里备案",
+    "哪一级申请",
+    "哪一级备案",
+    "省里申请",
+    "部里申请",
+)
+AUTHORITY_TOPIC_TERMS = (
+    "储量评审",
+    "资源储量评审",
+    "储量报告评审",
+    "储量备案",
+    "评审备案",
+    "资源储量评审备案",
+    "矿产资源储量评审备案",
+)
 AUTHENTICITY_TERMS = ("真实性", "真实准确", "弄虚作假", "真实性负责")
 RESERVE_REPORT_TERMS = ("资源储量报告", "矿产资源储量报告", "储量报告")
 EXPLORATION_STAGE_TERMS = ("详查", "勘探", "普查", "勘查程度", "勘查阶段")
@@ -76,6 +103,12 @@ FOLLOW_UP_MARKERS = (
     "该文件",
     "该标准",
     "它",
+    "我的情况",
+    "我这种情况",
+    "这种情况",
+    "这种情况下",
+    "按这个情况",
+    "是否可以理解为",
 )
 FOLLOW_UP_FOCUS_TERMS = (
     "勘查实施方案",
@@ -114,6 +147,13 @@ _POLICY_NO_PATTERN = re.compile(
     flags=re.IGNORECASE,
 )
 
+AUTHORITY_LEVELS = {"unknown", "ministry", "province"}
+_LICENSE_NAMES = r"(?:采矿许可证|采矿证|勘查许可证|探矿证)"
+_MINISTRY_ACTORS = r"(?:自然资源部|国土资源部|原国土资源部|部里|部级)"
+_PROVINCE_ACTORS = r"(?:省级自然资源主管部门|省自然资源厅|省国土资源厅|省厅|省里|省级)"
+_ISSUE_ACTIONS = r"(?:颁发|核发|发放|发证|签发|发给|发的|所发)"
+_GRANT_ACTIONS = r"(?:出让|出让权限|配置权限|登记权限)"
+
 
 @dataclass(frozen=True)
 class QueryPlan:
@@ -137,6 +177,10 @@ class QueryPlan:
     output_mode: str = "default"
     planner_used: bool = False
     planner_confidence: float = 0.0
+    license_issuer_level: str = "unknown"
+    mining_right_granting_level: str = "unknown"
+    filing_authority: str = "unknown"
+    authority_role_ambiguous: bool = False
     exhaustive_search: bool = False
 
     @property
@@ -166,6 +210,10 @@ class QueryPlan:
             "search_mode": self.search_mode,
             "comparison_dimensions": self.comparison_dimensions,
             "output_mode": self.output_mode,
+            "license_issuer_level": self.license_issuer_level,
+            "mining_right_granting_level": self.mining_right_granting_level,
+            "filing_authority": self.filing_authority,
+            "authority_role_ambiguous": self.authority_role_ambiguous,
             "exhaustive_search": self.exhaustive_search,
         }
 
@@ -273,6 +321,7 @@ PROTECTED_QUERY_INTENTS = {
     "companion_resource_type",
     "exploration_type_factors",
     "basic_analysis_items",
+    "projection_comparison",
 }
 
 
@@ -308,6 +357,61 @@ def _clean_groups(values: Any) -> tuple[tuple[str, ...], ...]:
     return tuple(groups)
 
 
+def _authority_level(value: object) -> str:
+    level = str(value or "").strip().lower()
+    return level if level in AUTHORITY_LEVELS else "unknown"
+
+
+def _level_from_actor_action(query: str, actor_pattern: str, action_pattern: str) -> bool:
+    patterns = (
+        rf"{actor_pattern}\s*(?:直接|依法|本级)?\s*{action_pattern}.{{0,16}}{_LICENSE_NAMES}",
+        rf"{_LICENSE_NAMES}.{{0,16}}(?:由|是|为|属于)?\s*{actor_pattern}.{{0,4}}{action_pattern}",
+        rf"{_LICENSE_NAMES}\s*(?:由|是|为)\s*{actor_pattern}(?:\s*{action_pattern})?",
+    )
+    return any(re.search(pattern, query) for pattern in patterns)
+
+
+def extract_authority_roles(query: str) -> tuple[str, str, str, bool]:
+    normalized = normalize_user_query(query)
+    ministry_issuer = _level_from_actor_action(
+        normalized,
+        _MINISTRY_ACTORS,
+        _ISSUE_ACTIONS,
+    )
+    province_issuer = _level_from_actor_action(
+        normalized,
+        _PROVINCE_ACTORS,
+        _ISSUE_ACTIONS,
+    )
+    issuer = "unknown"
+    if ministry_issuer != province_issuer:
+        issuer = "ministry" if ministry_issuer else "province"
+
+    ministry_grant = bool(
+        re.search(rf"{_MINISTRY_ACTORS}.{{0,8}}{_GRANT_ACTIONS}", normalized)
+        or re.search(rf"{_GRANT_ACTIONS}.{{0,12}}(?:属于|归于|归|由|在)?\s*{_MINISTRY_ACTORS}", normalized)
+    )
+    province_grant = bool(
+        re.search(rf"{_PROVINCE_ACTORS}.{{0,8}}{_GRANT_ACTIONS}", normalized)
+        or re.search(rf"{_GRANT_ACTIONS}.{{0,12}}(?:属于|归于|归|由|在)?\s*{_PROVINCE_ACTORS}", normalized)
+    )
+    granting = "unknown"
+    if ministry_grant != province_grant:
+        granting = "ministry" if ministry_grant else "province"
+
+    filing = issuer if issuer in {"ministry", "province"} else "unknown"
+    mentions_both_levels = bool(
+        re.search(_MINISTRY_ACTORS, normalized)
+        and re.search(_PROVINCE_ACTORS, normalized)
+    )
+    role_language = any(
+        term in normalized
+        for term in ("颁发", "核发", "发证", "出让", "权限", "本级已颁发", "我的情况")
+    )
+    ambiguous = issuer == "unknown" and mentions_both_levels and role_language
+    return issuer, granting, filing, ambiguous
+
+
 def apply_semantic_plan(base: QueryPlan, payload: dict[str, Any] | None) -> QueryPlan:
     if not payload:
         groups = base.required_evidence_groups or default_evidence_groups(base.intent)
@@ -337,7 +441,9 @@ def apply_semantic_plan(base: QueryPlan, payload: dict[str, Any] | None) -> Quer
     output_mode = str(payload.get("output_mode") or base.output_mode or "default").strip().lower()
     if output_mode not in {"default", "table"}:
         output_mode = base.output_mode
-    if base.output_mode == "table":
+    if base.intent in PROTECTED_QUERY_INTENTS:
+        output_mode = base.output_mode
+    elif base.output_mode == "table":
         output_mode = "table"
 
     subject_terms = _clean_terms(payload.get("subject_terms"))
@@ -357,6 +463,9 @@ def apply_semantic_plan(base: QueryPlan, payload: dict[str, Any] | None) -> Quer
         semantic_standards = tuple(
             number for number in semantic_standards if number in base.normalized_query
         )
+    if base.intent in PROTECTED_QUERY_INTENTS:
+        semantic_titles = ()
+        semantic_standards = ()
     candidate_titles = tuple(dict.fromkeys((*base.candidate_title_terms, *semantic_titles)))
     standards = tuple(dict.fromkeys((*base.standard_numbers, *semantic_standards)))
     scope_origin = base.scope_origin
@@ -382,8 +491,31 @@ def apply_semantic_plan(base: QueryPlan, payload: dict[str, Any] | None) -> Quer
         if not any(term in protected or protected in term for protected in protected_terms)
     )
     dimensions = _clean_terms(payload.get("comparison_dimensions"), limit=8)
+    semantic_issuer = _authority_level(payload.get("license_issuer_level"))
+    semantic_granting = _authority_level(payload.get("mining_right_granting_level"))
+    quoted_generic_authority_rule = (
+        "自然资源部负责本级已颁发勘查许可证或采矿许可证" in base.normalized_query
+        and "其他由省级自然资源主管部门负责" in base.normalized_query
+        and base.license_issuer_level == "unknown"
+    )
+    if confidence < 0.8 or quoted_generic_authority_rule:
+        semantic_issuer = "unknown"
+    if confidence < 0.8:
+        semantic_granting = "unknown"
+    issuer = (
+        base.license_issuer_level
+        if base.license_issuer_level != "unknown"
+        else semantic_issuer
+    )
+    granting = (
+        base.mining_right_granting_level
+        if base.mining_right_granting_level != "unknown"
+        else semantic_granting
+    )
+    filing = issuer if issuer in {"ministry", "province"} else base.filing_authority
     retrieval_parts = [
-        canonical or base.retrieval_query,
+        base.retrieval_query,
+        canonical if canonical != base.normalized_query else "",
         *subject_terms,
         *required_terms,
         *alternative_terms,
@@ -393,7 +525,11 @@ def apply_semantic_plan(base: QueryPlan, payload: dict[str, Any] | None) -> Quer
     retrieval_query = " ".join(dict.fromkeys(part for part in retrieval_parts if part))
     return replace(
         base,
-        normalized_query=canonical or base.normalized_query,
+        normalized_query=(
+            base.normalized_query
+            if base.intent in PROTECTED_QUERY_INTENTS
+            else canonical or base.normalized_query
+        ),
         retrieval_query=retrieval_query or base.retrieval_query,
         intent=intent,
         candidate_title_terms=candidate_titles,
@@ -410,6 +546,12 @@ def apply_semantic_plan(base: QueryPlan, payload: dict[str, Any] | None) -> Quer
         output_mode=output_mode,
         planner_used=True,
         planner_confidence=confidence,
+        license_issuer_level=issuer,
+        mining_right_granting_level=granting,
+        filing_authority=filing,
+        authority_role_ambiguous=(
+            base.authority_role_ambiguous and issuer == "unknown"
+        ),
         exhaustive_search=(
             base.exhaustive_search
             or (
@@ -441,6 +583,8 @@ def query_plan_from_payload(query: str, payload: dict[str, Any] | None) -> Query
         "search_mode": payload.get("search_mode"),
         "comparison_dimensions": payload.get("comparison_dimensions"),
         "output_mode": payload.get("output_mode"),
+        "license_issuer_level": payload.get("license_issuer_level"),
+        "mining_right_granting_level": payload.get("mining_right_granting_level"),
         "confidence": payload.get("planner_confidence") or payload.get("confidence"),
     }
     plan = apply_semantic_plan(base, allowed)
@@ -569,17 +713,24 @@ def understand_query(query: str) -> QueryPlan:
         any(term in normalized for term in EXPLORATION_STAGE_TERMS)
         or "探转采" in normalized
     )
-    has_companion_resource_type = any(term in normalized for term in COMPANION_MINERAL_TERMS) and any(
-        term in normalized for term in RESOURCE_TYPE_TERMS
+    has_companion_resource_type = any(term in normalized for term in COMPANION_MINERAL_TERMS) and (
+        any(term in normalized for term in RESOURCE_TYPE_TERMS)
+        or (
+            any(term in normalized for term in ("资源量", "资源储量"))
+            and any(term in normalized for term in ("类型", "划为", "降低", "相同"))
+        )
     )
     has_exploration_type_factors = "勘查类型" in normalized and any(
         term in normalized for term in EXPLORATION_FACTOR_TERMS
     )
     has_basic_analysis_items = any(term in normalized for term in BASIC_ANALYSIS_TERMS) and any(
-        term in normalized for term in ("项目", "哪些", "什么", "包括", "内容")
+        term in normalized for term in ("项目", "哪些", "什么", "包括", "内容", "需要测", "测哪些", "测定")
     )
     has_authority = any(term in normalized for term in AUTHORITY_INTENT_TERMS) and any(
         term in normalized for term in AUTHORITY_TOPIC_TERMS
+    )
+    license_issuer, granting_level, filing_authority, authority_role_ambiguous = (
+        extract_authority_roles(normalized)
     )
     broad_comparison = has_comparison and (
         has_projection
@@ -593,6 +744,7 @@ def understand_query(query: str) -> QueryPlan:
     standards = list(explicit_standards)
     focus_terms: list[str] = []
     output_mode = "table" if any(term in normalized for term in TABLE_OUTPUT_TERMS) else "default"
+    search_mode = "default"
 
     if has_authenticity:
         intent = "legal_responsibility"
@@ -727,6 +879,7 @@ def understand_query(query: str) -> QueryPlan:
             )
     elif has_projection and has_comparison:
         intent = "projection_comparison"
+        search_mode = "comparison"
     elif "无限外推" in normalized and (
         any(term in normalized for term in PROJECTION_RATIO_TERMS)
         or any(term in normalized for term in ("多少", "怎么推", "如何外推", "比例"))
@@ -759,6 +912,7 @@ def understand_query(query: str) -> QueryPlan:
 
     if has_related_documents and intent == "general":
         intent = "related_documents"
+        search_mode = "exhaustive"
         topic = re.split(r"[;；]\s*追问[:：]", normalized, maxsplit=1)[0].strip()
         retrieval_terms.append(topic or normalized)
         focus_terms.extend(term for term in FOLLOW_UP_FOCUS_TERMS if term in topic)
@@ -798,8 +952,19 @@ def understand_query(query: str) -> QueryPlan:
         focus_terms=tuple(dict.fromkeys(focus_terms)),
         scope_origin=scope_origin,
         output_mode=output_mode,
+        search_mode=search_mode,
+        license_issuer_level=license_issuer,
+        mining_right_granting_level=granting_level,
+        filing_authority=filing_authority,
+        authority_role_ambiguous=authority_role_ambiguous,
         exhaustive_search=(
-            (broad_comparison and intent not in PROTECTED_QUERY_INTENTS)
+            (
+                broad_comparison
+                and (
+                    intent == "projection_comparison"
+                    or intent not in PROTECTED_QUERY_INTENTS
+                )
+            )
             or has_related_documents
         ),
     )

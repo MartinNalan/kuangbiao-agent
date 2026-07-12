@@ -15,6 +15,8 @@ from time import perf_counter
 from typing import Any
 from urllib.parse import quote
 
+import numpy as np
+
 from .ann_index import AnnManifest, get_ann_index
 from .config import get_settings
 from .embedding_provider import EmbeddingProvider, cosine_dense, embedding_config
@@ -52,6 +54,13 @@ GRAPH_FUZZY_ENTITY_TYPES = (
     "StandardCode",
     "Table",
 )
+MMR_ELIGIBLE_INTENTS = {
+    "general",
+    "regulation_lookup",
+    "related_documents",
+    "projection_comparison",
+    "clause_comparison",
+}
 
 
 @dataclass(frozen=True)
@@ -478,6 +487,25 @@ def transfer_evidence_quote(text: str) -> tuple[str | None, str | None]:
     return None, None
 
 
+def authority_evidence_quote(text: str) -> tuple[str | None, str | None]:
+    clean = re.sub(r"\s+", " ", text or "").strip()
+    authority = re.search(
+        r"(自然资源部负责本级已颁发勘查许可证或采矿许可证的矿产资源储量评审备案工作，"
+        r"其他由省级自然资源主管部门负责。)",
+        clean,
+    )
+    if authority:
+        return authority.group(1), "十、"
+    delegation = re.search(
+        r"(自然资源主管部门可以委托矿产资源储量评审机构根据评审备案范围和权限"
+        r"组织开展评审备案工作，相关费用按照国家有关规定执行。)",
+        clean,
+    )
+    if delegation:
+        return delegation.group(1), "十、"
+    return None, None
+
+
 def companion_resource_type_quote(text: str) -> tuple[str | None, str | None]:
     clean = re.sub(r"\s+", " ", text or "").strip()
     intro = re.search(
@@ -528,6 +556,8 @@ def basic_analysis_quote(text: str, plan: QueryPlan) -> tuple[str | None, str | 
 
 def structured_intent_quote(row: sqlite3.Row, plan: QueryPlan) -> tuple[str | None, str | None]:
     text = row["text"] or ""
+    if plan.intent == "authority_responsibility":
+        return authority_evidence_quote(text)
     if plan.intent == "exploration_to_mining_eligibility":
         return transfer_evidence_quote(text)
     if plan.intent == "companion_resource_type":
@@ -1597,6 +1627,10 @@ class KnowledgeStore:
             "ann_count": ann_manifest.count if ann_manifest else 0,
             "ann_model": ann_manifest.model if ann_manifest else None,
             "ann_dtype": ann_manifest.dtype if ann_manifest else None,
+            "ann_connectivity": ann_manifest.connectivity if ann_manifest else None,
+            "ann_expansion_add": ann_manifest.expansion_add if ann_manifest else None,
+            "ann_expansion_search": ann_manifest.expansion_search if ann_manifest else None,
+            "ann_runtime_expansion_search": settings.ann_expansion_search,
         }
 
     def search(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1749,7 +1783,12 @@ class KnowledgeStore:
                 ),
                 reverse=True,
             )
-        if plan.intent in {"general", "regulation_lookup"} and not plan.standard_numbers:
+        ranked, mmr_stats = self._apply_mmr(ranked, plan)
+        if (
+            not mmr_stats["used"]
+            and plan.intent in {"general", "regulation_lookup"}
+            and not plan.standard_numbers
+        ):
             ranked = self._diversify_documents(ranked)
         if is_standard_selection_query(plan.normalized_query) and ranked:
             _, top_candidate = ranked[0]
@@ -1871,6 +1910,10 @@ class KnowledgeStore:
                 "direct_evidence_hits": len(direct_rows),
                 "candidate_count": len(candidates),
                 "ann_used": int(vector_result.route == "ann"),
+                "mmr_used": int(mmr_stats["used"]),
+                "mmr_lambda": mmr_stats["lambda"],
+                "duplicate_ratio_before": mmr_stats["duplicate_ratio_before"],
+                "duplicate_ratio_after": mmr_stats["duplicate_ratio_after"],
                 "vector_route": vector_result.route,
                 "vector_error": vector_result.error,
                 "retrieval_round": retrieval_round,
@@ -1879,6 +1922,7 @@ class KnowledgeStore:
                     "embedding": round(vector_result.embedding_ms, 3),
                     "vector_search": round(vector_result.search_ms, 3),
                     "vector_total": round(vector_ms, 3),
+                    "mmr": round(float(mmr_stats["elapsed_ms"]), 3),
                     "total": round(total_ms, 3),
                 },
             },
@@ -2170,6 +2214,169 @@ class KnowledgeStore:
         direct_bonus = 0.08 if row_matches_query_plan_evidence(row, plan) else 0.0
         return min(0.99, max(0.0, route_score * 0.68 + heuristic_score * 0.32 + direct_bonus))
 
+    def _apply_mmr(
+        self,
+        ranked: list[tuple[int, dict[str, Any]]],
+        plan: QueryPlan,
+    ) -> tuple[list[tuple[int, dict[str, Any]]], dict[str, float | bool]]:
+        started = perf_counter()
+        settings = get_settings()
+        before = self._same_document_ratio(ranked[:5])
+        stats: dict[str, float | bool] = {
+            "used": False,
+            "lambda": float(settings.mmr_lambda),
+            "duplicate_ratio_before": before,
+            "duplicate_ratio_after": before,
+            "elapsed_ms": 0.0,
+        }
+        if (
+            not settings.mmr_enabled
+            or plan.intent not in MMR_ELIGIBLE_INTENTS
+            or plan.has_hard_candidate_scope
+            or plan.standard_numbers
+            or len(ranked) < 5
+            or before < settings.mmr_duplicate_trigger
+        ):
+            return ranked, stats
+
+        pool = ranked[:80]
+        vectors = self._candidate_vectors(pool)
+        token_sets = [self._candidate_token_set(candidate) for _, candidate in pool]
+        similarities = np.zeros((len(pool), len(pool)), dtype=np.float32)
+        for left_index in range(len(pool)):
+            similarities[left_index, left_index] = 1.0
+            for right_index in range(left_index + 1, len(pool)):
+                similarity = self._candidate_similarity(
+                    pool[left_index][1],
+                    pool[right_index][1],
+                    vectors.get(left_index),
+                    vectors.get(right_index),
+                    token_sets[left_index],
+                    token_sets[right_index],
+                )
+                similarities[left_index, right_index] = similarity
+                similarities[right_index, left_index] = similarity
+        lambda_value = float(settings.mmr_lambda)
+        if plan.search_mode in {"comparison", "exhaustive"} or plan.intent in {
+            "projection_comparison",
+            "clause_comparison",
+        }:
+            lambda_value = min(lambda_value, 0.6)
+
+        selected = [0]
+        remaining = set(range(1, len(pool)))
+        max_similarity = {
+            index: float(similarities[index, 0])
+            for index in remaining
+        }
+        while remaining:
+            best_index = max(
+                remaining,
+                key=lambda index: (
+                    lambda_value * float(pool[index][1]["final_score"])
+                    - (1.0 - lambda_value) * max_similarity[index],
+                    float(pool[index][1]["final_score"]),
+                ),
+            )
+            selected.append(best_index)
+            remaining.remove(best_index)
+            for index in remaining:
+                max_similarity[index] = max(
+                    max_similarity[index],
+                    float(similarities[index, best_index]),
+                )
+
+        reranked = [pool[index] for index in selected] + ranked[len(pool) :]
+        stats.update(
+            {
+                "used": True,
+                "lambda": lambda_value,
+                "duplicate_ratio_after": self._same_document_ratio(reranked[:5]),
+                "elapsed_ms": (perf_counter() - started) * 1000,
+            }
+        )
+        return reranked, stats
+
+    def _candidate_vectors(
+        self,
+        ranked: list[tuple[int, dict[str, Any]]],
+    ) -> dict[int, np.ndarray]:
+        config = embedding_config(get_settings())
+        if not config.enabled:
+            return {}
+        chunk_to_index = {
+            str(candidate["row"]["chunk_id"]): index
+            for index, (_, candidate) in enumerate(ranked)
+            if candidate["row"]["chunk_id"]
+        }
+        if not chunk_to_index:
+            return {}
+        placeholders = ",".join("?" for _ in chunk_to_index)
+        try:
+            with connect(self.db_path) as conn:
+                rows = conn.execute(
+                    f"""
+                    select chunk_id, vector_json
+                    from chunk_embeddings
+                    where vector_model = ? and chunk_id in ({placeholders})
+                    """,
+                    [config.model, *chunk_to_index],
+                ).fetchall()
+        except sqlite3.OperationalError:
+            return {}
+        vectors: dict[int, np.ndarray] = {}
+        for row in rows:
+            try:
+                vector = np.asarray(json.loads(row["vector_json"]), dtype=np.float32)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if vector.ndim == 1 and vector.size:
+                vectors[chunk_to_index[str(row["chunk_id"])]] = vector
+        return vectors
+
+    @staticmethod
+    def _candidate_token_set(candidate: dict[str, Any]) -> set[str]:
+        row = candidate["row"]
+        text = " ".join(
+            str(row[key] or "")
+            for key in ("title", "section_path", "clause_no", "text")
+        )
+        compact = re.sub(r"\s+", "", text)
+        return {compact[index : index + 2] for index in range(max(0, len(compact) - 1))}
+
+    @staticmethod
+    def _candidate_similarity(
+        left: dict[str, Any],
+        right: dict[str, Any],
+        left_vector: np.ndarray | None,
+        right_vector: np.ndarray | None,
+        left_tokens: set[str],
+        right_tokens: set[str],
+    ) -> float:
+        left_row = left["row"]
+        right_row = right["row"]
+        if left_row["chunk_id"] == right_row["chunk_id"]:
+            return 1.0
+        similarity = 0.92 if left_row["document_id"] == right_row["document_id"] else 0.0
+        if left_vector is not None and right_vector is not None and left_vector.shape == right_vector.shape:
+            denominator = float(np.linalg.norm(left_vector) * np.linalg.norm(right_vector))
+            if denominator > 0:
+                dense_similarity = float(np.dot(left_vector, right_vector) / denominator)
+                similarity = max(similarity, float(np.clip(dense_similarity, -1.0, 1.0)))
+        if left_tokens and right_tokens:
+            similarity = max(
+                similarity,
+                len(left_tokens & right_tokens) / len(left_tokens | right_tokens),
+            )
+        return similarity
+
+    @staticmethod
+    def _same_document_ratio(ranked: list[tuple[int, dict[str, Any]]]) -> float:
+        if not ranked:
+            return 0.0
+        counts = Counter(str(candidate["row"]["document_id"] or "") for _, candidate in ranked)
+        return max(counts.values()) / len(ranked)
+
     @staticmethod
     def _diversify_documents(ranked: list[tuple[int, dict[str, Any]]]) -> list[tuple[int, dict[str, Any]]]:
         first_per_document: list[tuple[int, dict[str, Any]]] = []
@@ -2301,7 +2508,11 @@ class KnowledgeStore:
                 ann = get_ann_index(settings.ann_index_path, settings.ann_manifest_path)
                 manifest = ann.manifest()
                 if manifest and self._ann_manifest_matches(conn, manifest, config.model, len(q_vec)):
-                    matches = ann.search(q_vec, max(120, limit * 4))
+                    matches = ann.search(
+                        q_vec,
+                        max(120, limit * 4),
+                        expansion_search=settings.ann_expansion_search,
+                    )
                     chunk_ids = [chunk_id for chunk_id, _ in matches]
                     if chunk_ids:
                         placeholders = ",".join("?" for _ in chunk_ids)

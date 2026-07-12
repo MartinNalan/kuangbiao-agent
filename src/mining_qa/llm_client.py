@@ -38,7 +38,7 @@ class LLMClient:
         payload: dict[str, Any] = {
             "model": self.settings.openai_model,
             "messages": messages,
-            "temperature": 0.2,
+            "temperature": self.settings.answer_temperature,
         }
         if max_tokens and max_tokens > 0:
             payload["max_tokens"] = int(max_tokens)
@@ -68,7 +68,7 @@ class LLMClient:
         payload: dict[str, Any] = {
             "model": self.settings.openai_model,
             "messages": messages,
-            "temperature": 0,
+            "temperature": self.settings.structured_temperature,
             "response_format": {"type": "json_object"},
         }
         if (

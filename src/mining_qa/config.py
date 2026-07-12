@@ -36,8 +36,16 @@ class Settings(BaseSettings):
     query_planner_max_tokens: int = Field(default=600, alias="QUERY_PLANNER_MAX_TOKENS")
     evidence_reranker_max_tokens: int = Field(default=800, alias="EVIDENCE_RERANKER_MAX_TOKENS")
     answer_max_tokens: int = Field(default=1000, alias="ANSWER_MAX_TOKENS")
+    structured_temperature: float = Field(default=0.0, ge=0.0, le=0.3, alias="STRUCTURED_TEMPERATURE")
+    answer_temperature: float = Field(default=0.2, ge=0.0, le=0.3, alias="ANSWER_TEMPERATURE")
     max_retrieval_rounds: int = Field(default=2, alias="MAX_RETRIEVAL_ROUNDS")
+    controlled_multi_query_enabled: bool = Field(default=True, alias="CONTROLLED_MULTI_QUERY_ENABLED")
+    controlled_multi_query_max: int = Field(default=2, ge=1, le=3, alias="CONTROLLED_MULTI_QUERY_MAX")
+    mmr_enabled: bool = Field(default=True, alias="MMR_ENABLED")
+    mmr_lambda: float = Field(default=0.7, ge=0.3, le=0.95, alias="MMR_LAMBDA")
+    mmr_duplicate_trigger: float = Field(default=0.8, ge=0.5, le=1.0, alias="MMR_DUPLICATE_TRIGGER")
     ann_search_enabled: bool = Field(default=True, alias="ANN_SEARCH_ENABLED")
+    ann_expansion_search: int = Field(default=64, ge=2, le=512, alias="ANN_EXPANSION_SEARCH")
     vector_fallback_scan_limit: int = Field(default=100, alias="VECTOR_FALLBACK_SCAN_LIMIT")
     ann_index_path: str = Field(
         default=str(PROJECT_ROOT / "data" / "knowledge_base" / "indexes" / "dense.usearch"),

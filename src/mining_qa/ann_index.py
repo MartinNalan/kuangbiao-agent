@@ -22,6 +22,9 @@ class AnnManifest:
     count: int
     max_updated_at: str
     chunk_ids: tuple[str, ...]
+    connectivity: int = 24
+    expansion_add: int = 128
+    expansion_search: int = 96
 
 
 class DenseAnnIndex:
@@ -41,7 +44,13 @@ class DenseAnnIndex:
         self._ensure_loaded()
         return self._manifest
 
-    def search(self, vector: list[float], count: int) -> list[tuple[str, float]]:
+    def search(
+        self,
+        vector: list[float],
+        count: int,
+        *,
+        expansion_search: int | None = None,
+    ) -> list[tuple[str, float]]:
         self._ensure_loaded()
         if self._index is None or self._manifest is None or np is None or not vector:
             return []
@@ -49,7 +58,16 @@ class DenseAnnIndex:
         query = np.asarray(vector, dtype=np.float32)
         if query.ndim != 1 or query.shape[0] != self._manifest.dimensions:
             return []
-        matches = self._index.search(query, count=limit)
+        if expansion_search is None:
+            matches = self._index.search(query, count=limit)
+        else:
+            with self._lock:
+                previous = int(self._index.expansion_search)
+                self._index.expansion_search = max(1, int(expansion_search))
+                try:
+                    matches = self._index.search(query, count=limit)
+                finally:
+                    self._index.expansion_search = previous
         results: list[tuple[str, float]] = []
         for key, distance in zip(matches.keys.tolist(), matches.distances.tolist(), strict=False):
             label = int(key)
@@ -79,6 +97,9 @@ class DenseAnnIndex:
                 count=int(payload["count"]),
                 max_updated_at=str(payload.get("max_updated_at") or ""),
                 chunk_ids=tuple(str(value) for value in payload["chunk_ids"]),
+                connectivity=int(payload.get("connectivity") or 24),
+                expansion_add=int(payload.get("expansion_add") or 128),
+                expansion_search=int(payload.get("expansion_search") or 96),
             )
             if manifest.count != len(manifest.chunk_ids):
                 raise ValueError("ANN manifest count does not match chunk ID mapping")

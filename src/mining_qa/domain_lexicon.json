@@ -56,6 +56,34 @@
     "updated_at": "2026-07-10T00:00:00+08:00"
   },
   {
+    "lexicon_id": "lex-authority-application-agency",
+    "user_expression": "去哪里申请",
+    "canonical_term": "申请机关、负责部门",
+    "intent_label": "authority_responsibility",
+    "domain": "policy_authority",
+    "positive_expansions": ["申请机关", "受理机关", "权限归属", "自然资源主管部门负责"],
+    "negative_terms": ["油气", "煤层气"],
+    "evidence_required_patterns": ["负责", "自然资源部", "省级自然资源主管部门"],
+    "priority": 100,
+    "status": "active",
+    "created_at": "2026-07-12T00:00:00+08:00",
+    "updated_at": "2026-07-12T00:00:00+08:00"
+  },
+  {
+    "lexicon_id": "lex-authority-filing-agency",
+    "user_expression": "在哪里备案",
+    "canonical_term": "备案负责部门、权限归属",
+    "intent_label": "authority_responsibility",
+    "domain": "policy_authority",
+    "positive_expansions": ["去哪里备案", "哪一级备案", "评审备案范围和权限"],
+    "negative_terms": ["油气", "煤层气"],
+    "evidence_required_patterns": ["矿产资源储量评审备案", "负责", "自然资源主管部门"],
+    "priority": 99,
+    "status": "active",
+    "created_at": "2026-07-12T00:00:00+08:00",
+    "updated_at": "2026-07-12T00:00:00+08:00"
+  },
+  {
     "lexicon_id": "lex-authority-background-scale",
     "user_expression": "大型金矿",
     "canonical_term": "金矿",

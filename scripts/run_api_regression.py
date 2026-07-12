@@ -164,11 +164,28 @@ def main() -> int:
         if not any("自然资源部负责本级已颁发勘查许可证或采矿许可证" in (source.get("quote") or "") for source in authority.json().get("sources", [])):
             raise AssertionError("policy-authority sources should include direct authority quote")
 
+        authority_role_conflict = post_ask(
+            "我现在持有的是省里发的钼矿采矿证，按照权限应该是自然资源部出让，"
+            "我这种情况，应该去哪里申请资源储量评审备案？"
+        )
+        assert_equal(authority_role_conflict.status_code, 200, "policy-authority-role-conflict http status")
+        assert_equal(authority_role_conflict.json()["status"], "answered", "policy-authority-role-conflict response status")
+        conflict_answer = authority_role_conflict.json()["answer"]
+        if "省级自然资源主管部门" not in conflict_answer:
+            raise AssertionError("license issuer should route authority-role-conflict question to province")
+        if "出让或配置权限与储量评审备案权限不是同一概念" not in conflict_answer:
+            raise AssertionError("authority-role-conflict answer should distinguish granting and filing authority")
+        if "应由 **自然资源部** 负责" in conflict_answer:
+            raise AssertionError("ministry granting authority must not be mistaken for ministry license issuance")
+
         authority_missing_permit = post_ask("我是一个大型的金矿，我的储量报告评审应该去哪个机构")
         assert_equal(authority_missing_permit.status_code, 200, "policy-authority-missing-permit http status")
         assert_equal(authority_missing_permit.json()["status"], "answered", "policy-authority-missing-permit response status")
         missing_answer = authority_missing_permit.json()["answer"]
-        if "许可证颁发层级" not in missing_answer or "省级自然资源主管部门" not in missing_answer:
+        if (
+            not any(term in missing_answer for term in ("许可证颁发层级", "许可证的 **颁发机关**"))
+            or "省级自然资源主管部门" not in missing_answer
+        ):
             raise AssertionError("policy-authority-missing-permit should ask user to judge by permit issuing level")
         if "煤层气" in missing_answer or "石油天然气" in missing_answer:
             raise AssertionError("policy-authority-missing-permit should not drift to oil/gas standards")

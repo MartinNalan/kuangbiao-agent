@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 from dataclasses import replace
@@ -11,7 +12,7 @@ from .gap_tasks import KnowledgeGapTaskStore
 from .knowledge_client import KnowledgeClient
 from .llm_client import LLMClient
 from .query_understanding import QueryPlan, normalize_user_query, understand_query
-from .retrieval_planner import RetrievalPlanner
+from .retrieval_planner import QueryVariant, RetrievalPlanner
 from .retrieval_trace import RetrievalTraceLogger
 from .schemas import AskRequest, AskResponse, Limitations, RetrievalStats, Source
 from .web_supplement import WebSupplement
@@ -68,6 +69,7 @@ class MiningQAAgent:
         )
 
     async def aclose(self) -> None:
+        await self.knowledge.aclose()
         await self.llm.aclose()
 
     async def ask(self, request: AskRequest) -> AskResponse:
@@ -108,30 +110,55 @@ class MiningQAAgent:
         rerank_result: RerankResult | None = None
         reranker_ms = 0.0
         knowledge_ms = 0.0
+        logical_rounds = 1
+        multi_query_count = 0
+        supplemental_error_count = 0
 
-        for retrieval_round in range(1, rounds + 1):
-            kb_started = perf_counter()
-            kb_result = await self.knowledge.search(
-                question,
-                filters,
-                plan,
-                retrieval_round=retrieval_round,
-            )
-            knowledge_ms += (perf_counter() - kb_started) * 1000
-            kb_results.append(kb_result)
-            merged_hits = self._merge_hits(merged_hits, kb_result.results)
+        kb_started = perf_counter()
+        kb_result = await self.knowledge.search(
+            question,
+            filters,
+            plan,
+            retrieval_round=1,
+        )
+        knowledge_ms += (perf_counter() - kb_started) * 1000
+        kb_results.append(kb_result)
+        merged_hits = self._merge_hits(merged_hits, kb_result.results)
 
-            if not self.reranker.needs_model(plan):
-                break
-
+        if self.reranker.needs_model(plan):
             rerank_result = await self.reranker.judge(question, plan, merged_hits)
             reranker_ms += rerank_result.elapsed_ms
-            if rerank_result.sufficient or retrieval_round >= rounds:
-                break
-            refined_plan = self._refined_plan(plan, rerank_result)
-            if refined_plan.retrieval_query == plan.retrieval_query:
-                break
-            plan = refined_plan
+            if not rerank_result.sufficient and rounds > 1:
+                supplemental = self._supplemental_plans(
+                    plan,
+                    planner_result.query_variants,
+                    rerank_result,
+                )
+                if supplemental:
+                    logical_rounds = 2
+                    multi_query_count = sum(1 for _, is_multi_query in supplemental if is_multi_query)
+                    batch_started = perf_counter()
+                    batch_results = await asyncio.gather(
+                        *(
+                            self.knowledge.search(
+                                question,
+                                filters,
+                                supplemental_plan,
+                                retrieval_round=2,
+                            )
+                            for supplemental_plan, _ in supplemental
+                        ),
+                        return_exceptions=True,
+                    )
+                    knowledge_ms += (perf_counter() - batch_started) * 1000
+                    for result in batch_results:
+                        if isinstance(result, Exception):
+                            supplemental_error_count += 1
+                            continue
+                        kb_results.append(result)
+                        merged_hits = self._merge_hits(merged_hits, result.results)
+                    rerank_result = await self.reranker.judge(question, plan, merged_hits)
+                    reranker_ms += rerank_result.elapsed_ms
 
         kb_result = kb_results[-1]
         if self.reranker.needs_model(plan):
@@ -139,6 +166,10 @@ class MiningQAAgent:
                 rerank_result = await self.reranker.judge(question, plan, merged_hits)
                 reranker_ms += rerank_result.elapsed_ms
             evidence_hits = list(rerank_result.hits)
+            if plan.intent == "projection_comparison":
+                concrete_hits = self._select_evidence_hits(evidence_hits, question, plan)
+                if concrete_hits:
+                    evidence_hits = concrete_hits
         else:
             evidence_hits = self._select_evidence_hits(merged_hits, question, plan)
         sources = [self._source_from_hit(hit) for hit in evidence_hits]
@@ -160,8 +191,12 @@ class MiningQAAgent:
         ))
         if has_usable_evidence:
             notes = [note for note in notes if "未命中可引用证据" not in note]
-        if len(kb_results) > 1:
+        if logical_rounds > 1:
             notes.append("首轮证据不足，已按证据缺口执行第二轮受控检索。")
+        if multi_query_count:
+            notes.append(f"第二轮使用 {multi_query_count} 条按证据目标约束的子查询补充召回。")
+        if supplemental_error_count:
+            notes.append("部分补充查询执行失败，已使用其余检索结果继续完成证据审查。")
         if planner_result.error:
             notes.append("查询规划器不可用，本次已使用确定性理解方案降级检索。")
         if rerank_result and rerank_result.error:
@@ -173,13 +208,24 @@ class MiningQAAgent:
             graph_hits=sum(int(result.retrieval.get("graph_hits", 0)) for result in kb_results),
             web_hits=sum(int(result.retrieval.get("web_hits", 0)) for result in kb_results),
             direct_evidence_hits=(rerank_result.direct_evidence_count if rerank_result else len(evidence_hits)),
-            retrieval_rounds=len(kb_results),
+            retrieval_rounds=logical_rounds,
             planner_used=planner_result.used,
             reranker_used=bool(rerank_result and rerank_result.used),
             ann_used=any(bool(result.retrieval.get("ann_used")) for result in kb_results),
+            query_count=len(kb_results),
+            multi_query_used=multi_query_count > 0,
+            multi_query_count=multi_query_count,
+            mmr_used=any(bool(result.retrieval.get("mmr_used")) for result in kb_results),
             planner_ms=round(planner_result.elapsed_ms, 3),
             knowledge_ms=round(knowledge_ms, 3),
             reranker_ms=round(reranker_ms, 3),
+            mmr_ms=round(
+                sum(
+                    float((result.retrieval.get("timings_ms") or {}).get("mmr") or 0.0)
+                    for result in kb_results
+                ),
+                3,
+            ),
         )
         needs_supplement = not has_usable_evidence or bool(kb_result.coverage.get("needs_web_supplement"))
         if needs_supplement and self.settings.enable_sync_web_supplement:
@@ -314,12 +360,68 @@ class MiningQAAgent:
             exhaustive_search=True,
         )
 
+    def _supplemental_plans(
+        self,
+        plan: QueryPlan,
+        variants: tuple[QueryVariant, ...],
+        result: RerankResult,
+    ) -> list[tuple[QueryPlan, bool]]:
+        limit = max(1, min(3, int(self.settings.controlled_multi_query_max)))
+        supplemental: list[tuple[QueryPlan, bool]] = []
+        seen = {plan.retrieval_query}
+        refined = self._refined_plan(plan, result)
+        if refined.retrieval_query not in seen:
+            supplemental.append((refined, False))
+            seen.add(refined.retrieval_query)
+
+        multi_query_allowed = (
+            self.settings.controlled_multi_query_enabled
+            and not plan.has_hard_candidate_scope
+            and not plan.standard_numbers
+            and (
+                plan.search_mode in {"comparison", "exhaustive"}
+                or plan.intent in {
+                    "general",
+                    "regulation_lookup",
+                    "related_documents",
+                    "projection_comparison",
+                    "clause_comparison",
+                }
+            )
+        )
+        if multi_query_allowed:
+            for variant in variants:
+                retrieval_query = normalize_user_query(variant.query)
+                if not retrieval_query or retrieval_query in seen:
+                    continue
+                seen.add(retrieval_query)
+                supplemental.append(
+                    (
+                        replace(
+                            plan,
+                            retrieval_query=retrieval_query,
+                            alternative_terms=tuple(
+                                dict.fromkeys((*plan.alternative_terms, variant.target))
+                            ),
+                            exhaustive_search=True,
+                        ),
+                        True,
+                    )
+                )
+                if len(supplemental) >= limit:
+                    break
+        return supplemental[:limit]
+
     def _trace_details(self, planner_result, kb_results: list, rerank_result: RerankResult | None) -> dict:
         return {
             "planner": {
                 "used": planner_result.used,
                 "elapsed_ms": round(planner_result.elapsed_ms, 3),
                 "error": planner_result.error,
+                "query_variants": [
+                    {"target": variant.target, "query": variant.query}
+                    for variant in planner_result.query_variants
+                ],
             },
             "knowledge_rounds": [
                 {
@@ -1256,12 +1358,17 @@ class MiningQAAgent:
         if self._is_policy_authority_question(question, effective_plan) and sources:
             authority_source = next((source for source in sources if self._is_policy_authority_source(source)), None)
             if authority_source:
-                issuing_authority = "自然资源部" if any(term in question for term in ("自然资源部", "部颁发", "部发")) else None
-                conclusion = (
-                    "应由 **自然资源部** 负责矿产资源储量评审备案。"
-                    if issuing_authority
-                    else "需要按许可证颁发层级判断：自然资源部本级已颁发许可证的，由 **自然资源部** 负责；其他由 **省级自然资源主管部门** 负责。"
-                )
+                issuer = effective_plan.license_issuer_level
+                granting = effective_plan.mining_right_granting_level
+                if issuer == "ministry":
+                    conclusion = "应由 **自然资源部** 负责矿产资源储量评审备案。"
+                elif issuer == "province":
+                    conclusion = "应向 **省级自然资源主管部门** 申请矿产资源储量评审备案。"
+                else:
+                    conclusion = (
+                        "评审备案机关取决于当前有效勘查许可证或采矿许可证的 **颁发机关**："
+                        "自然资源部本级颁发的，由自然资源部负责；其他由省级自然资源主管部门负责。"
+                    )
                 lines = [
                     conclusion,
                     "",
@@ -1269,6 +1376,13 @@ class MiningQAAgent:
                     f"- **依据条款**：{authority_source.chapter or '相关条款'}",
                     f"- **直接依据**：{authority_source.quote}",
                 ]
+                if issuer == "unknown":
+                    lines.append("- **需要确认**：请查看现有有效许可证落款或发证机关，而不是仅按矿种、矿山规模判断。")
+                if granting != "unknown":
+                    lines.append(
+                        "- **权限区分**：矿业权出让或配置权限与储量评审备案权限不是同一概念；"
+                        "本条以许可证颁发机关为判断依据。"
+                    )
                 delegated_source = next(
                     (
                         source

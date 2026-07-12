@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from mining_qa.ann_index import AnnManifest
 from mining_qa.config import Settings
+from mining_qa.embedding_provider import EmbeddingConfig, EmbeddingProvider
 from mining_qa.knowledge_store import (
     KnowledgeStore,
     column_has_leading_index,
@@ -24,6 +25,10 @@ class RetrievalBudgetTests(unittest.TestCase):
         self.assertEqual(settings.query_planner_max_tokens, 600)
         self.assertEqual(settings.evidence_reranker_max_tokens, 800)
         self.assertEqual(settings.answer_max_tokens, 1000)
+        self.assertEqual(settings.structured_temperature, 0.0)
+        self.assertEqual(settings.answer_temperature, 0.2)
+        self.assertEqual(settings.controlled_multi_query_max, 2)
+        self.assertEqual(settings.ann_expansion_search, 64)
         self.assertEqual(settings.vector_fallback_scan_limit, 100)
 
     def test_recall_budget_depends_on_scope_and_comparison_mode(self) -> None:
@@ -215,6 +220,57 @@ class LlmConnectionTests(unittest.IsolatedAsyncioTestCase):
             await client.aclose()
 
         self.assertNotIn("thinking", FakeAsyncClient.payload)
+
+
+class EmbeddingBatchTests(unittest.TestCase):
+    def test_provider_honors_batch_size_and_reuses_one_client(self) -> None:
+        class Response:
+            def __init__(self, inputs):
+                self.inputs = inputs
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict:
+                return {
+                    "data": [
+                        {"index": index, "embedding": [1.0, float(index + 1)]}
+                        for index, _ in enumerate(self.inputs)
+                    ]
+                }
+
+        class FakeClient:
+            instances = 0
+            batches = []
+
+            def __init__(self, **_kwargs):
+                type(self).instances += 1
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def post(self, *_args, **kwargs):
+                inputs = (kwargs.get("json") or {}).get("input") or []
+                type(self).batches.append(list(inputs))
+                return Response(inputs)
+
+        config = EmbeddingConfig(
+            provider="aliyun",
+            api_key="test",
+            base_url="https://embedding.example.com/v1",
+            model="test-model",
+            dimensions=2,
+            batch_size=2,
+        )
+        with patch("mining_qa.embedding_provider.httpx.Client", FakeClient):
+            vectors = EmbeddingProvider(config).embed(["a", "b", "c", "d", "e"])
+
+        self.assertEqual(FakeClient.instances, 1)
+        self.assertEqual(FakeClient.batches, [["a", "b"], ["c", "d"], ["e"]])
+        self.assertEqual(len(vectors), 5)
 
 
 if __name__ == "__main__":

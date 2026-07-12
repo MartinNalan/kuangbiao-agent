@@ -81,9 +81,14 @@ class RetrievalStats(BaseModel):
     planner_used: bool = False
     reranker_used: bool = False
     ann_used: bool = False
+    query_count: int = 0
+    multi_query_used: bool = False
+    multi_query_count: int = 0
+    mmr_used: bool = False
     planner_ms: float = 0.0
     knowledge_ms: float = 0.0
     reranker_ms: float = 0.0
+    mmr_ms: float = 0.0
     synthesis_ms: float = 0.0
     total_ms: float = 0.0
 

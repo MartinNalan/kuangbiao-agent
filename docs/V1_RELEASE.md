@@ -1,4 +1,16 @@
-# geowiki v1.0.5
+# geowiki v1.0.6
+
+## v1.0.6 Authority Roles And Controlled Retrieval
+
+- Authority questions now distinguish the current license issuer, mining-right granting authority, and reserve-review filing authority. Ministry granting authority no longer implies ministry-issued licensing.
+- Follow-up resolution recognizes expressions such as `我的情况` and `这种情况`, while standalone ambiguous questions use an early DeepSeek role-resolution step without allowing the model to override protected intent or evidence rules.
+- The decisive `自然资规〔2023〕6号` authority sentence is extracted from the full chunk before quote truncation.
+- Complex comparison queries retain the original question as a protected retrieval query; DeepSeek may only add structured terms and evidence-targeted subqueries.
+- Evidence-gap recovery supports at most two concurrent supplemental searches. Exact standards, tables, material lists, and hard Schema scopes do not use Multi-Query.
+- Intent-aware MMR is available behind configuration and only triggers when at least four of the first five candidates are from the same document. It reorders at most 80 recalled candidates and makes no new embedding request.
+- DashScope embedding now honors `EMBEDDING_BATCH_SIZE` and reuses one HTTP connection for all batches.
+- A 25-question benchmark achieved 100% intent accuracy and 100% expected-standard recall for deterministic, rewritten, and merged Multi-Query retrieval.
+- ANN evaluation across `expansion_search=64/96/128` selected `64`: mean Recall@20 `0.994`, minimum Recall@20 `0.95`, and P95 index-search latency `0.518 ms`.
 
 ## v1.0.5 API Key Lifecycle Fix
 

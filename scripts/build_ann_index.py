@@ -26,6 +26,9 @@ def main() -> int:
     parser.add_argument("--index", type=Path, default=Path(settings.ann_index_path))
     parser.add_argument("--manifest", type=Path, default=Path(settings.ann_manifest_path))
     parser.add_argument("--model", default=config.model)
+    parser.add_argument("--connectivity", type=int, default=24)
+    parser.add_argument("--expansion-add", type=int, default=128)
+    parser.add_argument("--expansion-search", type=int, default=settings.ann_expansion_search)
     args = parser.parse_args()
 
     with connect(args.db) as conn:
@@ -62,9 +65,9 @@ def main() -> int:
         ndim=dimensions,
         metric="cos",
         dtype="f16",
-        connectivity=24,
-        expansion_add=128,
-        expansion_search=96,
+        connectivity=max(2, args.connectivity),
+        expansion_add=max(2, args.expansion_add),
+        expansion_search=max(2, args.expansion_search),
     )
     labels = np.arange(len(rows), dtype=np.uint64)
     ann.add(labels, vectors, threads=0, log=True)
@@ -80,6 +83,9 @@ def main() -> int:
         "dtype": "f16",
         "count": len(rows),
         "max_updated_at": max_updated_at,
+        "connectivity": max(2, args.connectivity),
+        "expansion_add": max(2, args.expansion_add),
+        "expansion_search": max(2, args.expansion_search),
         "chunk_ids": chunk_ids,
     }
     args.manifest.write_text(json.dumps(manifest, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -90,6 +96,9 @@ def main() -> int:
                 "model": args.model,
                 "dimensions": dimensions,
                 "count": len(rows),
+                "connectivity": max(2, args.connectivity),
+                "expansion_add": max(2, args.expansion_add),
+                "expansion_search": max(2, args.expansion_search),
                 "index": str(args.index),
                 "manifest": str(args.manifest),
             },

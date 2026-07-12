@@ -47,26 +47,38 @@ class EmbeddingProvider:
             raise RuntimeError("embedding provider is not configured")
         if self.config.provider not in {"aliyun", "dashscope", "openai_compatible"}:
             raise RuntimeError(f"unsupported embedding provider: {self.config.provider}")
-        return self._embed_openai_compatible(texts)
+        vectors: list[list[float]] = []
+        with httpx.Client(timeout=self.timeout_seconds, trust_env=False) as client:
+            for start in range(0, len(texts), self.config.batch_size):
+                vectors.extend(
+                    self._embed_openai_compatible(
+                        texts[start : start + self.config.batch_size],
+                        client,
+                    )
+                )
+        return vectors
 
-    def _embed_openai_compatible(self, texts: list[str]) -> list[list[float]]:
+    def _embed_openai_compatible(
+        self,
+        texts: list[str],
+        client: httpx.Client,
+    ) -> list[list[float]]:
         payload: dict[str, Any] = {
             "model": self.config.model,
             "input": texts,
         }
         if self.config.dimensions > 0:
             payload["dimensions"] = self.config.dimensions
-        with httpx.Client(timeout=self.timeout_seconds, trust_env=False) as client:
-            response = client.post(
-                f"{self.config.base_url}/embeddings",
-                headers={
-                    "Authorization": f"Bearer {self.config.api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-            )
-            response.raise_for_status()
-            data = response.json()
+        response = client.post(
+            f"{self.config.base_url}/embeddings",
+            headers={
+                "Authorization": f"Bearer {self.config.api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+        response.raise_for_status()
+        data = response.json()
         rows = sorted(data.get("data") or [], key=lambda item: int(item.get("index", 0)))
         vectors = [normalize_dense_vector(row.get("embedding") or []) for row in rows]
         if len(vectors) != len(texts):

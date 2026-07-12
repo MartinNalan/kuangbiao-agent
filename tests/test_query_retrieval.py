@@ -6,8 +6,15 @@ from unittest.mock import patch
 
 from mining_qa.agent import MiningQAAgent
 from mining_qa.config import Settings
-from mining_qa.evidence_reranker import EvidenceReranker
-from mining_qa.knowledge_store import KnowledgeStore, VectorCandidateResult, connect, table_quote, table_references
+from mining_qa.evidence_reranker import EvidenceReranker, RerankResult
+from mining_qa.knowledge_store import (
+    KnowledgeStore,
+    VectorCandidateResult,
+    authority_evidence_quote,
+    connect,
+    table_quote,
+    table_references,
+)
 from mining_qa.query_understanding import (
     apply_semantic_plan,
     contextualize_follow_up,
@@ -15,7 +22,7 @@ from mining_qa.query_understanding import (
     understand_query,
 )
 from mining_qa.schemas import Source
-from mining_qa.retrieval_planner import RetrievalPlanner
+from mining_qa.retrieval_planner import QueryVariant, RetrievalPlanner
 
 
 QUESTIONS = (
@@ -208,6 +215,53 @@ class QueryUnderstandingTests(unittest.TestCase):
         self.assertEqual(understand_query(rewritten).intent, "related_documents")
         self.assertTrue(understand_query(rewritten).exhaustive_search)
 
+    def test_authority_roles_separate_license_issuer_from_granting_authority(self) -> None:
+        plan = understand_query(
+            "我现在持有的是省里发的钼矿采矿证，按照权限应该是自然资源部出让，"
+            "我这种情况，应该去哪里申请资源储量评审备案？"
+        )
+
+        self.assertEqual(plan.intent, "authority_responsibility")
+        self.assertEqual(plan.license_issuer_level, "province")
+        self.assertEqual(plan.mining_right_granting_level, "ministry")
+        self.assertEqual(plan.filing_authority, "province")
+        self.assertFalse(plan.authority_role_ambiguous)
+
+    def test_my_situation_follow_up_inherits_authority_roles(self) -> None:
+        previous = (
+            "我现在持有的是省里发的钼矿采矿证，按照权限应该是自然资源部出让，"
+            "我这种情况，应该去哪里申请资源储量评审备案？"
+        )
+        current = (
+            "“自然资源部负责本级已颁发勘查许可证或采矿许可证的矿产资源储量评审备案工作，"
+            "其他由省级自然资源主管部门负责。”这句话是否可以理解为，我的情况需要在省里申请？"
+        )
+        plan = understand_query(contextualize_follow_up(current, previous))
+
+        self.assertEqual(plan.intent, "authority_responsibility")
+        self.assertEqual(plan.license_issuer_level, "province")
+        self.assertEqual(plan.mining_right_granting_level, "ministry")
+        self.assertEqual(plan.filing_authority, "province")
+
+    def test_quoted_generic_authority_clause_does_not_fake_a_user_issuer(self) -> None:
+        base = understand_query(
+            "自然资源部负责本级已颁发勘查许可证或采矿许可证的矿产资源储量评审备案工作，"
+            "其他由省级自然资源主管部门负责。这句话是否可以理解为我的情况需要在省里申请？"
+        )
+        plan = apply_semantic_plan(
+            base,
+            {
+                "canonical_query": base.normalized_query,
+                "intent": "authority_responsibility",
+                "license_issuer_level": "province",
+                "confidence": 0.99,
+            },
+        )
+
+        self.assertEqual(plan.intent, "authority_responsibility")
+        self.assertEqual(plan.license_issuer_level, "unknown")
+        self.assertTrue(plan.authority_role_ambiguous)
+
 
 class TableExtractionTests(unittest.TestCase):
     def test_target_row_keeps_all_four_direction_values(self) -> None:
@@ -246,6 +300,20 @@ class TableExtractionTests(unittest.TestCase):
         self.assertEqual(
             table_references("矿床勘查类型划分因素见表 E.1 至表 E.5。"),
             ("E.1", "E.2", "E.3", "E.4", "E.5"),
+        )
+
+    def test_authority_quote_is_extracted_from_the_full_chunk(self) -> None:
+        quote, clause = authority_evidence_quote(
+            "十、明确评审备案范围和权限。前置说明较长。"
+            "自然资源部负责本级已颁发勘查许可证或采矿许可证的矿产资源储量评审备案工作，"
+            "其他由省级自然资源主管部门负责。后续还有其他规定。"
+        )
+
+        self.assertEqual(clause, "十、")
+        self.assertEqual(
+            quote,
+            "自然资源部负责本级已颁发勘查许可证或采矿许可证的矿产资源储量评审备案工作，"
+            "其他由省级自然资源主管部门负责。",
         )
 
 
@@ -443,8 +511,8 @@ class PlannerFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(llm.calls, 0)
         self.assertEqual(result.plan.intent, "exploration_to_mining_eligibility")
 
-    async def test_projection_comparison_skips_model_planning(self) -> None:
-        class CountingLLM:
+    async def test_projection_comparison_uses_model_without_overriding_protected_intent(self) -> None:
+        class PlanningLLM:
             enabled = True
 
             def __init__(self):
@@ -452,16 +520,33 @@ class PlannerFallbackTests(unittest.IsolatedAsyncioTestCase):
 
             async def complete_json(self, messages, **kwargs):  # noqa: ANN001
                 self.calls += 1
-                raise AssertionError("deterministic projection comparison must not call planner")
+                return json.dumps(
+                    {
+                        "canonical_query": "不同标准矿体无限外推距离基准差异",
+                        "intent": "general",
+                        "search_mode": "default",
+                        "subject_terms": ["矿体无限外推"],
+                        "required_terms": ["工程间距"],
+                        "subqueries": [
+                            {"target": "推断资源量工程间距", "query": "无限外推 推断资源量工程间距"},
+                            {"target": "经验工程间距", "query": "无限外推 经验工程间距"},
+                        ],
+                        "confidence": 0.9,
+                    },
+                    ensure_ascii=False,
+                )
 
         question = "关于矿体无限外推所依据的间距，不同标准有什么差异"
-        llm = CountingLLM()
+        llm = PlanningLLM()
         settings = Settings(OPENAI_API_KEY="configured", QUERY_PLANNER_ENABLED=True)
         result = await RetrievalPlanner(settings, llm).plan(question, understand_query(question))  # type: ignore[arg-type]
 
-        self.assertFalse(result.used)
-        self.assertEqual(llm.calls, 0)
+        self.assertTrue(result.used)
+        self.assertEqual(llm.calls, 1)
         self.assertEqual(result.plan.intent, "projection_comparison")
+        self.assertEqual(result.plan.search_mode, "comparison")
+        self.assertTrue(result.plan.exhaustive_search)
+        self.assertEqual(len(result.query_variants), 2)
 
     async def test_protected_transfer_intent_skips_model_reranking(self) -> None:
         plan = understand_query("哪些标准、制度规定了详查报告就可以转采")
@@ -569,6 +654,108 @@ class FastAnswerTests(unittest.TestCase):
 
         self.assertIn("矿业权人负责", answer)
         self.assertNotIn("许可证颁发层级", answer)
+
+    def test_authority_answer_uses_license_issuer_not_granting_authority(self) -> None:
+        agent = object.__new__(MiningQAAgent)
+        question = (
+            "我现在持有的是省里发的钼矿采矿证，按照权限应该是自然资源部出让，"
+            "我这种情况，应该去哪里申请资源储量评审备案？"
+        )
+        source = Source(
+            title="自然资源部关于深化矿产资源管理改革若干事项的意见",
+            standard_no="自然资规〔2023〕6号",
+            chapter="十、",
+            quote=(
+                "自然资源部负责本级已颁发勘查许可证或采矿许可证的矿产资源储量评审备案工作，"
+                "其他由省级自然资源主管部门负责。"
+            ),
+            source_type="official_fulltext",
+            text_access="html_text",
+        )
+
+        answer = agent._fast_answer(question, [source], understand_query(question)) or ""
+
+        self.assertIn("省级自然资源主管部门", answer)
+        self.assertIn("出让或配置权限与储量评审备案权限不是同一概念", answer)
+        self.assertNotIn("应由 **自然资源部** 负责", answer)
+
+    def test_authority_answer_asks_for_issuer_when_user_only_gives_mine_scale(self) -> None:
+        agent = object.__new__(MiningQAAgent)
+        question = "我是一个大型的金矿，我的储量报告评审应该去哪个机构"
+        source = Source(
+            title="自然资源部关于深化矿产资源管理改革若干事项的意见",
+            standard_no="自然资规〔2023〕6号",
+            chapter="十、",
+            quote=(
+                "自然资源部负责本级已颁发勘查许可证或采矿许可证的矿产资源储量评审备案工作，"
+                "其他由省级自然资源主管部门负责。"
+            ),
+            source_type="official_fulltext",
+            text_access="html_text",
+        )
+
+        answer = agent._fast_answer(question, [source], understand_query(question)) or ""
+
+        self.assertIn("许可证的 **颁发机关**", answer)
+        self.assertIn("不是仅按矿种、矿山规模判断", answer)
+
+
+class ControlledRetrievalEnhancementTests(unittest.TestCase):
+    def test_supplemental_plans_keep_one_refined_query_and_one_targeted_variant(self) -> None:
+        agent = object.__new__(MiningQAAgent)
+        agent.settings = Settings(
+            CONTROLLED_MULTI_QUERY_ENABLED=True,
+            CONTROLLED_MULTI_QUERY_MAX=2,
+        )
+        plan = apply_semantic_plan(
+            understand_query("不同标准对矿体无限外推所依据的间距有什么差异"),
+            None,
+        )
+        result = RerankResult(
+            hits=(),
+            sufficient=False,
+            used=True,
+            elapsed_ms=1.0,
+            direct_evidence_count=0,
+            refined_query="矿体无限外推 工程间距 距离基准",
+        )
+        variants = (
+            QueryVariant(target="推断资源量工程间距", query="无限外推 推断资源量工程间距"),
+            QueryVariant(target="经验工程间距", query="无限外推 经验工程间距"),
+        )
+
+        supplemental = agent._supplemental_plans(plan, variants, result)
+
+        self.assertEqual(len(supplemental), 2)
+        self.assertEqual([is_multi for _, is_multi in supplemental], [False, True])
+        self.assertTrue(all(item.intent == "projection_comparison" for item, _ in supplemental))
+
+    def test_mmr_only_runs_after_same_document_trigger(self) -> None:
+        store = object.__new__(KnowledgeStore)
+        store.db_path = Path("/tmp/not-used.sqlite")
+        plan = understand_query("不同制度对资源储量管理有什么差异")
+        candidates = []
+        for index, document_id in enumerate(("same", "same", "same", "same", "other-a", "other-b")):
+            row = {
+                "chunk_id": f"chunk-{index}",
+                "document_id": document_id,
+                "title": f"文件{document_id}",
+                "section_path": f"第{index}条",
+                "clause_no": str(index),
+                "text": "资源储量管理规定" if document_id == "same" else f"独立规定{document_id}",
+            }
+            candidates.append((index, {"row": row, "final_score": 0.99 - index * 0.04}))
+
+        with (
+            patch("mining_qa.knowledge_store.get_settings", return_value=Settings(MMR_ENABLED=True)),
+            patch.object(store, "_candidate_vectors", return_value={}),
+        ):
+            reranked, stats = store._apply_mmr(candidates, plan)
+
+        self.assertTrue(stats["used"])
+        self.assertEqual(stats["duplicate_ratio_before"], 0.8)
+        self.assertLess(stats["duplicate_ratio_after"], stats["duplicate_ratio_before"])
+        self.assertEqual(reranked[0][1]["row"]["chunk_id"], "chunk-0")
 
     def test_exploration_to_mining_answer_distinguishes_degree_and_report_type(self) -> None:
         agent = object.__new__(MiningQAAgent)
