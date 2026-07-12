@@ -1,4 +1,10 @@
-# geowiki v1.0.4
+# geowiki v1.0.5
+
+## v1.0.5 API Key Lifecycle Fix
+
+- The normal API Key list now returns active keys only while revoked records remain in SQLite for audit and usage references.
+- Revocation is idempotent, so a stale tab or repeated click does not turn an already completed action into a false not-found error.
+- The frontend defensively renders revoked records as non-actionable if an older or administrative endpoint returns them.
 
 ## v1.0.4 Policy Attachment Retrieval Fix
 

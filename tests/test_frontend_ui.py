@@ -44,6 +44,13 @@ process.stdout.write(JSON.stringify({html: renderer.render(input, {baseUrl: 'htt
         self.assertIn('sourceElement: $("#newKeyValue")', script)
         self.assertIn('sourceElement: $("#newInviteValue")', script)
 
+    def test_revoked_api_keys_are_not_rendered_as_actionable(self) -> None:
+        script = (PROJECT_ROOT / "web" / "static" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("const revoked = Boolean(item.revoked_at)", script)
+        self.assertIn("已吊销", script)
+        self.assertIn("if (!revoked)", script)
+
 
 if __name__ == "__main__":
     unittest.main()

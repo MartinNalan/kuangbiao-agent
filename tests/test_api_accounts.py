@@ -165,6 +165,29 @@ class ApiAccountTests(unittest.TestCase):
         self.assertEqual(usage.status_code, 200, usage.text)
         self.assertEqual(usage.json()["usage"]["quota"]["used"], 2)
 
+    def test_api_key_list_hides_revoked_and_revoke_is_idempotent(self) -> None:
+        self.register(self.client, "key-lifecycle@example.com")
+        first = self.client.post("/api/account/api-keys", json={"name": "first"}).json()["item"]
+        second = self.client.post("/api/account/api-keys", json={"name": "second"}).json()["item"]
+
+        listed = self.client.get("/api/account/api-keys")
+        self.assertEqual(listed.status_code, 200, listed.text)
+        self.assertEqual(
+            {item["api_key_id"] for item in listed.json()["items"]},
+            {first["api_key_id"], second["api_key_id"]},
+        )
+
+        first_revoke = self.client.delete(f"/api/account/api-keys/{first['api_key_id']}")
+        second_revoke = self.client.delete(f"/api/account/api-keys/{first['api_key_id']}")
+        self.assertEqual(first_revoke.status_code, 200, first_revoke.text)
+        self.assertEqual(second_revoke.status_code, 200, second_revoke.text)
+
+        active = self.client.get("/api/account/api-keys").json()["items"]
+        self.assertEqual([item["api_key_id"] for item in active], [second["api_key_id"]])
+
+        missing = self.client.delete("/api/account/api-keys/key_missing")
+        self.assertEqual(missing.status_code, 404, missing.text)
+
     def test_follow_up_uses_previous_user_question_before_domain_gate(self) -> None:
         client = TestClient(app, raise_server_exceptions=False)
         self.register(client, "follow-up@example.com")

@@ -728,11 +728,14 @@ function renderApiKeys(items) {
   items.forEach((item) => {
     const row = document.createElement("article");
     row.className = "key-item";
+    const revoked = Boolean(item.revoked_at) || Number(item.enabled) === 0;
     row.innerHTML = `
       <div><strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(item.key_prefix)}•••• · 创建于 ${escapeHtml(formatDate(item.created_at))}${item.last_used_at ? ` · 最近使用 ${escapeHtml(formatDate(item.last_used_at))}` : ""}</span></div>
-      <button class="danger-text-button" type="button">吊销</button>
+      ${revoked ? '<span class="availability unavailable">已吊销</span>' : '<button class="danger-text-button" type="button">吊销</button>'}
     `;
-    $("button", row).addEventListener("click", () => revokeKey(item.api_key_id, item.name));
+    if (!revoked) {
+      $("button", row).addEventListener("click", () => revokeKey(item.api_key_id, item.name));
+    }
     container.appendChild(row);
   });
 }

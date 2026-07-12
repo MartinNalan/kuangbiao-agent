@@ -711,12 +711,15 @@ class AccountStore:
             connection.commit()
         return self.get_api_key(user_id, api_key_id), plain_key
 
-    def list_api_keys(self, user_id: str) -> list[dict[str, Any]]:
+    def list_api_keys(self, user_id: str, *, include_revoked: bool = False) -> list[dict[str, Any]]:
+        status_filter = "" if include_revoked else "AND enabled = 1 AND revoked_at IS NULL"
         with self._connect() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT api_key_id, name, key_prefix, enabled, created_at, last_used_at, revoked_at
-                FROM user_api_keys WHERE user_id = ? ORDER BY created_at DESC
+                FROM user_api_keys
+                WHERE user_id = ? {status_filter}
+                ORDER BY created_at DESC
                 """,
                 (user_id,),
             ).fetchall()
@@ -765,8 +768,14 @@ class AccountStore:
                 """,
                 (utc_now(), user_id, api_key_id),
             )
+            exists = cursor.rowcount > 0
+            if not exists:
+                exists = connection.execute(
+                    "SELECT 1 FROM user_api_keys WHERE user_id = ? AND api_key_id = ?",
+                    (user_id, api_key_id),
+                ).fetchone() is not None
             connection.commit()
-        if cursor.rowcount == 0:
+        if not exists:
             raise ResourceNotFoundError(api_key_id)
 
     def ensure_conversation(self, user_id: str, conversation_id: str | None, question: str) -> str:

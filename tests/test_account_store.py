@@ -88,8 +88,14 @@ class AccountStoreTests(unittest.TestCase):
         key_user = self.store.authenticate_api_key(plain_key)
         self.assertIsNotNone(key_user)
         self.assertEqual(key_user["api_key_id"], key_record["api_key_id"])
+        self.assertEqual(len(self.store.list_api_keys(self.user["user_id"])), 1)
+        self.store.revoke_api_key(self.user["user_id"], key_record["api_key_id"])
         self.store.revoke_api_key(self.user["user_id"], key_record["api_key_id"])
         self.assertIsNone(self.store.authenticate_api_key(plain_key))
+        self.assertEqual(self.store.list_api_keys(self.user["user_id"]), [])
+        history = self.store.list_api_keys(self.user["user_id"], include_revoked=True)
+        self.assertEqual(len(history), 1)
+        self.assertIsNotNone(history[0]["revoked_at"])
 
     def test_wrong_and_expired_email_codes_are_rejected(self) -> None:
         email = "wrong-code@example.com"
