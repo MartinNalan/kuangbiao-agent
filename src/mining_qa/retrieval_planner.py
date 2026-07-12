@@ -34,6 +34,8 @@ PlannerIntent = Literal[
     "regulation_lookup",
     "clause_comparison",
     "related_documents",
+    "definition_explanation",
+    "cross_document_audit",
 ]
 
 SearchMode = Literal["default", "scoped", "comparison", "exhaustive", "catalog"]

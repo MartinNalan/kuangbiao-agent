@@ -6,6 +6,10 @@ Cloud deployments should expose only the controlled QA API surface:
 
 - `GET /health`
 - `POST /api/ask`
+- `POST /api/research/tasks`
+- `GET /api/research/tasks/{task_id}`
+- `GET /api/research/tasks/{task_id}/result`
+- `POST /api/research/tasks/{task_id}/cancel`
 - `GET /api/standards`
 - `POST /api/feedback`
 - `GET /api/usage`
@@ -88,6 +92,8 @@ Authorization: Bearer your-api-key
   "session_id": "session-id",
   "request_id": "req_xxx",
   "status": "answered",
+  "mode": "basic",
+  "quota_cost": 1,
   "sources": [
     {
       "title": "文件名称",
@@ -131,12 +137,13 @@ Authorization: Bearer your-api-key
     "used": 1,
     "reserved": 0,
     "remaining": 9,
-    "consumed": true
+    "consumed": true,
+    "consumed_units": 1
   }
 }
 ```
 
-The service atomically reserves one request before processing. `answered`, `insufficient_evidence`, and `queued_for_enrichment` consume it. `out_of_scope` and `system_error` release the reservation without consumption. Browser sessions and every API Key owned by the same user share one account quota.
+The basic endpoint atomically reserves one quota unit before processing. `answered`, `insufficient_evidence`, and `queued_for_enrichment` consume it. `out_of_scope` and `system_error` release the reservation without consumption. Browser sessions and every API Key owned by the same user share one account quota.
 
 `status` suggested values:
 
@@ -191,6 +198,67 @@ If the question is in scope but no clause-level evidence is available, the respo
 ```
 
 Knowledge-gap tasks are only created for in-scope questions. Out-of-scope questions must not be collected as demand signals.
+
+## Deep Research Tasks
+
+Deep mode is a persistent asynchronous workflow for cross-document review, completeness checks, differences, and complex condition analysis. It does not expose private knowledge endpoints or raw KB assets.
+
+### Create
+
+```json
+POST /api/research/tasks
+{
+  "question": "不同矿种规范对矿体无限外推所依据的间距有哪些代表性差异？",
+  "session_id": "optional-conversation-id",
+  "source_request_id": "optional-basic-request-id"
+}
+```
+
+A new task reserves three quota units. When `source_request_id` identifies the same user's same basic question in the same conversation and that basic request consumed one unit, the server reserves only two additional units. Clients cannot grant this adjustment themselves.
+
+HTTP 202 response:
+
+```json
+{
+  "task_id": "research_xxx",
+  "request_id": "req_xxx",
+  "status": "queued",
+  "mode": "deep",
+  "quota_cost": 3,
+  "reserved_quota_units": 3,
+  "progress": {
+    "stage": "queued",
+    "percent": 0,
+    "message": "任务已进入队列。",
+    "examined_documents": 0,
+    "total_documents": 0,
+    "evidence_documents": 0
+  },
+  "result_available": false,
+  "quota": {
+    "used": 0,
+    "reserved": 3,
+    "remaining": 7,
+    "consumed": false,
+    "consumed_units": 0
+  }
+}
+```
+
+### Poll And Read Result
+
+Poll `GET /api/research/tasks/{task_id}`. Active stages are `queued`, `planning`, `retrieving`, and `analyzing`. Terminal states are `completed`, `partial`, `insufficient_evidence`, `failed`, and `cancelled`.
+
+When `result_available=true`, request `GET /api/research/tasks/{task_id}/result`. The result contains:
+
+- A Markdown conclusion and comparison matrix.
+- Capped direct evidence snippets and official links.
+- `examined_documents`, `total_documents`, `evidence_documents`, candidate truncation, and KB snapshot.
+- Final quota settlement with `consumed_units`.
+
+`completed`, `partial`, and `insufficient_evidence` consume the reserved deep-mode units. A system `failed` task is refunded. `POST /api/research/tasks/{task_id}/cancel` is allowed only while the task remains `queued`; queued cancellation refunds the reservation.
+
+Only one active deep task is allowed per user. An additional creation request returns HTTP 409 with `ACTIVE_RESEARCH_TASK_EXISTS`.
 
 ## POST /api/feedback
 
@@ -300,16 +368,20 @@ Authentication is the same as `/api/ask`.
     "backend": "redis"
   },
   "quota_policy": {
-    "mode": "daily_account_quota",
+    "mode": "daily_account_quota_units",
     "timezone": "Asia/Shanghai",
     "web_and_api_keys_shared": true,
     "system_errors_refunded": true,
-    "out_of_scope_not_consumed": true
+    "out_of_scope_not_consumed": true,
+    "basic_cost": 1,
+    "deep_cost": 3,
+    "basic_to_deep_additional_cost": 2
   },
   "usage": {
     "quota": {"daily_limit": 10, "bonus": 0, "effective_limit": 10, "used": 2, "remaining": 8},
     "total_calls": 2,
     "consumed_calls": 2,
+    "consumed_units": 2,
     "adjustments": []
   }
 }

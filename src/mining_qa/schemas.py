@@ -47,6 +47,7 @@ class QuotaInfo(BaseModel):
     reserved: int
     remaining: int
     consumed: bool = False
+    consumed_units: int = 0
 
 
 class KnowledgeGapTask(BaseModel):
@@ -107,6 +108,82 @@ class AskResponse(BaseModel):
     retrieval: RetrievalStats = Field(default_factory=RetrievalStats)
     limitations: Limitations = Field(default_factory=Limitations)
     knowledge_gap_task: KnowledgeGapTask | None = None
+    confidence: Literal["low", "medium", "high"] = "low"
+    quota: QuotaInfo | None = None
+    mode: Literal["basic", "deep"] = "basic"
+    quota_cost: int = 1
+    mode_recommendation: Literal["deep"] | None = None
+    mode_recommendation_reason: str | None = None
+
+
+ResearchTaskStatus = Literal[
+    "queued",
+    "planning",
+    "retrieving",
+    "analyzing",
+    "completed",
+    "partial",
+    "insufficient_evidence",
+    "failed",
+    "cancelled",
+]
+
+
+class ResearchTaskCreateRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=4000)
+    session_id: str | None = None
+    filters: AskFilters = Field(default_factory=AskFilters)
+    source_request_id: str | None = None
+
+
+class ResearchProgress(BaseModel):
+    stage: ResearchTaskStatus = "queued"
+    percent: int = Field(default=0, ge=0, le=100)
+    message: str = "任务已进入队列。"
+    examined_documents: int = 0
+    total_documents: int = 0
+    evidence_documents: int = 0
+
+
+class ResearchCoverage(BaseModel):
+    examined_documents: int = 0
+    total_documents: int = 0
+    evidence_documents: int = 0
+    candidate_truncated: bool = False
+    knowledge_snapshot: str | None = None
+    notes: list[str] = Field(default_factory=list)
+
+
+class ResearchTaskResponse(BaseModel):
+    task_id: str
+    request_id: str
+    question: str
+    session_id: str
+    status: ResearchTaskStatus
+    mode: Literal["deep"] = "deep"
+    quota_cost: int = 3
+    reserved_quota_units: int = 3
+    progress: ResearchProgress = Field(default_factory=ResearchProgress)
+    result_available: bool = False
+    quota: QuotaInfo | None = None
+    created_at: str
+    started_at: str | None = None
+    finished_at: str | None = None
+
+
+class ResearchResult(BaseModel):
+    task_id: str
+    request_id: str
+    question: str
+    session_id: str
+    answer: str
+    status: Literal["completed", "partial", "insufficient_evidence"]
+    mode: Literal["deep"] = "deep"
+    quota_cost: int = 3
+    reserved_quota_units: int = 3
+    sources: list[Source] = Field(default_factory=list)
+    limitations: Limitations = Field(default_factory=Limitations)
+    coverage: ResearchCoverage = Field(default_factory=ResearchCoverage)
     confidence: Literal["low", "medium", "high"] = "low"
     quota: QuotaInfo | None = None
 

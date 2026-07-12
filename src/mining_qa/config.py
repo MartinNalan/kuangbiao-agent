@@ -36,8 +36,19 @@ class Settings(BaseSettings):
     query_planner_max_tokens: int = Field(default=600, alias="QUERY_PLANNER_MAX_TOKENS")
     evidence_reranker_max_tokens: int = Field(default=800, alias="EVIDENCE_RERANKER_MAX_TOKENS")
     answer_max_tokens: int = Field(default=1000, alias="ANSWER_MAX_TOKENS")
+    definition_answer_max_tokens: int = Field(default=1600, alias="DEFINITION_ANSWER_MAX_TOKENS")
+    research_planner_max_tokens: int = Field(default=1000, alias="RESEARCH_PLANNER_MAX_TOKENS")
+    research_analysis_max_tokens: int = Field(default=1800, alias="RESEARCH_ANALYSIS_MAX_TOKENS")
+    research_analysis_batch_size: int = Field(
+        default=4,
+        ge=1,
+        le=8,
+        alias="RESEARCH_ANALYSIS_BATCH_SIZE",
+    )
+    research_answer_max_tokens: int = Field(default=2200, alias="RESEARCH_ANSWER_MAX_TOKENS")
     structured_temperature: float = Field(default=0.0, ge=0.0, le=0.3, alias="STRUCTURED_TEMPERATURE")
     answer_temperature: float = Field(default=0.2, ge=0.0, le=0.3, alias="ANSWER_TEMPERATURE")
+    research_answer_temperature: float = Field(default=0.1, ge=0.0, le=0.2, alias="RESEARCH_ANSWER_TEMPERATURE")
     max_retrieval_rounds: int = Field(default=2, alias="MAX_RETRIEVAL_ROUNDS")
     controlled_multi_query_enabled: bool = Field(default=True, alias="CONTROLLED_MULTI_QUERY_ENABLED")
     controlled_multi_query_max: int = Field(default=2, ge=1, le=3, alias="CONTROLLED_MULTI_QUERY_MAX")
@@ -47,6 +58,9 @@ class Settings(BaseSettings):
     ann_search_enabled: bool = Field(default=True, alias="ANN_SEARCH_ENABLED")
     ann_expansion_search: int = Field(default=64, ge=2, le=512, alias="ANN_EXPANSION_SEARCH")
     vector_fallback_scan_limit: int = Field(default=100, alias="VECTOR_FALLBACK_SCAN_LIMIT")
+    research_max_documents: int = Field(default=60, ge=5, le=200, alias="RESEARCH_MAX_DOCUMENTS")
+    research_document_concurrency: int = Field(default=4, ge=1, le=12, alias="RESEARCH_DOCUMENT_CONCURRENCY")
+    research_global_concurrency: int = Field(default=1, ge=1, le=4, alias="RESEARCH_GLOBAL_CONCURRENCY")
     ann_index_path: str = Field(
         default=str(PROJECT_ROOT / "data" / "knowledge_base" / "indexes" / "dense.usearch"),
         alias="ANN_INDEX_PATH",

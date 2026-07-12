@@ -29,6 +29,11 @@ async def search(payload: dict[str, Any]) -> dict[str, Any]:
     return await run_in_threadpool(store.search, payload)
 
 
+@app.post("/knowledge/research/corpus")
+async def research_corpus(payload: dict[str, Any]) -> dict[str, Any]:
+    return await run_in_threadpool(store.research_corpus, payload)
+
+
 @app.get("/knowledge/standards")
 async def standards(
     q: str | None = None,

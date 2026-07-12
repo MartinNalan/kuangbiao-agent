@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .account_store import (
+    ActiveResearchTaskError,
     AccountStoreError,
     DailyQuotaExceededError,
     DuplicateAccountError,
@@ -34,6 +35,7 @@ from .auth import (
 )
 from .config import PROJECT_ROOT, get_settings
 from .email_sender import EmailDeliveryError, send_verification_email
+from .domain_gate import DomainGate
 from .feedback_log import FeedbackLogger
 from .knowledge_client import KnowledgeClient
 from .query_understanding import contextualize_follow_up
@@ -52,10 +54,14 @@ from .schemas import (
     LoginRequest,
     PasswordChangeRequest,
     QuotaInfo,
+    ResearchResult,
+    ResearchTaskCreateRequest,
+    ResearchTaskResponse,
     RegisterRequest,
     StandardsResponse,
     UserStatusRequest,
 )
+from .research import research_runner, research_task_response
 from .usage_log import UsageLogger
 from .usage_stats import UsageStats
 from . import __version__
@@ -68,6 +74,7 @@ OPENAPI_TAGS = [
     {"name": "auth", "description": "Invite-only registration and browser session authentication."},
     {"name": "account", "description": "Current account, API keys, daily quota, and conversation history."},
     {"name": "qa", "description": "Controlled public QA API for mineral-resource standards and policies."},
+    {"name": "research", "description": "Persistent deep-research tasks for cross-document review and comparison."},
     {"name": "catalog", "description": "Knowledge-base catalog lookup through the public API boundary."},
     {"name": "feedback", "description": "Answer-quality feedback for retrieval and KB improvement."},
     {"name": "usage", "description": "Account usage, daily quota, and rate-limit status."},
@@ -88,6 +95,7 @@ usage_logger = UsageLogger()
 feedback_logger = FeedbackLogger()
 usage_stats = UsageStats()
 rate_limiter = RateLimiter()
+domain_gate = DomainGate()
 
 
 def authenticated_principal(
@@ -109,6 +117,13 @@ def admin_principal(request: Request) -> Principal:
 async def enforce_rate_limit(rate_limit_key: str) -> None:
     result = await rate_limiter.check(rate_limit_key, get_settings())
     rate_limiter.raise_if_limited(result)
+
+
+@app.on_event("startup")
+async def recover_research_queue() -> None:
+    settings = get_settings()
+    for task_id in get_account_store(settings).recover_research_tasks():
+        research_runner.schedule(task_id)
 
 
 def set_session_cookie(response: Response, token: str) -> None:
@@ -169,6 +184,15 @@ def account_error(error: Exception) -> HTTPException:
                 "quota": error.quota,
             },
         )
+    if isinstance(error, ActiveResearchTaskError):
+        return HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "ACTIVE_RESEARCH_TASK_EXISTS",
+                "message": "当前已有一个深度研究任务在排队或运行，请等待其完成后再创建新任务。",
+                "task_id": error.task_id,
+            },
+        )
     if isinstance(error, ResourceNotFoundError):
         return HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -227,10 +251,13 @@ async def health() -> dict[str, object]:
         "rate_limit_enabled": settings.rate_limit_enabled,
         "rate_limit_per_minute": settings.rate_limit_per_minute,
         "rate_limit_backend": rate_limiter.last_backend,
-        "quota_mode": "daily_account_quota",
+        "quota_mode": "daily_account_quota_units",
         "daily_quota_default": settings.daily_quota_default,
         "quota_timezone": settings.quota_timezone,
         "email_verification_ready": settings.email_verification_ready,
+        "qa_modes": {"basic": 1, "deep": 3},
+        "research_max_documents": settings.research_max_documents,
+        "research_global_concurrency": settings.research_global_concurrency,
     }
 
 
@@ -472,6 +499,7 @@ async def ask(
     channel = "web" if principal.auth_type == "session" else "api"
     conversation_id: str | None = None
     quota_reserved = False
+    unreserved_quota: dict[str, object] | None = None
 
     await enforce_rate_limit(principal.rate_limit_key)
     if principal.user_id:
@@ -481,16 +509,26 @@ async def ask(
             previous_question = store.latest_user_question(principal.user_id, conversation_id)
             payload._retrieval_question = contextualize_follow_up(payload.question, previous_question)
             if principal.quota_managed:
-                store.reserve_qa_quota(
-                    principal.user_id,
-                    request_id,
-                    channel,
-                    principal.credential_id if principal.auth_type == "api_key" else None,
-                    conversation_id,
-                    len(payload.question),
-                    settings.quota_timezone,
-                )
-                quota_reserved = True
+                if domain_gate.check(payload.retrieval_question).in_scope:
+                    store.reserve_qa_quota(
+                        principal.user_id,
+                        request_id,
+                        channel,
+                        principal.credential_id if principal.auth_type == "api_key" else None,
+                        conversation_id,
+                        len(payload.question),
+                        settings.quota_timezone,
+                        quota_units=1,
+                        request_mode="basic",
+                    )
+                    quota_reserved = True
+                else:
+                    unreserved_quota = store.quota_snapshot(
+                        principal.user_id,
+                        settings.quota_timezone,
+                    )
+                    unreserved_quota["consumed"] = False
+                    unreserved_quota["consumed_units"] = 0
         except AccountStoreError as error:
             raise account_error(error) from error
 
@@ -498,6 +536,8 @@ async def ask(
     try:
         result = await agent.ask(payload)
         result.request_id = request_id
+        result.mode = "basic"
+        result.quota_cost = 1
         if quota_reserved:
             settlement = store.settle_qa_quota(
                 request_id,
@@ -506,6 +546,8 @@ async def ask(
                 settings.quota_timezone,
             )
             result.quota = QuotaInfo(**settlement)
+        elif unreserved_quota is not None:
+            result.quota = QuotaInfo(**unreserved_quota)
     except Exception:
         if quota_reserved:
             store.fail_qa_quota(request_id, settings.quota_timezone)
@@ -533,6 +575,8 @@ async def ask(
                     "retrieval_question": payload.retrieval_question
                     if payload.retrieval_question != payload.question
                     else None,
+                    "mode": "basic",
+                    "mode_recommendation": result.mode_recommendation,
                 },
             )
         except AccountStoreError:
@@ -555,11 +599,203 @@ async def ask(
             "web_hits": result.retrieval.web_hits,
             "knowledge_gap_task_id": result.knowledge_gap_task.task_id if result.knowledge_gap_task else None,
             "quota_consumed": result.quota.consumed if result.quota else False,
+            "quota_consumed_units": result.quota.consumed_units if result.quota else 0,
             "quota_remaining": result.quota.remaining if result.quota else None,
             "duration_ms": round((perf_counter() - started) * 1000, 2),
         }
     )
     return result
+
+
+@app.post(
+    "/api/research/tasks",
+    response_model=ResearchTaskResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    tags=["research"],
+    summary="Create a persistent deep-research task",
+    description=(
+        "Deep mode enumerates a governed candidate corpus and reviews documents asynchronously. "
+        "A new task costs three quota units; upgrading the same basic answer reserves only two additional units."
+    ),
+)
+async def create_research_task(
+    payload: ResearchTaskCreateRequest,
+    http_request: Request,
+    principal: Annotated[Principal, Depends(authenticated_principal)],
+) -> ResearchTaskResponse:
+    if not principal.user_id or not principal.quota_managed:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "ACCOUNT_REQUIRED",
+                "message": "深度模式需要注册账号及账号级配额，旧版服务密钥不能创建研究任务。",
+            },
+        )
+    settings = get_settings()
+    store = get_account_store(settings)
+    await enforce_rate_limit(principal.rate_limit_key)
+    channel = "web" if principal.auth_type == "session" else "api"
+    request_id = "req_" + uuid4().hex
+    task_id = "research_" + uuid4().hex
+    quota_reserved = False
+    try:
+        conversation_id = store.ensure_conversation(
+            principal.user_id,
+            payload.session_id,
+            payload.question,
+        )
+        previous_question = store.latest_user_question(principal.user_id, conversation_id)
+        retrieval_question = contextualize_follow_up(payload.question, previous_question)
+        if not domain_gate.check(retrieval_question).in_scope:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "OUT_OF_SCOPE",
+                    "message": "深度模式仅处理矿产资源、地质标准规范和相关政策技术问题。",
+                },
+            )
+        reserved_units = store.research_upgrade_quota_cost(
+            principal.user_id,
+            payload.source_request_id,
+            conversation_id,
+            payload.question,
+        )
+        quota = store.reserve_qa_quota(
+            principal.user_id,
+            request_id,
+            channel,
+            principal.credential_id if principal.auth_type == "api_key" else None,
+            conversation_id,
+            len(payload.question),
+            settings.quota_timezone,
+            quota_units=reserved_units,
+            request_mode="deep",
+            parent_request_id=payload.source_request_id,
+        )
+        quota_reserved = True
+        task = store.create_research_task(
+            task_id=task_id,
+            request_id=request_id,
+            user_id=principal.user_id,
+            api_key_id=principal.credential_id if principal.auth_type == "api_key" else None,
+            conversation_id=conversation_id,
+            channel=channel,
+            question=payload.question,
+            retrieval_question=retrieval_question,
+            filters=payload.filters.model_dump(exclude_none=True),
+            reserved_quota_units=reserved_units,
+        )
+    except HTTPException:
+        raise
+    except AccountStoreError as error:
+        if quota_reserved:
+            store.fail_qa_quota(request_id, settings.quota_timezone)
+        raise account_error(error) from error
+
+    research_runner.schedule(task_id)
+    usage_logger.write(
+        {
+            "user_id": principal.user_id,
+            "credential_id": principal.credential_id,
+            "auth_type": principal.auth_type,
+            "endpoint": "/api/research/tasks",
+            "method": "POST",
+            "client_host": http_request.client.host if http_request.client else None,
+            "request_id": request_id,
+            "task_id": task_id,
+            "question_chars": len(payload.question),
+            "status": "queued",
+            "quota_reserved_units": int(task["reserved_quota_units"]),
+            "quota_remaining": quota["remaining"],
+        }
+    )
+    return research_task_response(task, quota)
+
+
+@app.get(
+    "/api/research/tasks/{task_id}",
+    response_model=ResearchTaskResponse,
+    tags=["research"],
+    summary="Get deep-research progress",
+)
+async def research_task_status(
+    task_id: str,
+    principal: Annotated[Principal, Depends(authenticated_principal)],
+) -> ResearchTaskResponse:
+    if not principal.user_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account required")
+    settings = get_settings()
+    try:
+        task = get_account_store(settings).get_research_task(principal.user_id, task_id)
+        quota = get_account_store(settings).quota_snapshot(principal.user_id, settings.quota_timezone)
+    except AccountStoreError as error:
+        raise account_error(error) from error
+    return research_task_response(task, quota)
+
+
+@app.get(
+    "/api/research/tasks/{task_id}/result",
+    response_model=ResearchResult,
+    tags=["research"],
+    summary="Get a completed deep-research result",
+)
+async def research_task_result(
+    task_id: str,
+    principal: Annotated[Principal, Depends(authenticated_principal)],
+) -> ResearchResult:
+    if not principal.user_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account required")
+    try:
+        task = get_account_store().get_research_task(principal.user_id, task_id)
+    except AccountStoreError as error:
+        raise account_error(error) from error
+    if not task.get("result"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "RESEARCH_RESULT_NOT_READY",
+                "message": "深度研究结果尚未生成。",
+                "status": task["status"],
+            },
+        )
+    return ResearchResult.model_validate(task["result"])
+
+
+@app.post(
+    "/api/research/tasks/{task_id}/cancel",
+    response_model=ResearchTaskResponse,
+    tags=["research"],
+    summary="Cancel a queued deep-research task",
+)
+async def cancel_research_task(
+    task_id: str,
+    principal: Annotated[Principal, Depends(authenticated_principal)],
+) -> ResearchTaskResponse:
+    if not principal.user_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account required")
+    settings = get_settings()
+    store = get_account_store(settings)
+    try:
+        current = store.get_research_task(principal.user_id, task_id)
+        if current["status"] != "queued":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "RESEARCH_TASK_ALREADY_STARTED",
+                    "message": "只有仍在排队的深度任务可以取消。",
+                    "status": current["status"],
+                },
+            )
+        task = store.cancel_queued_research_task(principal.user_id, task_id)
+        store.fail_qa_quota(task["request_id"], settings.quota_timezone)
+        quota = store.quota_snapshot(principal.user_id, settings.quota_timezone)
+        quota["consumed"] = False
+        quota["consumed_units"] = 0
+    except HTTPException:
+        raise
+    except AccountStoreError as error:
+        raise account_error(error) from error
+    return research_task_response(task, quota)
 
 
 @app.post(
@@ -684,11 +920,14 @@ async def usage(principal: Annotated[Principal, Depends(authenticated_principal)
             "backend": rate_limiter.last_backend,
         },
         "quota_policy": {
-            "mode": "daily_account_quota",
+            "mode": "daily_account_quota_units",
             "timezone": settings.quota_timezone,
             "web_and_api_keys_shared": True,
             "system_errors_refunded": True,
             "out_of_scope_not_consumed": True,
+            "basic_cost": 1,
+            "deep_cost": 3,
+            "basic_to_deep_additional_cost": 2,
         },
         "usage": account_usage,
     }

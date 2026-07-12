@@ -554,6 +554,35 @@ def basic_analysis_quote(text: str, plan: QueryPlan) -> tuple[str | None, str | 
     return None, None
 
 
+def definition_slot_for_text(text: str, plan: QueryPlan) -> str | None:
+    clean = re.sub(r"\s+", " ", text or "").strip()
+    for slot in sorted(plan.definition_slots, key=len, reverse=True):
+        pattern = rf"(?:^|\s)\d+(?:\.\d+)+\s+{re.escape(slot)}(?=\s|[:：]|$)"
+        if re.search(pattern, clean):
+            return slot
+    return None
+
+
+def definition_evidence_quote(text: str, plan: QueryPlan) -> tuple[str | None, str | None]:
+    clean = re.sub(r"\s+", " ", text or "").strip()
+    slot = definition_slot_for_text(clean, plan)
+    if not slot:
+        return None, None
+    match = re.search(
+        rf"(?:^|\s)(?P<clause>\d+(?:\.\d+)+)\s+{re.escape(slot)}(?=\s|[:：]|$)",
+        clean,
+    )
+    clause = match.group("clause") if match else None
+    start = match.start("clause") if match else 0
+    quote = clean[start:].strip()
+    next_clause = re.search(r"\s\d+(?:\.\d+)+\s+\S+", quote[1:])
+    if next_clause:
+        quote = quote[: next_clause.start() + 1].strip()
+    if len(quote) > 1000:
+        quote = quote[:1000].rstrip() + "..."
+    return quote, clause
+
+
 def structured_intent_quote(row: sqlite3.Row, plan: QueryPlan) -> tuple[str | None, str | None]:
     text = row["text"] or ""
     if plan.intent == "authority_responsibility":
@@ -564,6 +593,8 @@ def structured_intent_quote(row: sqlite3.Row, plan: QueryPlan) -> tuple[str | No
         return companion_resource_type_quote(text)
     if plan.intent == "basic_analysis_items":
         return basic_analysis_quote(text, plan)
+    if plan.intent == "definition_explanation":
+        return definition_evidence_quote(text, plan)
     return None, None
 
 
@@ -1080,6 +1111,7 @@ STRICT_EVIDENCE_INTENTS = {
     "companion_resource_type",
     "exploration_type_factors",
     "basic_analysis_items",
+    "definition_explanation",
 }
 
 
@@ -1291,6 +1323,20 @@ def row_has_basic_analysis_evidence(row: sqlite3.Row, plan: QueryPlan) -> bool:
     return True
 
 
+def row_has_definition_evidence(row: sqlite3.Row, plan: QueryPlan) -> bool:
+    if not plan.definition_slots:
+        return False
+    if plan.preferred_definition_sources:
+        preferred_numbers = {
+            value.replace(" ", "").upper()
+            for value in plan.preferred_definition_sources
+            if re.search(r"\d{4}", value)
+        }
+        if preferred_numbers and (row["standard_no"] or "").replace(" ", "").upper() not in preferred_numbers:
+            return False
+    return definition_slot_for_text(row["text"] or "", plan) is not None
+
+
 def row_matches_query_plan_evidence(row: sqlite3.Row, plan: QueryPlan) -> bool:
     if plan.intent == "engineering_distance_lookup":
         return row_has_engineering_distance_evidence(row, plan)
@@ -1314,6 +1360,8 @@ def row_matches_query_plan_evidence(row: sqlite3.Row, plan: QueryPlan) -> bool:
         return row_has_exploration_factor_evidence(row)
     if plan.intent == "basic_analysis_items":
         return row_has_basic_analysis_evidence(row, plan)
+    if plan.intent == "definition_explanation":
+        return row_has_definition_evidence(row, plan)
     return row_matches_required_evidence_groups(row, plan)
 
 
@@ -1424,6 +1472,14 @@ def query_plan_score(row: sqlite3.Row, plan: QueryPlan) -> float:
         score += 18.0
     elif plan.intent == "basic_analysis_items" and row_has_basic_analysis_evidence(row, plan):
         score += 18.0
+    elif plan.intent == "definition_explanation":
+        slot = definition_slot_for_text(text, plan)
+        if slot:
+            score += 24.0
+            if (row["clause_no"] or ""):
+                score += 4.0
+        elif any(term in context for term in plan.definition_slots):
+            score -= 8.0
     elif plan.intent == "related_documents" and plan.focus_terms:
         anchor = max(plan.focus_terms, key=len)
         if anchor in context:
@@ -1652,6 +1708,10 @@ class KnowledgeStore:
         if standard_no:
             base_where.append("d.standard_no = ?")
             base_params.append(standard_no)
+        document_id = filters.get("document_id")
+        if document_id:
+            base_where.append("d.document_id = ?")
+            base_params.append(document_id)
         statuses = filters.get("status") or []
         if isinstance(statuses, str):
             statuses = [statuses]
@@ -1940,6 +2000,9 @@ class KnowledgeStore:
                     "planner_used": plan.planner_used,
                     "search_mode": plan.search_mode,
                     "required_evidence_groups": plan.required_evidence_groups,
+                    "target_terms": plan.target_terms,
+                    "definition_mode": plan.definition_mode,
+                    "definition_slots": plan.definition_slots,
                 },
             },
         }
@@ -2393,6 +2456,15 @@ class KnowledgeStore:
 
     def _route_evidence_found(self, candidate_rows: dict[str, dict[str, Any]], plan: QueryPlan) -> bool:
         rows = [candidate["row"] for candidate in candidate_rows.values()]
+        if plan.intent == "definition_explanation":
+            matched_slots = {
+                slot
+                for row in rows
+                if row_has_definition_evidence(row, plan)
+                for slot in [definition_slot_for_text(row["text"] or "", plan)]
+                if slot
+            }
+            return bool(plan.definition_slots) and set(plan.definition_slots).issubset(matched_slots)
         if plan.intent in STRICT_EVIDENCE_INTENTS:
             return any(row_matches_query_plan_evidence(row, plan) for row in rows)
         if plan.required_evidence_groups:
@@ -2863,6 +2935,85 @@ class KnowledgeStore:
         return {
             "items": [row_to_document(row) for row in rows],
             "pagination": {"page": page, "page_size": page_size, "total": total},
+        }
+
+    def research_corpus(self, payload: dict[str, Any]) -> dict[str, Any]:
+        limit = max(5, min(int(payload.get("limit") or 60), 200))
+        title_terms = [
+            str(value).strip()
+            for value in payload.get("title_terms") or []
+            if str(value).strip()
+        ][:20]
+        standard_numbers = [
+            str(value).strip()
+            for value in payload.get("standard_numbers") or []
+            if str(value).strip()
+        ][:20]
+        document_types = [
+            str(value).strip()
+            for value in payload.get("document_types") or []
+            if str(value).strip()
+        ][:20]
+
+        where = [
+            "visibility in ('internal', 'public')",
+            "review_status = 'approved_for_service'",
+            "can_answer = 1",
+        ]
+        params: list[Any] = []
+        if document_types:
+            placeholders = ",".join("?" for _ in document_types)
+            where.append(f"document_type in ({placeholders})")
+            params.extend(document_types)
+        scope_clauses: list[str] = []
+        for term in title_terms:
+            scope_clauses.append("title like ?")
+            params.append(f"%{term}%")
+        for number in standard_numbers:
+            scope_clauses.append("replace(upper(coalesce(standard_no, '')), ' ', '') = ?")
+            params.append(number.replace(" ", "").upper())
+        if scope_clauses:
+            where.append("(" + " OR ".join(scope_clauses) + ")")
+
+        where_sql = " AND ".join(where)
+        with connect(self.db_path) as conn:
+            total = int(
+                conn.execute(
+                    f"SELECT count(*) FROM documents WHERE {where_sql}",
+                    params,
+                ).fetchone()[0]
+            )
+            rows = conn.execute(
+                f"""
+                SELECT * FROM documents
+                WHERE {where_sql}
+                ORDER BY
+                  CASE WHEN status IN ('current', 'active', '现行', '有效') THEN 0 ELSE 1 END,
+                  coalesce(standard_no, ''), title
+                LIMIT ?
+                """,
+                [*params, limit],
+            ).fetchall()
+            snapshot_row = conn.execute(
+                """
+                SELECT count(*) AS document_count,
+                       coalesce(sum(chunk_count), 0) AS chunk_count,
+                       coalesce(max(updated_at), max(ingestion_time), '') AS updated_at
+                FROM documents
+                WHERE visibility in ('internal', 'public')
+                  AND review_status = 'approved_for_service'
+                """
+            ).fetchone()
+        snapshot_payload = (
+            f"{snapshot_row['document_count']}:{snapshot_row['chunk_count']}:{snapshot_row['updated_at']}"
+        )
+        snapshot = "kb_" + hashlib.sha256(snapshot_payload.encode("utf-8")).hexdigest()[:16]
+        return {
+            "items": [row_to_document(row) for row in rows],
+            "total": total,
+            "returned": len(rows),
+            "truncated": total > len(rows),
+            "knowledge_snapshot": snapshot,
         }
 
     def document(self, document_id: str) -> dict[str, Any] | None:

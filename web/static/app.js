@@ -11,6 +11,25 @@ const state = {
   feedbackItem: null,
   emailCodeTimer: null,
   registrationEnabled: true,
+  qaMode: "basic",
+  activeResearchTask: null,
+};
+
+const qaModes = {
+  basic: {
+    title: "基本模式 · 快速查证",
+    description: "查询明确条款、定义、数值、材料、办理依据和官方来源。",
+    cost: "本次 1 次",
+    note: "回答仅引用必要条款片段；正式业务决策请核验官方原文。",
+    placeholder: "输入需要快速查证的标准条款、定义、数值或政策问题",
+  },
+  deep: {
+    title: "深度模式 · 综合研究",
+    description: "跨标准汇总、逐项对比、差异检查和复杂条件分析；任务会逐份检索候选文件。",
+    cost: "本次 3 次",
+    note: "预计耗时较长；知识库正文不足时会明确说明证据边界。",
+    placeholder: "输入需要跨文件研究、完整性核验或复杂比较的问题",
+  },
 };
 
 const viewMeta = {
@@ -73,6 +92,29 @@ function formatDate(value) {
 function displayCount(value) {
   const count = Number(value);
   return Number.isFinite(count) ? String(Math.max(0, Math.trunc(count))) : "0";
+}
+
+function setQAMode(mode, persist = true) {
+  const normalized = mode === "deep" ? "deep" : "basic";
+  state.qaMode = normalized;
+  const config = qaModes[normalized];
+  $$("#qaModeControl .segment").forEach((button) => {
+    const active = button.dataset.mode === normalized;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+  });
+  $("#modeTitle").textContent = config.title;
+  $("#modeDescription").textContent = config.description;
+  $("#modeCost").textContent = config.cost;
+  $("#composerNote").textContent = config.note;
+  $("#questionInput").placeholder = config.placeholder;
+  if (persist) {
+    try {
+      window.localStorage.setItem("geowiki.qaMode", normalized);
+    } catch {
+      // Mode selection still works when storage is unavailable.
+    }
+  }
 }
 
 function showToast(message, type = "success") {
@@ -180,6 +222,7 @@ async function showApp(user) {
   const requestedView = pathViews[window.location.pathname] || "chat";
   navigate(requestedView === "admin" && user.role !== "admin" ? "chat" : requestedView, false);
   await Promise.allSettled([loadAccountSummary(), loadConversations()]);
+  void resumeStoredResearchTask();
   refreshIcons();
 }
 
@@ -420,6 +463,47 @@ function appendAssistantLoading() {
   return node;
 }
 
+function appendResearchProgress() {
+  const node = document.createElement("article");
+  node.className = "message assistant-message research-message";
+  node.innerHTML = `
+    <div class="assistant-avatar">G</div>
+    <div class="assistant-body">
+      <div class="research-progress-head"><strong>深度研究已进入队列</strong><span>0%</span></div>
+      <div class="research-progress-track" aria-label="深度研究进度"><span style="width:0%"></span></div>
+      <p class="research-progress-message">正在等待研究工作器。</p>
+      <div class="research-coverage"><span>已审查 0/0</span><span>证据覆盖 0</span></div>
+    </div>
+  `;
+  $("#messageList").appendChild(node);
+  return node;
+}
+
+function updateResearchProgress(node, task) {
+  const progress = task.progress || {};
+  const percent = Math.max(0, Math.min(100, Number(progress.percent) || 0));
+  $(".research-progress-head strong", node).textContent = researchStageLabel(task.status || progress.stage);
+  $(".research-progress-head span", node).textContent = `${percent}%`;
+  $(".research-progress-track span", node).style.width = `${percent}%`;
+  $(".research-progress-message", node).textContent = progress.message || "正在处理深度研究任务。";
+  const coverage = $(".research-coverage", node);
+  coverage.innerHTML = `<span>已审查 ${displayCount(progress.examined_documents)}/${displayCount(progress.total_documents)}</span><span>证据覆盖 ${displayCount(progress.evidence_documents)}</span>`;
+}
+
+function researchStageLabel(status) {
+  return {
+    queued: "深度研究已进入队列",
+    planning: "正在制定研究计划",
+    retrieving: "正在逐份检索候选文件",
+    analyzing: "正在提取事实并比较",
+    completed: "深度研究已完成",
+    partial: "深度研究已完成，覆盖不完整",
+    insufficient_evidence: "深度研究证据不足",
+    failed: "深度研究执行失败",
+    cancelled: "深度研究已取消",
+  }[status] || "深度研究处理中";
+}
+
 function renderMarkdown(value) {
   if (window.GeowikiMarkdown?.render) {
     return window.GeowikiMarkdown.render(value, { baseUrl: window.location.origin });
@@ -451,11 +535,15 @@ function renderEvidence(data) {
   const retrieval = data.retrieval || {};
   const stats = `全文 ${retrieval.full_text_hits || 0} · 向量 ${retrieval.vector_hits || 0} · 图谱 ${retrieval.graph_hits || 0} · 联网 ${retrieval.web_hits || 0}`;
   const limitations = data.limitations?.notes || [];
+  const coverage = data.coverage
+    ? `已审查 ${displayCount(data.coverage.examined_documents)}/${displayCount(data.coverage.total_documents)} 份 · 证据覆盖 ${displayCount(data.coverage.evidence_documents)} 份${data.coverage.knowledge_snapshot ? ` · 快照 ${escapeHtml(data.coverage.knowledge_snapshot)}` : ""}`
+    : "";
   return `
     <details class="evidence-details">
       <summary>引用来源与检索信息</summary>
       ${renderSources(data.sources || [])}
       <div class="retrieval-summary">${escapeHtml(stats)}</div>
+      ${coverage ? `<div class="retrieval-summary">${coverage}</div>` : ""}
       ${limitations.length ? `<div class="limitation-list">${limitations.map((item) => `<div>${escapeHtml(item)}</div>`).join("")}</div>` : ""}
     </details>
   `;
@@ -463,7 +551,8 @@ function renderEvidence(data) {
 
 function quotaLabel(quota) {
   if (!quota) return "";
-  const action = quota.consumed ? "本次使用 1 次" : "本次未使用次数";
+  const units = Number(quota.consumed_units ?? (quota.consumed ? 1 : 0));
+  const action = units > 0 ? `本次使用 ${displayCount(units)} 次` : "本次未使用次数";
   return `${action} · 今日剩余 ${displayCount(quota.remaining)} 次`;
 }
 
@@ -476,6 +565,7 @@ function appendAssistantMessage(data, existingNode = null) {
       <div class="answer-content">${renderMarkdown(data.answer || "未返回答案。")}</div>
       <div class="answer-meta">
         <span class="status-chip ${escapeHtml(data.status || "")}">${escapeHtml(statusLabel(data.status))}</span>
+        <span class="mode-chip">${data.mode === "deep" ? "深度模式" : "基本模式"}</span>
         ${data.quota ? `<span>${escapeHtml(quotaLabel(data.quota))}</span>` : ""}
         ${data.request_id ? `<span>请求 ${escapeHtml(data.request_id.slice(0, 12))}</span>` : ""}
       </div>
@@ -483,6 +573,7 @@ function appendAssistantMessage(data, existingNode = null) {
       <div class="message-actions" aria-label="回答反馈">
         <button class="message-action-button feedback-positive" type="button" title="满意" aria-label="满意"><i data-lucide="thumbs-up"></i></button>
         <button class="message-action-button feedback-negative" type="button" title="不满意" aria-label="不满意"><i data-lucide="thumbs-down"></i></button>
+        ${data.mode !== "deep" && data.mode_recommendation === "deep" && data.question ? '<button class="deep-upgrade-button" type="button"><i data-lucide="microscope"></i><span>转深度研究 · 追加 2 次</span></button>' : ""}
       </div>
       <form class="feedback-form hidden">
         <select aria-label="不满意原因">
@@ -503,6 +594,7 @@ function appendAssistantMessage(data, existingNode = null) {
   const positive = $(".feedback-positive", node);
   const negative = $(".feedback-negative", node);
   const form = $(".feedback-form", node);
+  const deepUpgrade = $(".deep-upgrade-button", node);
   positive.addEventListener("click", async () => {
     await submitFeedback(data, "satisfied", null, "");
     positive.classList.add("selected");
@@ -527,6 +619,18 @@ function appendAssistantMessage(data, existingNode = null) {
       setBusy(submit, false);
     }
   });
+  if (deepUpgrade) {
+    deepUpgrade.addEventListener("click", async () => {
+      if (!window.confirm("将按同一问题创建深度研究任务，并追加消耗 2 次配额。继续？")) return;
+      deepUpgrade.disabled = true;
+      const started = await startDeepResearch(data.question, {
+        sessionId: data.session_id || state.currentConversation,
+        sourceRequestId: data.request_id || null,
+        appendUser: false,
+      });
+      if (!started) deepUpgrade.disabled = false;
+    });
+  }
   refreshIcons();
   return node;
 }
@@ -537,6 +641,10 @@ function statusLabel(status) {
     out_of_scope: "领域外拒答",
     queued_for_enrichment: "已进入补库队列",
     insufficient_evidence: "证据不足",
+    completed: "研究完成",
+    partial: "研究部分完成",
+    failed: "系统错误",
+    cancelled: "已取消",
   };
   return labels[status] || status || "已完成";
 }
@@ -574,31 +682,42 @@ function resizeComposer() {
 
 async function submitQuestion(event) {
   event.preventDefault();
-  if (state.asking) return;
+  if (state.asking || (state.qaMode === "deep" && state.activeResearchTask)) return;
   const input = $("#questionInput");
   const question = input.value.trim();
   if (!question) return;
+  if (state.qaMode === "deep" && !window.confirm("深度模式将消耗 3 次配额，并以异步任务逐份审查候选文件。继续？")) {
+    return;
+  }
   state.asking = true;
   $("#chatEmptyState").classList.add("hidden");
   appendUserMessage(question);
-  const pending = appendAssistantLoading();
+  const pending = state.qaMode === "deep" ? appendResearchProgress() : appendAssistantLoading();
   input.value = "";
   resizeComposer();
   $("#askButton").disabled = true;
   scrollChatToBottom();
   try {
-    const data = await apiRequest("/api/ask", {
-      method: "POST",
-      body: JSON.stringify({
-        question,
-        session_id: state.currentConversation,
-      }),
-    });
-    data.question = question;
-    state.currentConversation = data.session_id;
-    appendAssistantMessage(data, pending);
-    if (data.quota) updateQuota(data.quota);
-    await Promise.allSettled([loadConversations(), loadAccountSummary()]);
+    if (state.qaMode === "deep") {
+      await startDeepResearch(question, {
+        sessionId: state.currentConversation,
+        existingNode: pending,
+        appendUser: false,
+      });
+    } else {
+      const data = await apiRequest("/api/ask", {
+        method: "POST",
+        body: JSON.stringify({
+          question,
+          session_id: state.currentConversation,
+        }),
+      });
+      data.question = question;
+      state.currentConversation = data.session_id;
+      appendAssistantMessage(data, pending);
+      if (data.quota) updateQuota(data.quota);
+      await Promise.allSettled([loadConversations(), loadAccountSummary()]);
+    }
   } catch (error) {
     appendAssistantMessage({
       answer: `请求失败：${error.message}`,
@@ -614,6 +733,143 @@ async function submitQuestion(event) {
     $("#askButton").disabled = false;
     input.focus();
     scrollChatToBottom();
+  }
+}
+
+function wait(milliseconds) {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
+async function startDeepResearch(question, options = {}) {
+  if (state.activeResearchTask) {
+    showToast("当前已有深度研究任务在运行", "error");
+    return false;
+  }
+  const pending = options.existingNode || appendResearchProgress();
+  if (options.appendUser !== false) {
+    $("#chatEmptyState").classList.add("hidden");
+    appendUserMessage(question);
+  }
+  state.activeResearchTask = "creating";
+  scrollChatToBottom();
+  try {
+    const task = await apiRequest("/api/research/tasks", {
+      method: "POST",
+      body: JSON.stringify({
+        question,
+        session_id: options.sessionId || state.currentConversation,
+        source_request_id: options.sourceRequestId || null,
+      }),
+    });
+    state.activeResearchTask = task.task_id;
+    state.currentConversation = task.session_id;
+    storeActiveResearchTask(task, question);
+    updateResearchProgress(pending, task);
+    if (task.quota) updateQuota(task.quota);
+    await monitorResearchTask(task, question, pending);
+    await Promise.allSettled([loadConversations(), loadAccountSummary()]);
+    return true;
+  } catch (error) {
+    appendAssistantMessage({
+      answer: `深度研究创建或执行失败：${error.message}`,
+      status: "failed",
+      mode: "deep",
+      session_id: options.sessionId || state.currentConversation,
+      question,
+      sources: [],
+      limitations: { notes: [] },
+      quota: error.payload?.detail?.quota || null,
+    }, pending);
+    showToast(error.message, "error");
+    return false;
+  } finally {
+    state.activeResearchTask = null;
+    scrollChatToBottom();
+  }
+}
+
+function storeActiveResearchTask(task, question) {
+  try {
+    window.localStorage.setItem("geowiki.activeResearchTask", JSON.stringify({
+      taskId: task.task_id,
+      question,
+      sessionId: task.session_id,
+    }));
+  } catch {
+    // The server task remains persistent even when browser storage is unavailable.
+  }
+}
+
+function clearStoredResearchTask(taskId) {
+  try {
+    const raw = window.localStorage.getItem("geowiki.activeResearchTask");
+    const stored = raw ? JSON.parse(raw) : null;
+    if (!taskId || stored?.taskId === taskId) window.localStorage.removeItem("geowiki.activeResearchTask");
+  } catch {
+    // Ignore unavailable or malformed browser storage.
+  }
+}
+
+async function monitorResearchTask(initialTask, question, pending) {
+  let current = initialTask;
+  const terminal = new Set(["completed", "partial", "insufficient_evidence", "failed", "cancelled"]);
+  while (!terminal.has(current.status)) {
+    await wait(1200);
+    current = await apiRequest(`/api/research/tasks/${encodeURIComponent(initialTask.task_id)}`);
+    updateResearchProgress(pending, current);
+    if (current.quota) updateQuota(current.quota);
+    scrollChatToBottom(false);
+  }
+
+  clearStoredResearchTask(initialTask.task_id);
+  if (current.result_available) {
+    const result = await apiRequest(`/api/research/tasks/${encodeURIComponent(initialTask.task_id)}/result`);
+    result.question = question;
+    result.mode = "deep";
+    appendAssistantMessage(result, pending);
+    if (result.quota) updateQuota(result.quota);
+    return;
+  }
+  appendAssistantMessage({
+    answer: current.status === "cancelled"
+      ? "深度研究任务已在排队阶段取消，本次预留次数已退回。"
+      : "深度研究任务执行失败，本次预留次数已退回。",
+    status: current.status,
+    mode: "deep",
+    session_id: current.session_id,
+    request_id: current.request_id,
+    question,
+    sources: [],
+    limitations: { notes: [current.progress?.message || "任务未形成可用结果。"] },
+    quota: current.quota || null,
+  }, pending);
+}
+
+async function resumeStoredResearchTask() {
+  if (state.activeResearchTask || !state.user) return;
+  let stored = null;
+  try {
+    const raw = window.localStorage.getItem("geowiki.activeResearchTask");
+    stored = raw ? JSON.parse(raw) : null;
+  } catch {
+    return;
+  }
+  if (!stored?.taskId || !stored?.question) return;
+  try {
+    const task = await apiRequest(`/api/research/tasks/${encodeURIComponent(stored.taskId)}`);
+    state.activeResearchTask = task.task_id;
+    state.currentConversation = task.session_id || stored.sessionId || null;
+    navigate("chat");
+    $("#chatEmptyState").classList.add("hidden");
+    if (!$("#messageList").children.length) appendUserMessage(stored.question);
+    const pending = appendResearchProgress();
+    updateResearchProgress(pending, task);
+    await monitorResearchTask(task, stored.question, pending);
+    await Promise.allSettled([loadConversations(), loadAccountSummary()]);
+  } catch (error) {
+    if (error.status === 404 || error.status === 403) clearStoredResearchTask(stored.taskId);
+  } finally {
+    state.activeResearchTask = null;
   }
 }
 
@@ -1239,6 +1495,7 @@ function bindEvents() {
   $("#registerForm").addEventListener("submit", handleRegister);
   $("#sendEmailCodeButton").addEventListener("click", sendEmailCode);
   $("#askForm").addEventListener("submit", submitQuestion);
+  $$("#qaModeControl .segment").forEach((button) => button.addEventListener("click", () => setQAMode(button.dataset.mode)));
   $("#questionInput").addEventListener("input", resizeComposer);
   $("#questionInput").addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
@@ -1252,6 +1509,7 @@ function bindEvents() {
   $("#quotaButton").addEventListener("click", () => navigate("usage"));
   $$(".nav-item").forEach((button) => button.addEventListener("click", () => navigate(button.dataset.view)));
   $$(".suggestion").forEach((button) => button.addEventListener("click", () => {
+    if (button.dataset.mode) setQAMode(button.dataset.mode);
     $("#questionInput").value = button.dataset.question;
     resizeComposer();
     $("#askForm").requestSubmit();
@@ -1308,6 +1566,11 @@ function bindEvents() {
 
 async function initialize() {
   bindEvents();
+  try {
+    setQAMode(window.localStorage.getItem("geowiki.qaMode") || "basic", false);
+  } catch {
+    setQAMode("basic", false);
+  }
   updateQuickstart("curl");
   refreshIcons();
   try {

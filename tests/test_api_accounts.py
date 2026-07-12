@@ -316,6 +316,66 @@ class ApiAccountTests(unittest.TestCase):
             {"authenticated": False, "user": None, "registration_enabled": True},
         )
 
+    def test_deep_research_reserves_three_units_and_queued_cancel_refunds(self) -> None:
+        user = self.register(self.client, "deep-task@example.com")
+        self.store.set_daily_limit(
+            user["user_id"],
+            5,
+            "deep task test",
+            self.admin["user_id"],
+            "Asia/Shanghai",
+        )
+        with patch("mining_qa.api.research_runner.schedule") as schedule:
+            created = self.client.post(
+                "/api/research/tasks",
+                json={"question": "不同矿种规范的矿体外推规定有哪些差异？"},
+            )
+        self.assertEqual(created.status_code, 202, created.text)
+        task = created.json()
+        self.assertEqual(task["quota_cost"], 3)
+        self.assertEqual(task["reserved_quota_units"], 3)
+        self.assertEqual(task["quota"]["reserved"], 3)
+        self.assertEqual(task["quota"]["remaining"], 2)
+        schedule.assert_called_once_with(task["task_id"])
+
+        cancelled = self.client.post(f"/api/research/tasks/{task['task_id']}/cancel")
+        self.assertEqual(cancelled.status_code, 200, cancelled.text)
+        self.assertEqual(cancelled.json()["status"], "cancelled")
+        self.assertEqual(cancelled.json()["quota"]["reserved"], 0)
+        self.assertEqual(cancelled.json()["quota"]["remaining"], 5)
+
+    def test_basic_answer_to_deep_research_only_reserves_two_more_units(self) -> None:
+        user = self.register(self.client, "deep-upgrade@example.com")
+        self.store.set_daily_limit(
+            user["user_id"],
+            5,
+            "deep upgrade test",
+            self.admin["user_id"],
+            "Asia/Shanghai",
+        )
+        question = "矿体外推所依据的工程间距在不同标准中是否一致？"
+        with patch("mining_qa.api.MiningQAAgent", FakeAnsweredAgent):
+            basic = self.client.post("/api/ask", json={"question": question})
+        self.assertEqual(basic.status_code, 200, basic.text)
+
+        with patch("mining_qa.api.research_runner.schedule"):
+            deep = self.client.post(
+                "/api/research/tasks",
+                json={
+                    "question": question,
+                    "session_id": basic.json()["session_id"],
+                    "source_request_id": basic.json()["request_id"],
+                },
+            )
+        self.assertEqual(deep.status_code, 202, deep.text)
+        payload = deep.json()
+        self.assertEqual(payload["quota_cost"], 3)
+        self.assertEqual(payload["reserved_quota_units"], 2)
+        self.assertEqual(payload["quota"]["used"], 1)
+        self.assertEqual(payload["quota"]["reserved"], 2)
+        self.assertEqual(payload["quota"]["remaining"], 2)
+        self.client.post(f"/api/research/tasks/{payload['task_id']}/cancel")
+
 
 if __name__ == "__main__":
     unittest.main()

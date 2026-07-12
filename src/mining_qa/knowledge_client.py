@@ -35,6 +35,8 @@ class KnowledgeClient:
         plan: QueryPlan | None = None,
         *,
         retrieval_round: int = 1,
+        top_k: int | None = None,
+        allow_web_supplement: bool = True,
     ) -> KnowledgeSearchResponse:
         if not self.enabled:
             return KnowledgeSearchResponse(
@@ -51,12 +53,16 @@ class KnowledgeClient:
             "filters": filters,
             "retrieval_plan": effective_plan.to_payload(),
             "options": {
-                "top_k": 20
-                if effective_plan.search_mode in {"comparison", "exhaustive"}
-                or effective_plan.exhaustive_search
-                else 10,
+                "top_k": top_k
+                if top_k is not None
+                else (
+                    20
+                    if effective_plan.search_mode in {"comparison", "exhaustive"}
+                    or effective_plan.exhaustive_search
+                    else 10
+                ),
                 "include_full_text": False,
-                "allow_web_supplement": True,
+                "allow_web_supplement": allow_web_supplement,
                 "retrieval_round": retrieval_round,
             },
         }
@@ -73,6 +79,21 @@ class KnowledgeClient:
         response = await self._http_client().get(url, params=params)
         response.raise_for_status()
         return StandardsResponse.model_validate(response.json())
+
+    async def research_corpus(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not self.enabled:
+            return {
+                "items": [],
+                "total": 0,
+                "returned": 0,
+                "truncated": False,
+                "knowledge_snapshot": None,
+            }
+        url = self.settings.knowledge_base_url.rstrip("/") + "/knowledge/research/corpus"
+        response = await self._http_client().post(url, json=payload)
+        response.raise_for_status()
+        data = response.json()
+        return data if isinstance(data, dict) else {}
 
     async def create_candidates(self, question: str, sources: list[dict[str, Any]]) -> int:
         if not self.enabled or not sources:

@@ -1,8 +1,17 @@
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
 from .config import Settings
+
+
+@dataclass(frozen=True)
+class CompletionResult:
+    content: str
+    finish_reason: str | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
 
 
 class LLMClient:
@@ -31,14 +40,29 @@ class LLMClient:
         messages: list[dict[str, str]],
         *,
         max_tokens: int | None = None,
+        temperature: float | None = None,
     ) -> str:
+        result = await self.complete_detailed(
+            messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        return result.content
+
+    async def complete_detailed(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+    ) -> CompletionResult:
         if not self.enabled:
-            return "模型 API Key 未配置，当前只能返回检索证据和限制说明。"
+            return CompletionResult("模型 API Key 未配置，当前只能返回检索证据和限制说明。")
 
         payload: dict[str, Any] = {
             "model": self.settings.openai_model,
             "messages": messages,
-            "temperature": self.settings.answer_temperature,
+            "temperature": self.settings.answer_temperature if temperature is None else temperature,
         }
         if max_tokens and max_tokens > 0:
             payload["max_tokens"] = int(max_tokens)
@@ -53,8 +77,14 @@ class LLMClient:
         )
         response.raise_for_status()
         data = response.json()
-
-        return data["choices"][0]["message"]["content"].strip()
+        choice = data["choices"][0]
+        usage = data.get("usage") or {}
+        return CompletionResult(
+            content=choice["message"]["content"].strip(),
+            finish_reason=choice.get("finish_reason"),
+            prompt_tokens=usage.get("prompt_tokens"),
+            completion_tokens=usage.get("completion_tokens"),
+        )
 
     async def complete_json(
         self,

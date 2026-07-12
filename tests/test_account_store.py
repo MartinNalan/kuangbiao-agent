@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from mining_qa.account_store import (
+    ActiveResearchTaskError,
     AccountStore,
     DailyQuotaExceededError,
     EmailCodeCooldownError,
@@ -284,6 +285,113 @@ class AccountStoreTests(unittest.TestCase):
         self.assertEqual(quota["effective_limit"], 27)
         summary = self.store.account_summary(self.user["user_id"], "Asia/Shanghai")
         self.assertEqual(len(summary["adjustments"]), 2)
+
+    def test_deep_research_reserves_and_consumes_three_quota_units(self) -> None:
+        conversation_id = self.store.ensure_conversation(self.user["user_id"], None, "跨标准比较")
+        reserved = self.store.reserve_qa_quota(
+            self.user["user_id"],
+            "req_deep_units",
+            "api",
+            None,
+            conversation_id,
+            5,
+            "Asia/Shanghai",
+            quota_units=3,
+            request_mode="deep",
+        )
+        self.assertEqual(reserved["reserved"], 3)
+        self.assertEqual(reserved["remaining"], 7)
+
+        settled = self.store.settle_qa_quota(
+            "req_deep_units",
+            "answered",
+            100,
+            "Asia/Shanghai",
+        )
+        self.assertTrue(settled["consumed"])
+        self.assertEqual(settled["consumed_units"], 3)
+        self.assertEqual(settled["used"], 3)
+        self.assertEqual(settled["remaining"], 7)
+
+    def test_basic_answer_upgrade_reserves_only_two_additional_units(self) -> None:
+        conversation_id = self.store.ensure_conversation(self.user["user_id"], None, "矿体外推差异")
+        self.store.reserve_qa_quota(
+            self.user["user_id"],
+            "req_basic_upgrade",
+            "web",
+            None,
+            conversation_id,
+            6,
+            "Asia/Shanghai",
+        )
+        self.store.settle_qa_quota("req_basic_upgrade", "answered", 30, "Asia/Shanghai")
+        self.store.save_exchange(
+            self.user["user_id"],
+            conversation_id,
+            "req_basic_upgrade",
+            "矿体外推差异",
+            "基本答案",
+            {"mode": "basic"},
+        )
+
+        self.assertEqual(
+            self.store.research_upgrade_quota_cost(
+                self.user["user_id"],
+                "req_basic_upgrade",
+                conversation_id,
+                "矿体外推差异",
+            ),
+            2,
+        )
+        self.assertEqual(
+            self.store.research_upgrade_quota_cost(
+                self.user["user_id"],
+                "req_basic_upgrade",
+                conversation_id,
+                "另一个问题",
+            ),
+            3,
+        )
+
+    def test_only_one_active_research_task_is_allowed_per_user(self) -> None:
+        conversation_id = self.store.ensure_conversation(self.user["user_id"], None, "研究任务")
+        for request_id in ("req_research_one", "req_research_two"):
+            self.store.reserve_qa_quota(
+                self.user["user_id"],
+                request_id,
+                "api",
+                None,
+                conversation_id,
+                4,
+                "Asia/Shanghai",
+                quota_units=3,
+                request_mode="deep",
+            )
+        self.store.create_research_task(
+            task_id="research_one",
+            request_id="req_research_one",
+            user_id=self.user["user_id"],
+            api_key_id=None,
+            conversation_id=conversation_id,
+            channel="api",
+            question="研究任务一",
+            retrieval_question="研究任务一",
+            filters={},
+            reserved_quota_units=3,
+        )
+        with self.assertRaises(ActiveResearchTaskError):
+            self.store.create_research_task(
+                task_id="research_two",
+                request_id="req_research_two",
+                user_id=self.user["user_id"],
+                api_key_id=None,
+                conversation_id=conversation_id,
+                channel="api",
+                question="研究任务二",
+                retrieval_question="研究任务二",
+                filters={},
+                reserved_quota_units=3,
+            )
 
 
 if __name__ == "__main__":

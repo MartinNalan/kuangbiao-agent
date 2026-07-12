@@ -4,9 +4,9 @@
 
 ## 当前阶段
 
-当前版本为 **v1.0.6**。已具备私有知识库问答、受控 Agentic RAG、邀请码与邮箱验证注册、登录会话、用户 API Key、每日次数配额、会话历史、标准目录、开发者控制台和管理员基础入口。
+当前版本为 **v2.0.0**。已具备私有知识库问答、受控 Agentic RAG、基本/深度双模式、持久化跨文档研究任务、邀请码与邮箱验证注册、登录会话、用户 API Key、每日次数配额、会话历史、标准目录、开发者控制台和管理员基础入口。
 
-v1.0 检索链路为：领域门控 -> 机械归一 -> 复杂问题 DeepSeek 规划 -> Schema/FTS/KG/ANN 混合检索 -> 证据审查 -> 最多一次补充检索 -> 受证据约束的回答。v1.0.1 增加受保护关系意图、模型软范围提示、证据槽位校验、表格引用展开和最终来源过滤。v1.0.2 加入分级召回预算、ANN 校验缓存、KG 小候选连接、向量回退上限和结构化 LLM 关闭思考等延迟优化。v1.0.3 将受治理领域词典接入最前置领域门控。v1.0.4 修复政策附件召回。v1.0.5 修复 API Key 吊销生命周期。v1.0.6 增加权限角色解析、受控 Multi-Query、阈值触发 MMR、批量 embedding 和 ANN 参数基准。
+基本模式检索链路为：领域门控 -> 机械归一/定义槽位 -> 复杂问题 DeepSeek 规划 -> Schema/FTS/KG/ANN 混合检索 -> 证据审查 -> 最多一次补充检索 -> 受证据约束的回答。深度模式使用独立异步流程：研究规划 -> Schema/目录候选枚举 -> 逐文件限定检索 -> AND 证据组校验 -> 分批结构化事实抽取 -> 对比矩阵与覆盖说明。
 
 ## 文档
 
@@ -18,6 +18,7 @@ v1.0 检索链路为：领域门控 -> 机械归一 -> 复杂问题 DeepSeek 规
 - `docs/KNOWLEDGE_BASE_REQUIREMENTS.md` - 知识库构建要求
 - `docs/LICENSING_AND_REPOSITORIES.md` - 双许可证与仓库策略
 - `docs/V1_RELEASE.md` - v1.0 架构、验收结果与私有数据边界
+- `docs/V2_RELEASE.md` - v2.0.0 双模式、定义问答、深度研究与配额升级说明
 - `docs/M10_RETRIEVAL_EVALUATION.md` - v1.0.6 查询改写、Multi-Query、MMR 与 ANN 评估结果
 
 ## 本地配置
@@ -30,6 +31,14 @@ v1.0 检索链路为：领域门控 -> 机械归一 -> 复杂问题 DeepSeek 规
 OPENAI_API_KEY=<your-model-api-key>
 OPENAI_BASE_URL=https://api.deepseek.com
 OPENAI_MODEL=deepseek-v4-flash
+DEFINITION_ANSWER_MAX_TOKENS=1600
+RESEARCH_PLANNER_MAX_TOKENS=1000
+RESEARCH_ANALYSIS_MAX_TOKENS=1800
+RESEARCH_ANALYSIS_BATCH_SIZE=4
+RESEARCH_ANSWER_MAX_TOKENS=2200
+RESEARCH_MAX_DOCUMENTS=60
+RESEARCH_DOCUMENT_CONCURRENCY=4
+RESEARCH_GLOBAL_CONCURRENCY=1
 KNOWLEDGE_BASE_URL=
 ENABLE_SYNC_WEB_SUPPLEMENT=false
 API_KEYS=
@@ -107,7 +116,7 @@ PYTHONPATH=src .venv/bin/python scripts/manage_accounts.py create-admin --accoun
 PYTHONPATH=src .venv/bin/python scripts/manage_accounts.py create-invite --label "第一轮内测" --admin-account admin
 ```
 
-管理员创建时会安全提示输入密码；邀请码明文只显示一次。注册用户默认每天可问 10 次，网页问答和用户 API Key 共用该配额。正常完成的回答、拒答和证据不足都使用 1 次，只有系统异常会退回本次预留次数。
+管理员创建时会安全提示输入密码；邀请码明文只显示一次。注册用户默认每天拥有 10 个配额单位，网页问答和用户 API Key 共用。基本模式消费 1 个单位；深度模式消费 3 个单位；从同一基本答案一键升级只追加 2 个单位。领域外拒答不消费，系统异常和排队阶段取消的深度任务退回预留单位。
 
 管理员可以修改长期日上限，或给指定用户增加当天次数：
 
@@ -136,6 +145,17 @@ curl -X POST http://127.0.0.1:8000/api/ask \
   -H 'X-API-Key: kb_live_xxx' \
   -d '{"question":"哪个规范规定了铁矿的推荐工程间距？"}'
 ```
+
+创建深度研究任务：
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/research/tasks \
+  -H 'Content-Type: application/json' \
+  -H 'X-API-Key: kb_live_xxx' \
+  -d '{"question":"不同矿种规范对矿体无限外推所依据的间距有哪些代表性差异？"}'
+```
+
+使用返回的 `task_id` 查询 `/api/research/tasks/{task_id}`；任务完成后读取 `/api/research/tasks/{task_id}/result`。
 
 默认要求登录或用户 API Key。用户登录网页后在“开发者”页面创建密钥，网页问答和该账号的全部 API Key 共用每日次数。调用日志写入本地 `data/api_calls.jsonl`，不会提交到 Git。
 

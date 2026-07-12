@@ -51,6 +51,23 @@ process.stdout.write(JSON.stringify({html: renderer.render(input, {baseUrl: 'htt
         self.assertIn("已吊销", script)
         self.assertIn("if (!revoked)", script)
 
+    def test_dual_mode_controls_and_deep_progress_are_present(self) -> None:
+        html = (PROJECT_ROOT / "web" / "index.html").read_text(encoding="utf-8")
+        script = (PROJECT_ROOT / "web" / "static" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="qaModeControl"', html)
+        self.assertIn("基本模式 · 快速查证", html)
+        self.assertIn("深度模式 · 综合研究", script)
+        self.assertIn('apiRequest("/api/research/tasks"', script)
+        self.assertIn("updateResearchProgress", script)
+        self.assertIn("转深度研究 · 追加 2 次", script)
+
+    def test_quota_label_uses_backend_consumed_units(self) -> None:
+        script = (PROJECT_ROOT / "web" / "static" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("quota.consumed_units", script)
+        self.assertIn("本次使用 ${displayCount(units)} 次", script)
+
 
 if __name__ == "__main__":
     unittest.main()

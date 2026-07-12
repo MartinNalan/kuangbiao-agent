@@ -176,7 +176,7 @@
               <p>请选择一个问题，或直接输入需要核验的标准条款。</p>
               <div class="suggestion-grid">
                 <button class="suggestion" type="button" data-question="金矿勘查Ⅰ类型的推荐工程间距是多少？"><span>工程间距</span><strong>金矿Ⅰ类型如何布置工程？</strong><i data-lucide="arrow-up-right"></i></button>
-                <button class="suggestion" type="button" data-question="矿体有限外推所依据的距离，在不同标准中有哪些具体差异？"><span>条款比较</span><strong>不同规范的矿体外推原则</strong><i data-lucide="arrow-up-right"></i></button>
+                <button class="suggestion" type="button" data-mode="deep" data-question="矿体有限外推所依据的距离，在不同标准中有哪些具体差异？"><span>深度研究</span><strong>不同规范的矿体外推原则</strong><i data-lucide="arrow-up-right"></i></button>
                 <button class="suggestion" type="button" data-question="自然资源部颁发采矿许可证的矿山，储量评审备案由哪个部门负责？"><span>政策职责</span><strong>储量评审备案权限</strong><i data-lucide="arrow-up-right"></i></button>
               </div>
             </div>
@@ -184,6 +184,17 @@
           </div>
 
           <div class="composer-area">
+            <div class="mode-toolbar">
+              <div id="qaModeControl" class="segmented-control mode-control" role="tablist" aria-label="问答模式">
+                <button id="basicModeButton" class="segment active" type="button" role="tab" aria-selected="true" data-mode="basic">基本模式</button>
+                <button id="deepModeButton" class="segment" type="button" role="tab" aria-selected="false" data-mode="deep">深度模式</button>
+              </div>
+              <div class="mode-description">
+                <strong id="modeTitle">基本模式 · 快速查证</strong>
+                <span id="modeDescription">查询明确条款、定义、数值、材料、办理依据和官方来源。</span>
+              </div>
+              <span id="modeCost" class="mode-cost">本次 1 次</span>
+            </div>
             <form id="askForm" class="composer">
               <textarea id="questionInput" rows="1" maxlength="4000" placeholder="输入矿产资源、地质勘查、标准条款或政策问题" required></textarea>
               <div class="composer-footer">
@@ -191,7 +202,7 @@
                 <button id="askButton" class="send-button" type="submit" title="发送问题" aria-label="发送问题"><i data-lucide="arrow-up"></i></button>
               </div>
             </form>
-            <p class="composer-note">回答仅引用必要条款片段；正式业务决策请核验官方原文。</p>
+            <p id="composerNote" class="composer-note">回答仅引用必要条款片段；正式业务决策请核验官方原文。</p>
           </div>
         </section>
 
@@ -249,6 +260,8 @@
             <div class="section-heading"><div><h2>接口说明</h2><p>公开接口不会暴露知识库结构或全文资产。</p></div></div>
             <div class="endpoint-list">
               <div class="endpoint-row"><span class="method post">POST</span><code>/api/ask</code><p>提交专业问题，返回答案、引用、检索摘要与配额信息。</p></div>
+              <div class="endpoint-row"><span class="method post">POST</span><code>/api/research/tasks</code><p>创建深度研究任务；默认消耗 3 次，并通过任务接口轮询进度和结果。</p></div>
+              <div class="endpoint-row"><span class="method get">GET</span><code>/api/research/tasks/{task_id}</code><p>查询深度任务阶段、进度和证据覆盖。</p></div>
               <div class="endpoint-row"><span class="method get">GET</span><code>/api/standards</code><p>查询知识库内的标准目录。</p></div>
               <div class="endpoint-row"><span class="method post">POST</span><code>/api/feedback</code><p>提交满意度和问题类型反馈。</p></div>
               <div class="endpoint-row"><span class="method get">GET</span><code>/api/usage</code><p>查询账号当日配额和累计调用量。</p></div>
@@ -257,7 +270,7 @@
         </section>
 
         <section id="usageView" class="workspace-view content-view">
-          <div class="view-heading"><div><p class="eyebrow">USAGE</p><h1>配额与用量</h1><p>网页问答与 API 调用共用账号每日配额。</p></div></div>
+          <div class="view-heading"><div><p class="eyebrow">USAGE</p><h1>配额与用量</h1><p>网页问答与 API 调用共用账号每日配额；基本模式 1 次，深度模式 3 次。</p></div></div>
           <div class="metric-strip">
             <div><span>今日剩余</span><strong id="usageRemaining">--</strong><small>当天未使用的问答次数</small></div>
             <div><span>今日已用</span><strong id="usageUsed">--</strong><small>所有正常完成的问答</small></div>

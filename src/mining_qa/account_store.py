@@ -62,6 +62,12 @@ class PermissionDeniedError(AccountStoreError):
     pass
 
 
+class ActiveResearchTaskError(AccountStoreError):
+    def __init__(self, task_id: str | None = None):
+        super().__init__("an active research task already exists")
+        self.task_id = task_id
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
@@ -286,10 +292,45 @@ class AccountStore:
                     status TEXT NOT NULL,
                     quota_date TEXT,
                     quota_consumed INTEGER NOT NULL DEFAULT 0,
+                    quota_units INTEGER NOT NULL DEFAULT 1,
+                    quota_consumed_units INTEGER NOT NULL DEFAULT 0,
+                    request_mode TEXT NOT NULL DEFAULT 'basic',
+                    parent_request_id TEXT,
                     question_chars INTEGER NOT NULL DEFAULT 0,
                     answer_chars INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     finished_at TEXT,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+                    FOREIGN KEY (api_key_id) REFERENCES user_api_keys(api_key_id),
+                    FOREIGN KEY (conversation_id) REFERENCES conversations(conversation_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS research_tasks (
+                    task_id TEXT PRIMARY KEY,
+                    request_id TEXT NOT NULL UNIQUE,
+                    user_id TEXT NOT NULL,
+                    api_key_id TEXT,
+                    conversation_id TEXT NOT NULL,
+                    channel TEXT NOT NULL,
+                    question TEXT NOT NULL,
+                    retrieval_question TEXT NOT NULL,
+                    filters_json TEXT NOT NULL DEFAULT '{}',
+                    status TEXT NOT NULL,
+                    stage TEXT NOT NULL,
+                    progress_percent INTEGER NOT NULL DEFAULT 0,
+                    status_message TEXT NOT NULL DEFAULT '',
+                    total_documents INTEGER NOT NULL DEFAULT 0,
+                    examined_documents INTEGER NOT NULL DEFAULT 0,
+                    evidence_documents INTEGER NOT NULL DEFAULT 0,
+                    quota_cost INTEGER NOT NULL DEFAULT 3,
+                    reserved_quota_units INTEGER NOT NULL DEFAULT 3,
+                    plan_json TEXT NOT NULL DEFAULT '{}',
+                    result_json TEXT,
+                    error_code TEXT,
+                    created_at TEXT NOT NULL,
+                    started_at TEXT,
+                    finished_at TEXT,
+                    FOREIGN KEY (request_id) REFERENCES qa_requests(request_id) ON DELETE CASCADE,
                     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
                     FOREIGN KEY (api_key_id) REFERENCES user_api_keys(api_key_id),
                     FOREIGN KEY (conversation_id) REFERENCES conversations(conversation_id)
@@ -324,6 +365,11 @@ class AccountStore:
                 CREATE INDEX IF NOT EXISTS idx_conversations_user_updated ON conversations(user_id, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_messages_conversation_created ON messages(conversation_id, created_at);
                 CREATE INDEX IF NOT EXISTS idx_requests_user_created ON qa_requests(user_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_research_user_created
+                    ON research_tasks(user_id, created_at DESC);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_research_one_active_user
+                    ON research_tasks(user_id)
+                    WHERE status IN ('queued', 'planning', 'retrieving', 'analyzing');
                 CREATE INDEX IF NOT EXISTS idx_feedback_status_created
                     ON answer_feedback(status, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_feedback_request ON answer_feedback(request_id);
@@ -335,6 +381,28 @@ class AccountStore:
             self._ensure_column(connection, "users", "email_verified_at", "TEXT")
             self._ensure_column(connection, "qa_requests", "quota_date", "TEXT")
             self._ensure_column(connection, "qa_requests", "quota_consumed", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(connection, "qa_requests", "quota_units", "INTEGER NOT NULL DEFAULT 1")
+            self._ensure_column(
+                connection,
+                "qa_requests",
+                "quota_consumed_units",
+                "INTEGER NOT NULL DEFAULT 0",
+            )
+            self._ensure_column(connection, "qa_requests", "request_mode", "TEXT NOT NULL DEFAULT 'basic'")
+            self._ensure_column(connection, "qa_requests", "parent_request_id", "TEXT")
+            self._ensure_column(
+                connection,
+                "research_tasks",
+                "reserved_quota_units",
+                "INTEGER NOT NULL DEFAULT 3",
+            )
+            connection.execute(
+                """
+                UPDATE qa_requests
+                SET quota_consumed_units = quota_consumed
+                WHERE quota_consumed != 0 AND quota_consumed_units = 0
+                """
+            )
             connection.commit()
 
     def _ensure_column(self, connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
@@ -1076,6 +1144,279 @@ class AccountStore:
         if cursor.rowcount == 0:
             raise ResourceNotFoundError(conversation_id)
 
+    def research_upgrade_quota_cost(
+        self,
+        user_id: str,
+        source_request_id: str | None,
+        conversation_id: str,
+        question: str,
+    ) -> int:
+        if not source_request_id:
+            return 3
+        normalized_question = " ".join(question.split())
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT q.request_id, q.request_mode, q.quota_consumed_units,
+                       q.conversation_id, m.content AS question
+                FROM qa_requests q
+                LEFT JOIN messages m
+                  ON m.request_id = q.request_id AND m.role = 'user'
+                WHERE q.request_id = ? AND q.user_id = ?
+                ORDER BY m.created_at DESC, m.rowid DESC
+                LIMIT 1
+                """,
+                (source_request_id, user_id),
+            ).fetchone()
+        if not row:
+            return 3
+        stored_question = " ".join(str(row["question"] or "").split())
+        if (
+            row["request_mode"] == "basic"
+            and int(row["quota_consumed_units"] or 0) == 1
+            and row["conversation_id"] == conversation_id
+            and stored_question == normalized_question
+        ):
+            return 2
+        return 3
+
+    def create_research_task(
+        self,
+        *,
+        task_id: str,
+        request_id: str,
+        user_id: str,
+        api_key_id: str | None,
+        conversation_id: str,
+        channel: str,
+        question: str,
+        retrieval_question: str,
+        filters: dict[str, Any],
+        reserved_quota_units: int,
+    ) -> dict[str, Any]:
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            active = connection.execute(
+                """
+                SELECT task_id FROM research_tasks
+                WHERE user_id = ? AND status IN ('queued', 'planning', 'retrieving', 'analyzing')
+                LIMIT 1
+                """,
+                (user_id,),
+            ).fetchone()
+            if active:
+                connection.commit()
+                raise ActiveResearchTaskError(active["task_id"])
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO research_tasks(
+                        task_id, request_id, user_id, api_key_id, conversation_id, channel,
+                        question, retrieval_question, filters_json, status, stage,
+                        progress_percent, status_message, quota_cost, reserved_quota_units, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'queued', 0, ?, 3, ?, ?)
+                    """,
+                    (
+                        task_id,
+                        request_id,
+                        user_id,
+                        api_key_id,
+                        conversation_id,
+                        channel,
+                        question,
+                        retrieval_question,
+                        json.dumps(filters, ensure_ascii=False),
+                        "任务已进入队列。",
+                        reserved_quota_units,
+                        now,
+                    ),
+                )
+            except sqlite3.IntegrityError as error:
+                active = connection.execute(
+                    """
+                    SELECT task_id FROM research_tasks
+                    WHERE user_id = ? AND status IN ('queued', 'planning', 'retrieving', 'analyzing')
+                    LIMIT 1
+                    """,
+                    (user_id,),
+                ).fetchone()
+                connection.rollback()
+                raise ActiveResearchTaskError(active["task_id"] if active else None) from error
+            connection.commit()
+        return self.get_research_task(user_id, task_id)
+
+    def get_research_task(self, user_id: str, task_id: str) -> dict[str, Any]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM research_tasks WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+        if not row:
+            raise ResourceNotFoundError(task_id)
+        if row["user_id"] != user_id:
+            raise PermissionDeniedError(task_id)
+        return self._research_task_payload(row)
+
+    def get_research_task_internal(self, task_id: str) -> dict[str, Any]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM research_tasks WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+        if not row:
+            raise ResourceNotFoundError(task_id)
+        return self._research_task_payload(row)
+
+    def update_research_task(
+        self,
+        task_id: str,
+        *,
+        status: str,
+        percent: int,
+        message: str,
+        total_documents: int | None = None,
+        examined_documents: int | None = None,
+        evidence_documents: int | None = None,
+        plan: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        now = utc_now()
+        fields = [
+            "status = ?",
+            "stage = ?",
+            "progress_percent = ?",
+            "status_message = ?",
+            "started_at = COALESCE(started_at, ?)",
+        ]
+        values: list[Any] = [status, status, max(0, min(100, percent)), message, now]
+        for column, value in (
+            ("total_documents", total_documents),
+            ("examined_documents", examined_documents),
+            ("evidence_documents", evidence_documents),
+        ):
+            if value is not None:
+                fields.append(f"{column} = ?")
+                values.append(max(0, int(value)))
+        if plan is not None:
+            fields.append("plan_json = ?")
+            values.append(json.dumps(plan, ensure_ascii=False))
+        values.append(task_id)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                f"UPDATE research_tasks SET {', '.join(fields)} WHERE task_id = ?",
+                values,
+            )
+            connection.commit()
+        if cursor.rowcount == 0:
+            raise ResourceNotFoundError(task_id)
+        return self.get_research_task_internal(task_id)
+
+    def complete_research_task(
+        self,
+        task_id: str,
+        status: str,
+        result: dict[str, Any] | None,
+        *,
+        error_code: str | None = None,
+    ) -> dict[str, Any]:
+        now = utc_now()
+        percent = 100 if status in {"completed", "partial", "insufficient_evidence"} else 0
+        message = {
+            "completed": "深度研究已完成。",
+            "partial": "深度研究已完成，但部分候选文件缺少直接证据或未完成覆盖。",
+            "insufficient_evidence": "深度研究未获得足够的直接条款证据。",
+            "failed": "深度研究因系统错误失败，预留次数已退回。",
+            "cancelled": "深度研究已取消。",
+        }.get(status, "深度研究任务已结束。")
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE research_tasks
+                SET status = ?, stage = ?, progress_percent = ?, result_json = ?,
+                    status_message = ?, error_code = ?, finished_at = ?
+                WHERE task_id = ?
+                """,
+                (
+                    status,
+                    status,
+                    percent,
+                    json.dumps(result, ensure_ascii=False) if result is not None else None,
+                    message,
+                    error_code,
+                    now,
+                    task_id,
+                ),
+            )
+            connection.commit()
+        if cursor.rowcount == 0:
+            raise ResourceNotFoundError(task_id)
+        return self.get_research_task_internal(task_id)
+
+    def cancel_queued_research_task(self, user_id: str, task_id: str) -> dict[str, Any]:
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM research_tasks WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            if not row:
+                connection.commit()
+                raise ResourceNotFoundError(task_id)
+            if row["user_id"] != user_id:
+                connection.commit()
+                raise PermissionDeniedError(task_id)
+            if row["status"] != "queued":
+                connection.commit()
+                raise PermissionDeniedError("only queued research tasks can be cancelled")
+            connection.execute(
+                """
+                UPDATE research_tasks
+                SET status = 'cancelled', stage = 'cancelled', status_message = ?,
+                    finished_at = ?
+                WHERE task_id = ?
+                """,
+                ("任务已在排队阶段取消。", now, task_id),
+            )
+            connection.commit()
+        return self.get_research_task(user_id, task_id)
+
+    def recover_research_tasks(self) -> list[str]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT task_id FROM research_tasks
+                WHERE status IN ('queued', 'planning', 'retrieving', 'analyzing')
+                ORDER BY created_at
+                """
+            ).fetchall()
+            task_ids = [str(row["task_id"]) for row in rows]
+            if task_ids:
+                placeholders = ",".join("?" for _ in task_ids)
+                connection.execute(
+                    f"""
+                    UPDATE research_tasks
+                    SET status = 'queued', stage = 'queued', progress_percent = 0,
+                        status_message = '服务重启后已恢复到任务队列。', started_at = NULL
+                    WHERE task_id IN ({placeholders})
+                    """,
+                    task_ids,
+                )
+            connection.commit()
+        return task_ids
+
+    @staticmethod
+    def _research_task_payload(row: sqlite3.Row) -> dict[str, Any]:
+        payload = dict(row)
+        for field in ("filters_json", "plan_json", "result_json"):
+            raw = payload.pop(field, None)
+            key = field.removesuffix("_json")
+            try:
+                payload[key] = json.loads(raw) if raw else (None if field == "result_json" else {})
+            except json.JSONDecodeError:
+                payload[key] = None if field == "result_json" else {}
+        return payload
+
     def reserve_qa_quota(
         self,
         user_id: str,
@@ -1085,7 +1426,11 @@ class AccountStore:
         conversation_id: str | None,
         question_chars: int,
         timezone_name: str,
+        quota_units: int = 1,
+        request_mode: str = "basic",
+        parent_request_id: str | None = None,
     ) -> dict[str, Any]:
+        quota_units = max(1, int(quota_units))
         now_dt = datetime.now(timezone.utc).replace(microsecond=0)
         current_date = usage_date(timezone_name, now_dt)
         stale_cutoff = (now_dt - timedelta(minutes=10)).isoformat()
@@ -1094,22 +1439,23 @@ class AccountStore:
             self._release_stale_reservations(connection, user_id, current_date, stale_cutoff, now_dt.isoformat())
             self._ensure_daily_usage(connection, user_id, current_date, now_dt.isoformat())
             snapshot = self._quota_snapshot(connection, user_id, current_date)
-            if snapshot["remaining"] <= 0:
+            if snapshot["remaining"] < quota_units:
                 connection.commit()
                 raise DailyQuotaExceededError(snapshot)
             connection.execute(
                 """
-                UPDATE daily_usage SET reserved_count = reserved_count + 1, updated_at = ?
+                UPDATE daily_usage SET reserved_count = reserved_count + ?, updated_at = ?
                 WHERE user_id = ? AND usage_date = ?
                 """,
-                (now_dt.isoformat(), user_id, current_date),
+                (quota_units, now_dt.isoformat(), user_id, current_date),
             )
             connection.execute(
                 """
                 INSERT INTO qa_requests(
                     request_id, user_id, api_key_id, conversation_id, channel, status,
-                    quota_date, quota_consumed, question_chars, created_at
-                ) VALUES (?, ?, ?, ?, ?, 'processing', ?, 0, ?, ?)
+                    quota_date, quota_consumed, quota_units, quota_consumed_units,
+                    request_mode, parent_request_id, question_chars, created_at
+                ) VALUES (?, ?, ?, ?, ?, 'processing', ?, 0, ?, 0, ?, ?, ?, ?)
                 """,
                 (
                     request_id,
@@ -1118,6 +1464,9 @@ class AccountStore:
                     conversation_id,
                     channel,
                     current_date,
+                    quota_units,
+                    request_mode,
+                    parent_request_id,
                     question_chars,
                     now_dt.isoformat(),
                 ),
@@ -1125,6 +1474,7 @@ class AccountStore:
             connection.commit()
         snapshot = self.quota_snapshot(user_id, timezone_name)
         snapshot["consumed"] = False
+        snapshot["consumed_units"] = 0
         return snapshot
 
     def settle_qa_quota(
@@ -1143,30 +1493,41 @@ class AccountStore:
             if request["status"] != "processing":
                 snapshot = self._quota_snapshot(connection, request["user_id"], request["quota_date"])
                 snapshot["consumed"] = bool(request["quota_consumed"])
+                snapshot["consumed_units"] = int(request["quota_consumed_units"] or 0)
                 connection.commit()
                 return snapshot
 
             consume = status not in {"system_error", "out_of_scope"}
+            reserved_units = max(1, int(request["quota_units"] or 1))
+            consumed_units = reserved_units if consume else 0
             self._ensure_daily_usage(connection, request["user_id"], request["quota_date"], now)
             connection.execute(
                 """
                 UPDATE daily_usage
-                SET reserved_count = MAX(0, reserved_count - 1),
+                SET reserved_count = MAX(0, reserved_count - ?),
                     used_count = used_count + ?, updated_at = ?
                 WHERE user_id = ? AND usage_date = ?
                 """,
-                (1 if consume else 0, now, request["user_id"], request["quota_date"]),
+                (
+                    reserved_units,
+                    consumed_units,
+                    now,
+                    request["user_id"],
+                    request["quota_date"],
+                ),
             )
             connection.execute(
                 """
                 UPDATE qa_requests
-                SET status = ?, quota_consumed = ?, answer_chars = ?, finished_at = ?
+                SET status = ?, quota_consumed = ?, quota_consumed_units = ?,
+                    answer_chars = ?, finished_at = ?
                 WHERE request_id = ?
                 """,
-                (status, 1 if consume else 0, answer_chars, now, request_id),
+                (status, 1 if consume else 0, consumed_units, answer_chars, now, request_id),
             )
             snapshot = self._quota_snapshot(connection, request["user_id"], request["quota_date"])
             snapshot["consumed"] = consume
+            snapshot["consumed_units"] = consumed_units
             connection.commit()
         return snapshot
 
@@ -1192,7 +1553,8 @@ class AccountStore:
             totals = connection.execute(
                 """
                 SELECT COUNT(*) AS total_calls,
-                       COALESCE(SUM(quota_consumed), 0) AS consumed_calls
+                       COALESCE(SUM(quota_consumed), 0) AS consumed_calls,
+                       COALESCE(SUM(quota_consumed_units), 0) AS consumed_units
                 FROM qa_requests WHERE user_id = ?
                 """,
                 (user_id,),
@@ -1211,6 +1573,7 @@ class AccountStore:
             "quota": quota,
             "total_calls": int(totals["total_calls"] or 0),
             "consumed_calls": int(totals["consumed_calls"] or 0),
+            "consumed_units": int(totals["consumed_units"] or 0),
             "adjustments": [dict(row) for row in adjustments],
         }
 
@@ -1399,18 +1762,25 @@ class AccountStore:
     ) -> None:
         stale = connection.execute(
             """
-            SELECT COUNT(*) AS total FROM qa_requests
-            WHERE user_id = ? AND quota_date = ? AND status = 'processing' AND created_at < ?
+            SELECT COUNT(*) AS total,
+                   COALESCE(SUM(quota_units), 0) AS reserved_units
+            FROM qa_requests
+            WHERE user_id = ? AND quota_date = ? AND status = 'processing'
+              AND request_mode != 'deep' AND created_at < ?
             """,
             (user_id, current_date, stale_cutoff),
         ).fetchone()
         stale_count = int(stale["total"] or 0)
         if not stale_count:
             return
+        stale_units = int(stale["reserved_units"] or stale_count)
         connection.execute(
             """
-            UPDATE qa_requests SET status = 'system_error', quota_consumed = 0, finished_at = ?
-            WHERE user_id = ? AND quota_date = ? AND status = 'processing' AND created_at < ?
+            UPDATE qa_requests
+            SET status = 'system_error', quota_consumed = 0,
+                quota_consumed_units = 0, finished_at = ?
+            WHERE user_id = ? AND quota_date = ? AND status = 'processing'
+              AND request_mode != 'deep' AND created_at < ?
             """,
             (now, user_id, current_date, stale_cutoff),
         )
@@ -1420,7 +1790,7 @@ class AccountStore:
             UPDATE daily_usage SET reserved_count = MAX(0, reserved_count - ?), updated_at = ?
             WHERE user_id = ? AND usage_date = ?
             """,
-            (stale_count, now, user_id, current_date),
+            (stale_units, now, user_id, current_date),
         )
 
     def _user_payload(self, row: sqlite3.Row) -> dict[str, Any]:

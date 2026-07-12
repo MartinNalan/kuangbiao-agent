@@ -16,6 +16,7 @@ from mining_qa.knowledge_store import (
     table_references,
 )
 from mining_qa.query_understanding import (
+    PROTECTED_QUERY_INTENTS,
     apply_semantic_plan,
     contextualize_follow_up,
     query_plan_from_payload,
@@ -261,6 +262,18 @@ class QueryUnderstandingTests(unittest.TestCase):
         self.assertEqual(plan.intent, "authority_responsibility")
         self.assertEqual(plan.license_issuer_level, "unknown")
         self.assertTrue(plan.authority_role_ambiguous)
+
+    def test_definition_questions_create_protected_term_slots(self) -> None:
+        compound = apply_semantic_plan(understand_query("资源储量的定义"), None)
+        exact = apply_semantic_plan(understand_query("什么是证实储量？"), None)
+
+        self.assertEqual(compound.intent, "definition_explanation")
+        self.assertEqual(compound.target_terms, ("资源储量",))
+        self.assertEqual(compound.definition_mode, "compound")
+        self.assertEqual(compound.definition_slots, ("资源量", "储量"))
+        self.assertIn("GB/T 17766-2020", compound.standard_numbers)
+        self.assertEqual(exact.definition_slots, ("证实储量",))
+        self.assertIn("definition_explanation", PROTECTED_QUERY_INTENTS)
 
 
 class TableExtractionTests(unittest.TestCase):
@@ -555,6 +568,49 @@ class PlannerFallbackTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastAnswerTests(unittest.TestCase):
+    def test_compound_definition_uses_direct_resource_and_reserve_clauses(self) -> None:
+        agent = object.__new__(MiningQAAgent)
+        plan = understand_query("资源储量的定义")
+        sources = [
+            Source(
+                title="固体矿产资源储量分类",
+                standard_no="GB/T 17766-2020",
+                chapter="2.7",
+                quote=(
+                    "2.7 资源量 mineral resources 经矿产资源勘查查明并经概略研究，"
+                    "预期可经济开采的固体矿产资源。"
+                ),
+                source_type="local_kb",
+                text_access="ocr_text",
+            ),
+            Source(
+                title="固体矿产资源储量分类",
+                standard_no="GB/T 17766-2020",
+                chapter="2.12",
+                quote=(
+                    "2.12 储量 mineral reserves 探明资源量和(或)控制资源量中可经济采出的部分。"
+                ),
+                source_type="local_kb",
+                text_access="ocr_text",
+            ),
+            Source(
+                title="固体矿产资源储量分类",
+                standard_no="GB/T 17766-2020",
+                chapter="2.14",
+                quote="2.14 证实储量 proved mineral reserves 基于探明资源量而估算的储量。",
+                source_type="local_kb",
+                text_access="ocr_text",
+            ),
+        ]
+
+        selected = [source for source in sources if agent._definition_term_from_source(source, plan)]
+        answer = agent._fast_answer("资源储量的定义", selected, plan) or ""
+
+        self.assertIn("2.7", answer)
+        self.assertIn("2.12", answer)
+        self.assertNotIn("2.14", answer)
+        self.assertIn("没有作为同名、独立术语", answer)
+
     def test_generic_mining_right_requirements_use_attachment_overview(self) -> None:
         agent = object.__new__(MiningQAAgent)
         sources = [

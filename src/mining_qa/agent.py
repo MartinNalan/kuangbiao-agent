@@ -1,5 +1,6 @@
 import asyncio
 import json
+import math
 import re
 from dataclasses import replace
 from time import perf_counter
@@ -36,6 +37,7 @@ DETERMINISTIC_FAST_INTENTS = {
     "exploration_type_factors",
     "basic_analysis_items",
     "projection_comparison",
+    "definition_explanation",
 }
 SYSTEM_PROMPT = """你是矿产资源标准知识问答 agent。
 
@@ -110,6 +112,7 @@ class MiningQAAgent:
         rerank_result: RerankResult | None = None
         reranker_ms = 0.0
         knowledge_ms = 0.0
+        generation_details: dict[str, object] = {"used": False}
         logical_rounds = 1
         multi_query_count = 0
         supplemental_error_count = 0
@@ -256,6 +259,12 @@ class MiningQAAgent:
                 limitations=limitations,
                 knowledge_gap_task=gap_task,
                 confidence="low",
+                mode_recommendation=("deep" if self._should_recommend_deep(plan, question) else None),
+                mode_recommendation_reason=(
+                    "该问题需要扩大候选范围并逐文件核验，建议使用深度模式。"
+                    if self._should_recommend_deep(plan, question)
+                    else None
+                ),
             )
             response.retrieval.total_ms = round((perf_counter() - started) * 1000, 3)
             self._write_trace(
@@ -263,19 +272,34 @@ class MiningQAAgent:
                 question,
                 plan,
                 response,
-                self._trace_details(planner_result, kb_results, rerank_result),
+                self._trace_details(planner_result, kb_results, rerank_result, generation_details),
             )
             return response
 
         synthesis_started = perf_counter()
         answer = self._fast_answer(question, sources, plan) if plan.intent in DETERMINISTIC_FAST_INTENTS else None
+        if answer is not None:
+            generation_details = {
+                "used": False,
+                "reason": (
+                    "deterministic_definition_template"
+                    if plan.intent == "definition_explanation"
+                    else "deterministic_answer_template"
+                ),
+            }
         if answer is None and rerank_result and rerank_result.sufficient and rerank_result.grounded_answer:
             answer = rerank_result.grounded_answer
         if answer is None and (not self.llm.enabled or bool(rerank_result and rerank_result.error)):
             answer = self._fast_answer(question, sources, plan)
         if answer is None:
             try:
-                answer = await self.llm.complete(
+                max_tokens = (
+                    self._definition_max_tokens(sources, plan)
+                    if plan.intent == "definition_explanation"
+                    else self.settings.answer_max_tokens
+                )
+                temperature = 0.0 if plan.intent == "definition_explanation" else None
+                completion = await self.llm.complete_detailed(
                     self._messages(
                         question,
                         sources,
@@ -283,11 +307,25 @@ class MiningQAAgent:
                         plan,
                         rerank_result.facts if rerank_result else (),
                     ),
-                    max_tokens=self.settings.answer_max_tokens,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
                 )
+                answer = completion.content
+                generation_details = {
+                    "used": True,
+                    "finish_reason": completion.finish_reason,
+                    "prompt_tokens": completion.prompt_tokens,
+                    "completion_tokens": completion.completion_tokens,
+                    "temperature": (
+                        temperature if temperature is not None else self.settings.answer_temperature
+                    ),
+                    "max_tokens": max_tokens,
+                    "truncated": completion.finish_reason == "length",
+                }
             except Exception:
                 answer = self._fast_answer(question, sources, plan) or self._evidence_summary_answer(sources)
                 limitations.notes.append("回答模型调用超时或不可用，已按审查通过的证据生成确定性降级答案。")
+                generation_details = {"used": False, "error": "answer_model_unavailable"}
         retrieval.synthesis_ms = round((perf_counter() - synthesis_started) * 1000, 3)
         answer = self._append_source_links(answer, sources)
         response = AskResponse(
@@ -300,6 +338,12 @@ class MiningQAAgent:
             confidence="high"
             if rerank_result and rerank_result.confidence >= 0.8
             else "medium" if sources else "low",
+            mode_recommendation=("deep" if self._should_recommend_deep(plan, question) else None),
+            mode_recommendation_reason=(
+                "该问题涉及跨文件完整性核验或差异比较，深度模式会枚举候选文件并逐份审查。"
+                if self._should_recommend_deep(plan, question)
+                else None
+            ),
         )
         response.retrieval.total_ms = round((perf_counter() - started) * 1000, 3)
         if ANSWER_CACHE_ENABLED and self._is_cacheable_question(question):
@@ -309,7 +353,7 @@ class MiningQAAgent:
             question,
             plan,
             response,
-            self._trace_details(planner_result, kb_results, rerank_result),
+            self._trace_details(planner_result, kb_results, rerank_result, generation_details),
         )
         return response
 
@@ -412,7 +456,13 @@ class MiningQAAgent:
                     break
         return supplemental[:limit]
 
-    def _trace_details(self, planner_result, kb_results: list, rerank_result: RerankResult | None) -> dict:
+    def _trace_details(
+        self,
+        planner_result,
+        kb_results: list,
+        rerank_result: RerankResult | None,
+        generation: dict[str, object] | None = None,
+    ) -> dict:
         return {
             "planner": {
                 "used": planner_result.used,
@@ -453,6 +503,7 @@ class MiningQAAgent:
             }
             if rerank_result
             else None,
+            "generation": generation or {"used": False},
         }
 
     def _write_trace(
@@ -493,6 +544,17 @@ class MiningQAAgent:
         plan: QueryPlan | None = None,
     ) -> tuple[bool, bool]:
         effective_plan = plan or understand_query(question)
+        if effective_plan.intent == "definition_explanation":
+            matched = {
+                term
+                for source in sources
+                for term in [self._definition_term_from_source(source, effective_plan)]
+                if term
+            }
+            found = bool(effective_plan.definition_slots) and set(
+                effective_plan.definition_slots
+            ).issubset(matched)
+            return found, found
         if effective_plan.intent == "standard_selection":
             found = bool(sources)
             return found, found
@@ -624,6 +686,27 @@ class MiningQAAgent:
         if not hits:
             return []
         effective_plan = plan or understand_query(question)
+        if effective_plan.intent == "definition_explanation" and effective_plan.definition_slots:
+            selected: list[dict] = []
+            for slot in effective_plan.definition_slots:
+                candidates = [
+                    hit
+                    for hit in hits
+                    if self._definition_term_from_text(self._hit_evidence_text(hit), effective_plan) == slot
+                ]
+                if candidates:
+                    selected.append(
+                        max(
+                            candidates,
+                            key=lambda hit: (
+                                bool(hit.get("clause_no")),
+                                float(hit.get("score") or 0.0),
+                                len(self._hit_evidence_text(hit)),
+                            ),
+                        )
+                    )
+            if selected:
+                return selected
         if effective_plan.intent == "engineering_distance_lookup" and effective_plan.target_exploration_type:
             required_labels = ("坑探-穿脉", "坑探-沿脉", "钻探-走向", "钻探-倾斜")
             for hit in hits:
@@ -1183,6 +1266,9 @@ class MiningQAAgent:
         plan: QueryPlan | None = None,
     ) -> str | None:
         effective_plan = plan or understand_query(question)
+        definition_answer = self._definition_answer(effective_plan, sources)
+        if definition_answer:
+            return definition_answer
         engineering_answer = self._engineering_distance_answer(effective_plan, sources)
         if engineering_answer:
             return engineering_answer
@@ -1571,6 +1657,102 @@ class MiningQAAgent:
             return "\n".join(lines)
 
         return None
+
+    @staticmethod
+    def _definition_term_from_text(text: str, plan: QueryPlan) -> str | None:
+        clean = re.sub(r"\s+", " ", text or "").strip()
+        for term in sorted(plan.definition_slots, key=len, reverse=True):
+            if re.search(
+                rf"(?:^|\s)\d+(?:\.\d+)+\s+{re.escape(term)}(?=\s|[:：]|$)",
+                clean,
+            ):
+                return term
+        return None
+
+    def _definition_term_from_source(self, source: Source, plan: QueryPlan) -> str | None:
+        return self._definition_term_from_text(source.quote or "", plan)
+
+    def _definition_answer(self, plan: QueryPlan, sources: list[Source]) -> str | None:
+        if plan.intent != "definition_explanation" or not plan.definition_slots:
+            return None
+        by_term: dict[str, Source] = {}
+        for source in sources:
+            term = self._definition_term_from_source(source, plan)
+            if term and term not in by_term:
+                by_term[term] = source
+        if not set(plan.definition_slots).issubset(by_term):
+            return None
+
+        lines: list[str] = []
+        if plan.definition_mode == "compound" and plan.target_terms:
+            target = "、".join(plan.target_terms)
+            lines.extend(
+                [
+                    f"**“{target}”在本次采用的现行分类标准中没有作为同名、独立术语给出定义。**",
+                    "",
+                    "应分别核验其组成概念：",
+                    "",
+                ]
+            )
+        elif len(plan.definition_slots) == 1:
+            lines.extend([f"**{plan.definition_slots[0]}的标准定义如下：**", ""])
+        else:
+            lines.extend(["**相关术语的标准定义如下：**", ""])
+
+        for index, term in enumerate(plan.definition_slots, start=1):
+            source = by_term[term]
+            prefix = f"{index}. " if len(plan.definition_slots) > 1 else ""
+            lines.extend(
+                [
+                    f"{prefix}**{term}**",
+                    f"   - **依据**：{source.standard_no or '未知标准号'}《{source.title}》"
+                    f"（{source.chapter or '术语和定义'}）",
+                    f"   - **原文**：{source.quote}",
+                    "",
+                ]
+            )
+
+        if plan.definition_mode == "compound" and set(plan.definition_slots) == {"资源量", "储量"}:
+            lines.extend(
+                [
+                    "**关系说明**：日常业务文件中的“资源储量”常作为“资源量”和“储量”的总括表达；"
+                    "在专业引用中应继续区分这两个标准术语。",
+                ]
+            )
+        return "\n".join(lines).strip()
+
+    def _definition_max_tokens(self, sources: list[Source], plan: QueryPlan) -> int:
+        quote_chars = sum(
+            len(source.quote or "")
+            for source in sources
+            if self._definition_term_from_source(source, plan)
+        )
+        requested = 650 + 1.5 * quote_chars + 100 * max(1, len(plan.definition_slots))
+        bounded = min(float(self.settings.definition_answer_max_tokens), max(1000.0, requested))
+        return int(math.ceil(bounded / 100.0) * 100)
+
+    @staticmethod
+    def _should_recommend_deep(plan: QueryPlan, question: str) -> bool:
+        if plan.search_mode in {"comparison", "exhaustive"} or plan.exhaustive_search:
+            return True
+        if plan.intent in {"projection_comparison", "clause_comparison", "cross_document_audit"}:
+            return True
+        return any(
+            term in question
+            for term in (
+                "逐一检查",
+                "逐项对比",
+                "全量检查",
+                "所有标准",
+                "各类标准",
+                "各类规范",
+                "分矿种规范",
+                "哪些规范与",
+                "哪些标准与",
+                "是否存在不一致",
+                "冲突检查",
+            )
+        )
 
     def _engineering_distance_answer(self, plan: QueryPlan, sources: list[Source]) -> str | None:
         if plan.intent != "engineering_distance_lookup" or not plan.target_exploration_type:

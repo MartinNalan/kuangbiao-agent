@@ -1148,10 +1148,24 @@ button:disabled {
   font-weight: 700;
 }
 
-.status-chip.answered { background: var(--accent-soft); color: var(--accent); }
-.status-chip.out_of_scope { background: var(--rust-soft); color: var(--rust); }
+.status-chip.answered,
+.status-chip.completed { background: var(--accent-soft); color: var(--accent); }
+.status-chip.out_of_scope,
+.status-chip.failed,
+.status-chip.cancelled { background: var(--rust-soft); color: var(--rust); }
 .status-chip.queued_for_enrichment,
-.status-chip.insufficient_evidence { background: var(--ochre-soft); color: var(--ochre); }
+.status-chip.insufficient_evidence,
+.status-chip.partial { background: var(--ochre-soft); color: var(--ochre); }
+
+.mode-chip {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 3px 7px;
+  color: var(--blue);
+  background: var(--blue-soft);
+  font-size: 11px;
+  font-weight: 700;
+}
 
 .evidence-details {
   margin-top: 14px;
@@ -1252,6 +1266,73 @@ button:disabled {
   height: 16px;
 }
 
+.deep-upgrade-button {
+  min-height: 30px;
+  margin-left: 5px;
+  border: 1px solid #b9c9c4;
+  border-radius: 6px;
+  background: #fff;
+  color: var(--accent);
+  padding: 5px 9px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.deep-upgrade-button:hover {
+  background: var(--accent-soft);
+}
+
+.deep-upgrade-button svg {
+  width: 15px;
+  height: 15px;
+}
+
+.research-progress-head,
+.research-coverage {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.research-progress-head strong {
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.research-progress-head span,
+.research-coverage {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.research-progress-track {
+  height: 5px;
+  margin-top: 11px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--surface-strong);
+}
+
+.research-progress-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 220ms ease;
+}
+
+.research-progress-message {
+  margin: 10px 0 7px;
+  color: var(--ink-soft);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
 .feedback-form {
   margin-top: 8px;
   max-width: 640px;
@@ -1275,6 +1356,49 @@ button:disabled {
   border-top: 1px solid rgba(215, 223, 218, 0.7);
   background: rgba(243, 245, 243, 0.96);
   padding: 13px 20px 12px;
+}
+
+.mode-toolbar {
+  width: min(900px, 100%);
+  min-height: 48px;
+  margin: 0 auto 9px;
+  display: grid;
+  grid-template-columns: 230px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+}
+
+.mode-control {
+  min-height: 38px;
+}
+
+.mode-description {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.mode-description strong {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.mode-description span {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.mode-cost {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--accent);
+  padding: 5px 9px;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 750;
 }
 
 .composer {
@@ -1889,6 +2013,16 @@ button:disabled {
     min-height: 86px;
   }
 
+  .mode-toolbar {
+    grid-template-columns: 220px minmax(0, 1fr);
+  }
+
+  .mode-cost {
+    grid-column: 1 / -1;
+    justify-self: end;
+    margin-top: -7px;
+  }
+
   .toolbar-form {
     grid-template-columns: 1fr 1fr;
   }
@@ -2043,6 +2177,26 @@ button:disabled {
 
   .composer-area {
     padding: 9px 10px 8px;
+  }
+
+  .mode-toolbar {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 7px 10px;
+  }
+
+  .mode-control {
+    grid-column: 1 / -1;
+    width: 100%;
+  }
+
+  .mode-description {
+    min-height: 38px;
+  }
+
+  .mode-cost {
+    grid-column: auto;
+    align-self: start;
+    margin-top: 0;
   }
 
   .composer-scope {

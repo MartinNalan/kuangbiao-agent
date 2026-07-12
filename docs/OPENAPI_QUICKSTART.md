@@ -8,6 +8,10 @@ Public deployments should expose only:
 
 - `GET /health`
 - `POST /api/ask`
+- `POST /api/research/tasks`
+- `GET /api/research/tasks/{task_id}`
+- `GET /api/research/tasks/{task_id}/result`
+- `POST /api/research/tasks/{task_id}/cancel`
 - `GET /api/standards`
 - `POST /api/feedback`
 - `GET /api/usage`
@@ -62,6 +66,35 @@ Important response fields:
 - `knowledge_gap_task`: present only when an in-scope question lacks usable evidence.
 - `request_id`: exact request identifier for quota accounting and feedback.
 - `quota`: whether this request consumed a use and the remaining daily count.
+
+## Deep Research
+
+Create an asynchronous cross-document task. A new task costs 3 quota units:
+
+```bash
+curl -sS -X POST http://127.0.0.1:18080/api/research/tasks \
+  -H 'Content-Type: application/json' \
+  -H 'X-API-Key: kb_live_xxx' \
+  -d '{
+    "question":"不同矿种规范对矿体无限外推所依据的间距有哪些代表性差异？"
+  }'
+```
+
+Poll progress:
+
+```bash
+curl -sS http://127.0.0.1:18080/api/research/tasks/research_xxx \
+  -H 'X-API-Key: kb_live_xxx'
+```
+
+Read the final comparison matrix, evidence, coverage, and quota settlement:
+
+```bash
+curl -sS http://127.0.0.1:18080/api/research/tasks/research_xxx/result \
+  -H 'X-API-Key: kb_live_xxx'
+```
+
+To upgrade the same basic answer, pass its `request_id` as `source_request_id` together with the same `session_id` and question. The server validates ownership and reserves only 2 additional units, so the question costs 3 units in total.
 
 ## Standards Catalog
 

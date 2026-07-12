@@ -89,6 +89,19 @@ EXPLORATION_FACTOR_TERMS = ("划分因素", "因素表格", "因素表", "划分
 BASIC_ANALYSIS_TERMS = ("基本分析项目", "基本分析的项目", "基本分析")
 TABLE_OUTPUT_TERMS = ("表格", "因素表", "划分表", "指标表", "工程间距表")
 RELATED_DOCUMENT_TERMS = ("其他文件", "还有哪些文件", "还有什么文件", "其他规定", "还有其他规定")
+DEFINITION_MARKERS = ("定义", "如何定义", "怎么定义", "是什么意思", "什么是", "概念")
+COMPOUND_DEFINITION_TERMS: dict[str, tuple[str, ...]] = {
+    "资源储量": ("资源量", "储量"),
+}
+PREFERRED_DEFINITION_SOURCES: dict[str, tuple[str, str]] = {
+    "资源量": ("固体矿产资源储量分类", "GB/T 17766-2020"),
+    "储量": ("固体矿产资源储量分类", "GB/T 17766-2020"),
+    "探明资源量": ("固体矿产资源储量分类", "GB/T 17766-2020"),
+    "控制资源量": ("固体矿产资源储量分类", "GB/T 17766-2020"),
+    "推断资源量": ("固体矿产资源储量分类", "GB/T 17766-2020"),
+    "证实储量": ("固体矿产资源储量分类", "GB/T 17766-2020"),
+    "可信储量": ("固体矿产资源储量分类", "GB/T 17766-2020"),
+}
 FOLLOW_UP_MARKERS = (
     "还有吗",
     "还有哪些",
@@ -182,6 +195,10 @@ class QueryPlan:
     filing_authority: str = "unknown"
     authority_role_ambiguous: bool = False
     exhaustive_search: bool = False
+    target_terms: tuple[str, ...] = ()
+    definition_mode: str = "none"
+    definition_slots: tuple[str, ...] = ()
+    preferred_definition_sources: tuple[str, ...] = ()
 
     @property
     def has_candidate_scope(self) -> bool:
@@ -215,6 +232,10 @@ class QueryPlan:
             "filing_authority": self.filing_authority,
             "authority_role_ambiguous": self.authority_role_ambiguous,
             "exhaustive_search": self.exhaustive_search,
+            "target_terms": self.target_terms,
+            "definition_mode": self.definition_mode,
+            "definition_slots": self.definition_slots,
+            "preferred_definition_sources": self.preferred_definition_sources,
         }
 
 
@@ -305,6 +326,7 @@ DEFAULT_DOCUMENT_TYPES: dict[str, tuple[str, ...]] = {
     "companion_resource_type": ("standard", "national_standard", "industry_standard"),
     "exploration_type_factors": ("standard", "national_standard", "industry_standard"),
     "basic_analysis_items": ("standard", "national_standard", "industry_standard"),
+    "definition_explanation": ("standard", "national_standard", "industry_standard"),
 }
 
 
@@ -322,6 +344,7 @@ PROTECTED_QUERY_INTENTS = {
     "exploration_type_factors",
     "basic_analysis_items",
     "projection_comparison",
+    "definition_explanation",
 }
 
 
@@ -686,6 +709,77 @@ def service_guide_title_terms(query: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(terms))
 
 
+def _clean_definition_target(value: str, query: str) -> str:
+    target = normalize_user_query(value)
+    target = re.sub(r"^[请问一下帮我解释说明]+", "", target).strip()
+    target = re.sub(r"^.*?》(?:中|里)?", "", target).strip()
+    target = _STANDARD_NO_PATTERN.sub("", target).strip()
+    if _standard_numbers(query) and "中" in target:
+        target = target.rsplit("中", 1)[-1].strip()
+    target = re.sub(r"^(?:在|根据|按照|标准|术语和定义|术语定义)\s*", "", target).strip()
+    return target.strip(" ：:，,。；;?？\"'“”")[:40]
+
+
+def extract_definition_request(
+    query: str,
+) -> tuple[tuple[str, ...], str, tuple[str, ...], tuple[str, ...]]:
+    normalized = normalize_user_query(query)
+    if not normalized or not any(marker in normalized for marker in DEFINITION_MARKERS):
+        return (), "none", (), ()
+
+    candidates: list[str] = []
+    patterns = (
+        r"什么是\s*[\"“]?([^，。；;？！?\"”]{1,40})",
+        r"([^，。；;？！?]{1,50}?)(?:的)?(?:定义|概念)(?:是什么|如何规定|如何定义|怎么定义)?(?:[？?。]|$)",
+        r"([^，。；;？！?]{1,40}?)(?:是什么意思)(?:[？?。]|$)",
+        r"([^，。；;？！?]{1,30}?)(?:是什么)(?:[？?。]|$)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, normalized)
+        if not match:
+            continue
+        target = _clean_definition_target(match.group(1), normalized)
+        if target:
+            candidates.append(target)
+            break
+    if not candidates:
+        return (), "none", (), ()
+
+    raw_target = candidates[0]
+    target_terms = tuple(
+        dict.fromkeys(
+            term.strip()
+            for term in re.split(r"[、/]|(?:和|与|及)", raw_target)
+            if term.strip()
+        )
+    )
+    if not target_terms:
+        return (), "none", (), ()
+
+    definition_mode = "comparison" if len(target_terms) > 1 else "exact"
+    slots: list[str] = []
+    for term in target_terms:
+        components = COMPOUND_DEFINITION_TERMS.get(term)
+        if components:
+            definition_mode = "compound"
+            slots.extend(components)
+        else:
+            slots.append(term)
+    definition_slots = tuple(dict.fromkeys(slots))
+
+    preferred_sources: list[str] = []
+    for term in definition_slots:
+        source = PREFERRED_DEFINITION_SOURCES.get(term)
+        if source:
+            preferred_sources.extend(source)
+    return (
+        target_terms,
+        definition_mode,
+        definition_slots,
+        tuple(dict.fromkeys(preferred_sources)),
+    )
+
+
 def understand_query(query: str) -> QueryPlan:
     original = (query or "").strip()
     normalized = normalize_user_query(original)
@@ -746,7 +840,32 @@ def understand_query(query: str) -> QueryPlan:
     output_mode = "table" if any(term in normalized for term in TABLE_OUTPUT_TERMS) else "default"
     search_mode = "default"
 
-    if has_authenticity:
+    target_terms, definition_mode, definition_slots, preferred_definition_sources = (
+        extract_definition_request(normalized)
+    )
+
+    if target_terms:
+        intent = "definition_explanation"
+        preferred_titles = [
+            value
+            for index, value in enumerate(preferred_definition_sources)
+            if index % 2 == 0
+        ]
+        preferred_numbers = [
+            value
+            for index, value in enumerate(preferred_definition_sources)
+            if index % 2 == 1
+        ]
+        candidate_titles.extend(preferred_titles)
+        standards.extend(preferred_numbers)
+        retrieval_terms.extend(
+            [
+                *(f"{term} 定义" for term in definition_slots),
+                *definition_slots,
+                "术语和定义",
+            ]
+        )
+    elif has_authenticity:
         intent = "legal_responsibility"
         candidate_titles.append("矿产资源法实施条例")
         standards.append("国令第839号")
@@ -957,6 +1076,10 @@ def understand_query(query: str) -> QueryPlan:
         mining_right_granting_level=granting_level,
         filing_authority=filing_authority,
         authority_role_ambiguous=authority_role_ambiguous,
+        target_terms=target_terms,
+        definition_mode=definition_mode,
+        definition_slots=definition_slots,
+        preferred_definition_sources=preferred_definition_sources,
         exhaustive_search=(
             (
                 broad_comparison
