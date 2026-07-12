@@ -578,28 +578,6 @@ def _strip_out_of_scope_projection(value: str, question: str) -> str:
     return "".join(kept).strip("，,；;。 ")
 
 
-def _concise_research_quote(value: str, question: str, *, max_chars: int = 360) -> str:
-    quote = re.sub(r"\s+", " ", value or "").strip()
-    focus = _projection_focus(question)
-    if focus:
-        _, focus_terms = focus
-        sentences = [
-            sentence.strip()
-            for sentence in re.split(r"(?<=[。；;])\s*", quote)
-            if sentence.strip()
-        ]
-        matching = [
-            sentence
-            for sentence in sentences
-            if any(term in sentence for term in focus_terms)
-        ]
-        if matching:
-            quote = "".join(matching[:2])
-    if len(quote) <= max_chars:
-        return quote
-    return quote[: max_chars - 1].rstrip() + "…"
-
-
 class ResearchTaskRunner:
     def __init__(self) -> None:
         self._running: dict[str, asyncio.Task[None]] = {}
@@ -889,6 +867,10 @@ class ResearchTaskRunner:
                         if (hit.get("quote") or hit.get("evidence_text"))
                         and (hit.get("clause_no") or hit.get("section_path"))
                         and self._hit_matches_evidence_groups(hit, plan.required_evidence_groups)
+                        and not self._hit_is_normative_reference_list(
+                            hit,
+                            task["retrieval_question"],
+                        )
                     ][:2]
                     if sources:
                         results[document_id] = sources
@@ -948,6 +930,54 @@ class ResearchTaskRunner:
             for key in ("title", "standard_no", "clause_no", "section_path", "quote", "evidence_text")
         )
         return all(any(term and term in context for term in group) for group in groups)
+
+    @staticmethod
+    def _hit_is_normative_reference_list(hit: dict[str, Any], question: str) -> bool:
+        if any(
+            term in question
+            for term in (
+                "规范性引用文件",
+                "引用了哪些",
+                "引用哪些",
+                "哪些规范引用",
+                "哪些标准引用",
+                "哪些文件引用",
+                "引用了",
+                "引用标准",
+                "被引用",
+                "引用关系",
+                "引用情况",
+                "参考标准",
+            )
+        ):
+            return False
+        chapter = re.sub(
+            r"\s+",
+            "",
+            str(hit.get("clause_no") or hit.get("section_path") or ""),
+        )
+        quote = re.sub(
+            r"\s+",
+            " ",
+            str(hit.get("quote") or hit.get("evidence_text") or hit.get("text") or ""),
+        ).strip()
+        reference_count = len(
+            re.findall(
+                r"\b(?:GB(?:/T)?|DZ/T|DZ|HJ|NB/T|MT/T|YS/T|JB/T|AQ|TD/T)\s*\d{2,}",
+                quote,
+                flags=re.IGNORECASE,
+            )
+        )
+        if "规范性引用文件" in chapter:
+            return True
+        if chapter in {"2", "2.0", "第2章"} and reference_count >= 2:
+            return True
+        page = hit.get("page") or hit.get("page_start")
+        try:
+            early_page = int(page) <= 4
+        except (TypeError, ValueError):
+            early_page = bool(re.fullmatch(r"第?[1-4]页", chapter))
+        return early_page and reference_count >= 3
 
     async def _render_answer(
         self,
@@ -1041,13 +1071,6 @@ class ResearchTaskRunner:
                 + " |"
             )
 
-        lines.extend(["", "**代表性直接依据**", ""])
-        for index, source in list(source_by_index.items())[:16]:
-            lines.append(
-                f"{index}. **{source.standard_no or '未知文号'}《{source.title}》**"
-                f"（{source.chapter or '相关条款'}）："
-                f"{_concise_research_quote(source.quote or '未提供引文', question)}"
-            )
         return "\n".join(lines).strip()
 
     @staticmethod

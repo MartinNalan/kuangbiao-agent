@@ -1,5 +1,12 @@
 # geowiki v2.0.0
 
+## v2.0.1 Patch
+
+- Removed the repeated `代表性直接依据` block after deep-research comparison tables.
+- Kept full clause text and official links in the structured `sources` response and the browser's collapsed citation panel.
+- Filtered Chapter 2 normative-reference inventories and early-page standard lists from substantive deep-research evidence, unless the user explicitly asks about citation relationships.
+- A live beneficiation-comparison regression examined 27 candidate documents, retained 12 evidence-bearing documents, emitted 16 substantive table rows, and produced zero normative-reference-list rows.
+
 ## 中文更新摘要
 
 - 新增“基本模式 · 快速查证”和“深度模式 · 综合研究”两个明确入口。

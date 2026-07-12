@@ -251,10 +251,12 @@ Poll `GET /api/research/tasks/{task_id}`. Active stages are `queued`, `planning`
 
 When `result_available=true`, request `GET /api/research/tasks/{task_id}/result`. The result contains:
 
-- A Markdown conclusion and comparison matrix.
-- Capped direct evidence snippets and official links.
+- A Markdown conclusion and comparison matrix without a repeated quote list after the table.
+- Direct evidence snippets and official links in the structured `sources` array.
 - `examined_documents`, `total_documents`, `evidence_documents`, candidate truncation, and KB snapshot.
 - Final quota settlement with `consumed_units`.
+
+The browser exposes `sources` under the collapsed citation panel. API clients should render that structured field separately instead of concatenating the same quotes after the Markdown table. Normative-reference inventory chunks are excluded from substantive comparison unless the question explicitly asks which standards are cited.
 
 `completed`, `partial`, and `insufficient_evidence` consume the reserved deep-mode units. A system `failed` task is refunded. `POST /api/research/tasks/{task_id}/cancel` is allowed only while the task remains `queued`; queued cancellation refunds the reservation.
 

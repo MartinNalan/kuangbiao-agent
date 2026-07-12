@@ -9,7 +9,6 @@ from mining_qa.research import (
     ResearchPlan,
     ResearchPlanner,
     ResearchTaskRunner,
-    _concise_research_quote,
     _strip_out_of_scope_projection,
 )
 from mining_qa.schemas import Source
@@ -85,6 +84,10 @@ class TruncatingResearchLLM:
         )
 
 
+class DisabledResearchLLM:
+    enabled = False
+
+
 class ResearchPlannerTests(unittest.IsolatedAsyncioTestCase):
     def test_projection_fallback_uses_relation_evidence_groups(self) -> None:
         plan = ResearchPlanner._fallback("不同标准对矿体无限外推所依据的间距有何差异？")
@@ -127,6 +130,29 @@ class ResearchPlannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(ResearchTaskRunner._hit_matches_evidence_groups(ordinary, groups))
         self.assertTrue(ResearchTaskRunner._hit_matches_evidence_groups(direct, groups))
         self.assertFalse(ResearchTaskRunner._hit_matches_evidence_groups(finite_only, groups))
+
+    def test_normative_reference_lists_are_not_treated_as_substantive_requirements(self) -> None:
+        reference_hit = {
+            "clause_no": "2",
+            "page": 3,
+            "quote": (
+                "GB/T 17766 固体矿产资源储量分类 DZ/T 0339 矿床工业指标论证技术要求 "
+                "DZ/T 0340 矿产勘查矿石加工选冶技术性能试验研究程度要求"
+            ),
+        }
+
+        self.assertTrue(
+            ResearchTaskRunner._hit_is_normative_reference_list(
+                reference_hit,
+                "不同矿种规范的选冶试验程度有哪些差异？",
+            )
+        )
+        self.assertFalse(
+            ResearchTaskRunner._hit_is_normative_reference_list(
+                reference_hit,
+                "哪些规范引用了 DZ/T 0340？",
+            )
+        )
 
 
 class ResearchAnalyzerTests(unittest.IsolatedAsyncioTestCase):
@@ -226,17 +252,6 @@ class ResearchAnalyzerTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-    def test_representative_quote_keeps_the_direct_infinite_projection_sentence(self) -> None:
-        quote = (
-            "相邻工程未见矿时，按实际工程间距1/2尖推。"
-            "边缘见矿工程外一般按推断资源量勘查工程间距1/2尖推或1/4平推。"
-        )
-
-        concise = _concise_research_quote(quote, "不同标准的无限外推有何差异？")
-
-        self.assertIn("边缘见矿工程外", concise)
-        self.assertNotIn("相邻工程未见矿", concise)
-
     def test_fact_scope_removes_finite_projection_contrast(self) -> None:
         finding = "铝土矿规范规定无限外推按1/2尖推或1/4平推，但有限外推采用其他比例"
 
@@ -244,6 +259,36 @@ class ResearchAnalyzerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("无限外推", scoped)
         self.assertNotIn("有限外推", scoped)
+
+    async def test_answer_keeps_table_without_repeating_direct_evidence_list(self) -> None:
+        source = Source(
+            title="测试规范",
+            standard_no="DZ/T 9999-2020",
+            chapter="6.1",
+            quote="勘探阶段应开展实验室流程试验。",
+            source_type="local_kb",
+            text_access="ocr_text",
+        )
+        answer = await ResearchTaskRunner()._render_answer(
+            "不同规范的试验程度有何差异？",
+            ResearchPlan(canonical_question="比较试验程度", comparison_dimensions=("试验程度",)),
+            [
+                {
+                    "document_id": "doc-1",
+                    "classification": "special_provision",
+                    "dimension": "试验程度",
+                    "finding": "勘探阶段应开展实验室流程试验。",
+                    "source_indices": [1],
+                }
+            ],
+            [source],
+            DisabledResearchLLM(),  # type: ignore[arg-type]
+            Settings(),
+        )
+
+        self.assertIn("**对比结果**", answer)
+        self.assertIn("| 文件 | 判定 | 比较维度 | 具体发现 | 依据条款 |", answer)
+        self.assertNotIn("**代表性直接依据**", answer)
 
 
 if __name__ == "__main__":
