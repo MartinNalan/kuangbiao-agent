@@ -1,5 +1,23 @@
 # geowiki v2.x Releases
 
+## v2.2.2 First-Stage Semantic Resolution Hotfix
+
+- Moved domain-aware typo correction, intent understanding, negation, correction, and short conversation recovery into the first LLM semantic stage after authentication, rate limiting, and the low-cost domain gate.
+- Added recent-user-question context without replaying prior assistant answers, preventing an earlier mistaken answer from becoming retrieval input.
+- Recomputed protected intent from the canonical question, so `采矿正` is understood as `采矿证` and routes to mining-right application materials.
+- Added a protected mining-right application Schema: generic material questions clarify by new registration, renewal, change, or cancellation, never by issuing-authority level.
+- Restricted license-issuer clarification to explicit mineral-resource-reserve review and filing authority questions.
+- Preserved the original materials goal when users reject an incorrect filing-authority interpretation in a follow-up.
+- Added protected deep-research routing for `policy_attachment`, including 自然资规〔2023〕4号附件4《采矿权申请资料清单及要求》 and deterministic per-application material rendering.
+- Validation: 143 automated tests passed; live private-KB renewal-material research completed in about 3 seconds with 2 candidate documents, 2 evidence-bearing documents, and 11 cited material records.
+
+### v2.2.2 中文更新摘要
+
+- 大模型在认证、限流和低成本领域门控之后作为第一语义阶段，统一处理领域错别字、意图、否定、纠正和最近用户问题。
+- “采矿证办理要件”按新立、延续、变更、注销确认，不再误按自然资源部/省级发证机关分叉。
+- 发证机关规则仅适用于明确的储量评审备案机构问题；用户纠正错误方向后恢复原始办理目标。
+- 深度模式强制纳入政策附件和自然资规〔2023〕4号附件4，能够逐项返回相应办理类型的材料依据。
+
 ## v2.2.1 Broad-Action Clarification Hotfix
 
 - Added a deterministic Schema fallback for broad goaf questions after production validation showed that the model could occasionally under-confirm `采空区怎么处理？`.

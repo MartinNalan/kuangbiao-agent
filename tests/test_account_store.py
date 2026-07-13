@@ -233,6 +233,21 @@ class AccountStoreTests(unittest.TestCase):
             self.store.latest_user_question(self.user["user_id"], conversation_id),
             "勘查实施方案的评审或审查是怎么规定的？",
         )
+        self.store.save_exchange(
+            self.user["user_id"],
+            conversation_id,
+            "req_context_second",
+            "是否还有其他文件规定？",
+            "第二个测试回答",
+            {},
+        )
+        self.assertEqual(
+            self.store.recent_user_questions(self.user["user_id"], conversation_id, limit=2),
+            [
+                "勘查实施方案的评审或审查是怎么规定的？",
+                "是否还有其他文件规定？",
+            ],
+        )
 
     def test_quota_reservation_is_atomic(self) -> None:
         self.store.set_daily_limit(

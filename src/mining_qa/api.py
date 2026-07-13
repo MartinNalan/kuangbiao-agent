@@ -139,10 +139,15 @@ async def resolve_question(
     question: str,
     *,
     mode: str,
+    conversation_context: tuple[str, ...] = (),
 ) -> QuestionResolution:
     resolver = QuestionResolver(settings)
     try:
-        return await resolver.resolve(question, mode=mode)
+        return await resolver.resolve(
+            question,
+            mode=mode,
+            conversation_context=conversation_context,
+        )
     finally:
         await resolver.aclose()
 
@@ -588,6 +593,7 @@ async def ask(
     quota_reserved = False
     unreserved_quota: dict[str, object] | None = None
     resolution: QuestionResolution | None = None
+    conversation_context: tuple[str, ...] = ()
 
     await enforce_rate_limit(principal.rate_limit_key)
     retrieval_question = payload.question
@@ -595,6 +601,9 @@ async def ask(
         try:
             conversation_id = store.ensure_conversation(principal.user_id, payload.session_id, payload.question)
             payload.session_id = conversation_id
+            conversation_context = tuple(
+                store.recent_user_questions(principal.user_id, conversation_id, limit=4)
+            )
             previous_question = store.latest_user_question(principal.user_id, conversation_id)
             retrieval_question = contextualize_follow_up(payload.question, previous_question)
         except AccountStoreError as error:
@@ -607,6 +616,7 @@ async def ask(
             settings,
             payload.retrieval_question,
             mode="basic",
+            conversation_context=conversation_context,
         )
         if resolution.requires_clarification:
             quota_snapshot = None
@@ -817,6 +827,9 @@ async def create_research_task(
             payload.session_id,
             payload.question,
         )
+        conversation_context = tuple(
+            store.recent_user_questions(principal.user_id, conversation_id, limit=4)
+        )
         previous_question = store.latest_user_question(principal.user_id, conversation_id)
         retrieval_question = contextualize_follow_up(payload.question, previous_question)
         if not domain_gate.check(retrieval_question).in_scope:
@@ -831,6 +844,7 @@ async def create_research_task(
             settings,
             retrieval_question,
             mode="deep",
+            conversation_context=conversation_context,
         )
         if resolution.requires_clarification:
             response.status_code = status.HTTP_200_OK

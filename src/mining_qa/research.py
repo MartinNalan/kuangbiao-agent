@@ -17,6 +17,8 @@ from .query_understanding import (
     TRANSFER_ANCHOR_STANDARD_NUMBERS,
     TRANSFER_EQUIVALENT_TERMS,
     TRANSFER_REPORT_OBJECT_TERMS,
+    default_document_types,
+    default_evidence_groups,
     normalize_user_query,
     understand_query,
 )
@@ -258,6 +260,26 @@ class ResearchPlanner:
     @staticmethod
     def _enforce_protected_scope(question: str, plan: ResearchPlan) -> ResearchPlan:
         base = understand_query(question)
+        if base.intent == "service_materials":
+            fallback = ResearchPlanner._fallback(question)
+            return replace(
+                plan,
+                intent="service_materials",
+                strategy="document_inventory",
+                anchor_titles=tuple(
+                    dict.fromkeys(("采矿权申请资料清单及要求", *plan.anchor_titles))
+                ),
+                anchor_standard_numbers=tuple(
+                    dict.fromkeys(("自然资规〔2023〕4号附件4", *plan.anchor_standard_numbers))
+                ),
+                corpus_title_terms=fallback.corpus_title_terms,
+                corpus_standard_numbers=(),
+                document_types=fallback.document_types,
+                comparison_dimensions=fallback.comparison_dimensions,
+                evidence_queries=fallback.evidence_queries,
+                required_evidence_groups=fallback.required_evidence_groups,
+                scope_note="只检索采矿权申请资料清单及要求、对应政策附件和办事指南，不按发证机关分叉。",
+            )
         if base.intent == "exploration_to_mining_eligibility":
             fallback = ResearchPlanner._fallback(question)
             return replace(
@@ -318,8 +340,11 @@ class ResearchPlanner:
     def _fallback(question: str) -> ResearchPlan:
         base = understand_query(question)
         title_terms: list[str] = []
-        document_types = list(base.document_types)
-        if base.intent == "exploration_to_mining_eligibility":
+        document_types = list(base.document_types or default_document_types(base.intent))
+        if base.intent == "service_materials":
+            title_terms.append("采矿权申请资料清单及要求")
+            document_types = list(default_document_types("service_materials"))
+        elif base.intent == "exploration_to_mining_eligibility":
             title_terms.append("矿产地质勘查规范")
             document_types = [
                 "policy_document",
@@ -358,7 +383,15 @@ class ResearchPlanner:
         )
         evidence_queries = (base.retrieval_query or base.normalized_query,)
         required_evidence_groups: tuple[tuple[str, ...], ...] = ()
-        if base.intent == "exploration_to_mining_eligibility":
+        if base.intent == "service_materials":
+            application = ResearchTaskRunner._service_application_label(base.normalized_query)
+            dimensions = ("办理类型", "申请材料", "特殊适用条件", "提交形式")
+            evidence_queries = (
+                f"采矿权{application or ''}申请资料清单及要求 附件4 必须提交 材料名称",
+                f"采矿权{application or ''}申请 表中标记 要求 提交形式",
+            )
+            required_evidence_groups = default_evidence_groups("service_materials")
+        elif base.intent == "exploration_to_mining_eligibility":
             dimensions = (
                 "一般转采条件",
                 "分矿种详查报告转采规定",
@@ -407,14 +440,27 @@ class ResearchPlanner:
             canonical_question=base.normalized_query,
             intent=base.intent,
             strategy=(
-                "relation_discovery"
+                "document_inventory"
+                if base.intent == "service_materials"
+                else "relation_discovery"
                 if base.intent == "exploration_to_mining_eligibility"
                 else "cross_document_comparison"
             ),
-            anchor_titles=_explicit_titles(question),
-            anchor_standard_numbers=tuple(
+            anchor_titles=tuple(
                 dict.fromkeys(
                     (
+                        "采矿权申请资料清单及要求",
+                        *_explicit_titles(question),
+                    )
+                    if base.intent == "service_materials"
+                    else _explicit_titles(question)
+                )
+            ),
+            anchor_standard_numbers=tuple(
+                dict.fromkeys(
+                    ("自然资规〔2023〕4号附件4", *base.standard_numbers)
+                    if base.intent == "service_materials"
+                    else (
                         *TRANSFER_ANCHOR_STANDARD_NUMBERS,
                         *base.standard_numbers,
                     )
@@ -430,7 +476,7 @@ class ResearchPlanner:
             corpus_title_terms=tuple(dict.fromkeys(title_terms)),
             corpus_standard_numbers=(
                 ()
-                if base.intent == "exploration_to_mining_eligibility"
+                if base.intent in {"service_materials", "exploration_to_mining_eligibility"}
                 else base.standard_numbers if not title_terms else ()
             ),
             document_types=tuple(dict.fromkeys(document_types)),
@@ -832,7 +878,9 @@ class ResearchTaskRunner:
             ]
             analyzer = ResearchAnalyzer(settings, llm)
             facts: list[dict[str, Any]] = []
-            if plan.intent == "exploration_to_mining_eligibility":
+            if plan.intent == "service_materials":
+                facts = self._service_material_facts(indexed_sources)
+            elif plan.intent == "exploration_to_mining_eligibility":
                 facts = self._transfer_facts(indexed_sources)
             elif plan.intent == "projection_comparison":
                 facts = self._projection_facts(indexed_sources)
@@ -963,8 +1011,11 @@ class ResearchTaskRunner:
                     normalized_query=plan.canonical_question,
                     retrieval_query=combined_query,
                     intent=(
-                        "exploration_to_mining_eligibility"
-                        if plan.intent == "exploration_to_mining_eligibility"
+                        plan.intent
+                        if plan.intent in {
+                            "service_materials",
+                            "exploration_to_mining_eligibility",
+                        }
                         else "cross_document_audit"
                     ),
                     candidate_title_terms=(),
@@ -980,15 +1031,18 @@ class ResearchTaskRunner:
                 filters = dict(task.get("filters") or {})
                 filters["document_id"] = document_id
                 try:
+                    top_k = 30 if plan.intent == "service_materials" else 6
                     response = await knowledge.search(
                         combined_query,
                         filters,
                         scoped_plan,
-                        top_k=6,
+                        top_k=top_k,
                         allow_web_supplement=False,
                     )
                     per_document_limit = (
-                        1
+                        24
+                        if plan.intent == "service_materials"
+                        else 1
                         if plan.intent in {
                             "exploration_to_mining_eligibility",
                             "projection_comparison",
@@ -1069,6 +1123,26 @@ class ResearchTaskRunner:
                     "document_id": document_id,
                     "classification": "special_provision",
                     "dimension": dimension,
+                    "finding": quote,
+                    "source_indices": [index],
+                }
+            )
+        return facts
+
+    @staticmethod
+    def _service_material_facts(
+        indexed_sources: list[tuple[int, Source, str]],
+    ) -> list[dict[str, Any]]:
+        facts: list[dict[str, Any]] = []
+        for index, source, document_id in indexed_sources:
+            quote = normalize_user_query(source.quote or "")[:1200]
+            if not quote:
+                continue
+            facts.append(
+                {
+                    "document_id": document_id,
+                    "classification": "special_provision",
+                    "dimension": "申请材料与适用条件",
                     "finding": quote,
                     "source_indices": [index],
                 }
@@ -1244,6 +1318,8 @@ class ResearchTaskRunner:
         llm: LLMClient,
         settings: Settings,
     ) -> str:
+        if plan.intent == "service_materials":
+            return self._render_service_material_answer(plan, sources)
         if plan.intent == "exploration_to_mining_eligibility":
             return self._render_transfer_answer(sources)
         summary = "本次研究已按知识库候选范围逐份检索，并仅使用命中的直接条款形成下列比较结果。"
@@ -1363,6 +1439,74 @@ class ResearchTaskRunner:
             )
 
         return "\n".join(lines).strip()
+
+    @classmethod
+    def _render_service_material_answer(
+        cls,
+        plan: ResearchPlan,
+        sources: list[Source],
+    ) -> str:
+        application = cls._service_application_label(plan.canonical_question)
+        relevant = [
+            source
+            for source in sources
+            if source.title == "采矿权申请资料清单及要求"
+            and (not application or f"附件4 > {application}" in (source.chapter or ""))
+        ]
+        material_sources = [
+            source for source in relevant if re.search(r">\s*材料\s*\d+", source.chapter or "")
+        ]
+
+        def material_sequence(source: Source) -> int:
+            match = re.search(r"材料\s*(\d+)", source.chapter or "")
+            return int(match.group(1)) if match else 999
+
+        material_sources.sort(key=material_sequence)
+        if application and material_sources:
+            lines = [
+                "**研究结论**",
+                "",
+                f"采矿权{application}申请应按 **自然资规〔2023〕4号附件4《采矿权申请资料清单及要求》** 核对材料。",
+                "",
+                "**直接材料依据**",
+                "",
+            ]
+            lines.extend(f"- {source.quote}" for source in material_sources[:24])
+            lines.extend(
+                [
+                    "",
+                    "表中“要求”栏的特殊规定优先于▲/—标记；还需结合油气/非油气、申请主体和具体变更事项核验适用条件。",
+                ]
+            )
+            return "\n".join(lines).strip()
+        if relevant:
+            return "\n".join(
+                [
+                    "**研究结论**",
+                    "",
+                    "采矿权申请资料分为新立、延续、变更和注销四类，不能合并为一套统一要件。",
+                    "",
+                    *[f"- {source.quote}" for source in relevant[:8]],
+                    "",
+                    "请先确认办理类型；变更申请还需进一步说明具体变更事项。",
+                ]
+            ).strip()
+        return (
+            "**深度研究未形成可引用结论。**\n\n"
+            "未检索到自然资规〔2023〕4号附件4《采矿权申请资料清单及要求》的直接材料记录。"
+        )
+
+    @staticmethod
+    def _service_application_label(question: str) -> str | None:
+        if any(term in question for term in ("首次", "新立")):
+            return "新立"
+        if any(term in question for term in ("延续", "续期")):
+            return "延续"
+        if "注销" in question:
+            return "注销"
+        if any(term in question for term in ("变更", "转让", "转移")):
+            return "变更"
+        return None
 
     @classmethod
     def _render_transfer_answer(cls, sources: list[Source]) -> str:

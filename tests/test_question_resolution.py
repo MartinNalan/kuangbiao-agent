@@ -113,6 +113,120 @@ class QuestionResolverTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.requires_clarification)
         self.assertEqual(result.canonical_question, "采空区稳定性应如何评价?")
 
+    async def test_mining_license_typo_is_replanned_before_material_schema(self) -> None:
+        llm = FakeResolutionLLM(
+            {
+                "canonical_question": "采矿许可证办理需要什么要件？",
+                "intent": "service_materials",
+                "is_ambiguous": True,
+                "confidence": 0.94,
+                "missing_slots": ["发证机关"],
+                "reason": "需要确认发证机关。",
+                "interpretations": [
+                    {
+                        "label": "自然资源部发证",
+                        "question": "自然资源部颁发的采矿许可证办理需要什么要件？",
+                        "description": "按部级发证理解。",
+                    },
+                    {
+                        "label": "省级发证",
+                        "question": "省级部门颁发的采矿许可证办理需要什么要件？",
+                        "description": "按省级发证理解。",
+                    },
+                ],
+            }
+        )
+        resolver = QuestionResolver(self.settings(), llm=llm)  # type: ignore[arg-type]
+
+        result = await resolver.resolve("采矿正办理需要什么要件", mode="deep")
+
+        self.assertEqual(result.canonical_question, "采矿许可证办理需要什么要件?")
+        self.assertEqual(result.plan.intent, "service_materials")
+        self.assertTrue(result.requires_clarification)
+        self.assertEqual(
+            [item.label for item in result.clarification.options],  # type: ignore[union-attr]
+            ["新立申请", "延续申请", "变更申请", "注销申请"],
+        )
+
+    async def test_material_schema_overrides_wrong_issuer_ambiguity(self) -> None:
+        llm = FakeResolutionLLM(
+            {
+                "canonical_question": "采矿证办理需要什么要件？",
+                "intent": "service_materials",
+                "is_ambiguous": True,
+                "confidence": 0.92,
+                "missing_slots": ["发证机关"],
+                "reason": "模型错误地按发证机关分叉。",
+                "interpretations": [
+                    {
+                        "label": "部级",
+                        "question": "自然资源部颁发的采矿证办理需要什么要件？",
+                    },
+                    {
+                        "label": "省级",
+                        "question": "省级部门颁发的采矿证办理需要什么要件？",
+                    },
+                ],
+            }
+        )
+        resolver = QuestionResolver(self.settings(), llm=llm)  # type: ignore[arg-type]
+
+        result = await resolver.resolve("采矿证办理需要什么要件", mode="deep")
+
+        self.assertTrue(result.requires_clarification)
+        self.assertNotIn("发证", result.clarification.reason)  # type: ignore[union-attr]
+        self.assertEqual(result.clarification.options[0].question, "采矿权新立申请需要提交哪些材料和要件？")  # type: ignore[union-attr]
+
+    async def test_recent_user_context_restores_material_intent_after_wrong_frame(self) -> None:
+        llm = FakeResolutionLLM(
+            {
+                "canonical_question": "铜矿矿产资源储量评审备案应向哪个机关申请？",
+                "intent": "authority_responsibility",
+                "is_ambiguous": True,
+                "confidence": 0.96,
+                "missing_slots": ["许可证颁发机关"],
+                "reason": "错误沿用评审备案事项。",
+                "interpretations": [],
+            }
+        )
+        resolver = QuestionResolver(self.settings(), llm=llm)  # type: ignore[arg-type]
+
+        result = await resolver.resolve(
+            "我之前的问题是我要办采矿证，和评审备案机关无关啊",
+            mode="deep",
+            conversation_context=(
+                "采矿正办理需要什么要件",
+                "采矿证办理需要什么要件",
+                "我不知道哪个机关发证，我是一个铜矿",
+            ),
+        )
+
+        self.assertEqual(result.canonical_question, "采矿证办理需要什么要件")
+        self.assertEqual(result.plan.intent, "service_materials")
+        self.assertTrue(result.requires_clarification)
+        self.assertEqual(result.clarification.options[1].label, "延续申请")  # type: ignore[union-attr]
+
+    async def test_specific_mining_right_application_runs_model_without_reasking_type(self) -> None:
+        llm = FakeResolutionLLM(
+            {
+                "canonical_question": "采矿权延续申请需要提交哪些材料？",
+                "intent": "service_materials",
+                "is_ambiguous": False,
+                "confidence": 0.95,
+                "missing_slots": [],
+                "reason": "办理类型明确。",
+                "interpretations": [],
+            }
+        )
+        resolver = QuestionResolver(self.settings(), llm=llm)  # type: ignore[arg-type]
+
+        result = await resolver.resolve("采矿证延续需要什么材料")
+
+        self.assertTrue(result.model_used)
+        self.assertEqual(llm.calls, 1)
+        self.assertEqual(result.plan.intent, "service_materials")
+        self.assertFalse(result.requires_clarification)
+
     async def test_clear_engineering_distance_question_uses_fast_path(self) -> None:
         llm = FakeResolutionLLM({})
         resolver = QuestionResolver(self.settings(), llm=llm)  # type: ignore[arg-type]

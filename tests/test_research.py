@@ -55,6 +55,23 @@ class GenericPlannerLLM:
         )
 
 
+class BadServicePlannerLLM:
+    enabled = True
+
+    async def complete_json(self, messages, *, max_tokens=None):
+        return json.dumps(
+            {
+                "canonical_question": "采矿权延续申请需要提交哪些材料",
+                "corpus_title_terms": ["矿产资源开采登记管理办法"],
+                "document_types": ["regulation", "department_rule"],
+                "comparison_dimensions": ["发证机关"],
+                "evidence_queries": ["采矿许可证 发证机关"],
+                "required_evidence_groups": [["采矿许可证"], ["发证机关"]],
+            },
+            ensure_ascii=False,
+        )
+
+
 class TruncatingResearchLLM:
     enabled = True
 
@@ -124,6 +141,21 @@ class ResearchPlannerTests(unittest.IsolatedAsyncioTestCase):
             ),
         }
         self.assertTrue(ResearchTaskRunner._hit_matches_research_plan(geometry, plan))
+
+    async def test_service_material_plan_cannot_drop_policy_attachment_scope(self) -> None:
+        planner = ResearchPlanner(
+            Settings(OPENAI_API_KEY="configured"),
+            BadServicePlannerLLM(),  # type: ignore[arg-type]
+        )
+
+        plan = await planner.plan("采矿权延续申请需要提交哪些材料和要件？")
+
+        self.assertEqual(plan.intent, "service_materials")
+        self.assertEqual(plan.strategy, "document_inventory")
+        self.assertIn("采矿权申请资料清单及要求", plan.corpus_title_terms)
+        self.assertIn("自然资规〔2023〕4号附件4", plan.anchor_standard_numbers)
+        self.assertIn("policy_attachment", plan.document_types)
+        self.assertNotIn("发证机关", plan.comparison_dimensions)
 
     def test_direct_evidence_filter_rejects_an_ordinary_spacing_table(self) -> None:
         groups = ResearchPlanner._fallback("不同标准对矿体无限外推所依据的间距有何差异？").required_evidence_groups
@@ -418,6 +450,37 @@ class ResearchAnalyzerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("**报告类型限制**", answer)
         self.assertNotIn("| 文件 |", answer)
         self.assertNotIn("compilation_", answer)
+
+    def test_service_material_answer_lists_attachment_rows_in_sequence(self) -> None:
+        sources = [
+            Source(
+                title="采矿权申请资料清单及要求",
+                standard_no="自然资规〔2023〕4号附件4",
+                chapter="附件4 > 延续 > 材料 4",
+                quote="采矿权延续申请材料第4项：采矿许可证正、副本。",
+                source_type="official_fulltext",
+                text_access="html_text",
+                source_role="policy_attachment",
+            ),
+            Source(
+                title="采矿权申请资料清单及要求",
+                standard_no="自然资规〔2023〕4号附件4",
+                chapter="附件4 > 延续 > 材料 1",
+                quote="采矿权延续申请材料第1项：采矿权申请登记书或申请书。",
+                source_type="official_fulltext",
+                text_access="html_text",
+                source_role="policy_attachment",
+            ),
+        ]
+
+        answer = ResearchTaskRunner._render_service_material_answer(
+            ResearchPlanner._fallback("采矿权延续申请需要提交哪些材料和要件？"),
+            sources,
+        )
+
+        self.assertIn("自然资规〔2023〕4号附件4", answer)
+        self.assertLess(answer.index("第1项"), answer.index("第4项"))
+        self.assertNotIn("发证机关", answer)
 
 
 if __name__ == "__main__":

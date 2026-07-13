@@ -19,15 +19,6 @@ from .query_understanding import (
 from .schemas import Clarification, ClarificationOption
 
 
-SPECIFIC_APPLICATION_TERMS = (
-    "新立",
-    "延续",
-    "变更",
-    "注销",
-    "转让",
-    "扩大矿区范围",
-    "缩小矿区范围",
-)
 BROAD_ACTION_MARKERS = (
     "怎么处理",
     "如何处理",
@@ -52,6 +43,27 @@ GOAF_SPECIFIC_GOALS = (
     "封闭",
     "支护",
     "复垦",
+)
+MINING_RIGHT_APPLICATION_TERMS = (
+    "新立",
+    "首次登记",
+    "延续",
+    "续期",
+    "变更",
+    "注销",
+)
+MINING_RIGHT_MATERIAL_TERMS = (
+    "要件",
+    "材料",
+    "资料",
+    "清单",
+    "提交什么",
+    "提交哪些",
+)
+MINING_RIGHT_LICENSE_TERMS = (
+    "采矿证",
+    "采矿许可证",
+    "采矿权",
 )
 
 
@@ -93,22 +105,42 @@ class QuestionResolver:
     async def aclose(self) -> None:
         await self.llm.aclose()
 
-    async def resolve(self, question: str, *, mode: str = "basic") -> QuestionResolution:
+    async def resolve(
+        self,
+        question: str,
+        *,
+        mode: str = "basic",
+        conversation_context: tuple[str, ...] | list[str] = (),
+    ) -> QuestionResolution:
         normalized = normalize_user_query(question)
-        base_plan = understand_query(normalized)
-        fallback = QuestionResolution(canonical_question=normalized, plan=base_plan)
+        mechanical = self._minimal_domain_corrections(normalized)
+        recent_questions = tuple(
+            value
+            for value in (
+                normalize_user_query(item)
+                for item in list(conversation_context)[-4:]
+            )
+            if value and value != normalized
+        )
+        contextual_fallback = self._apply_conversation_guard(
+            mechanical,
+            mechanical,
+            recent_questions,
+        )
+        base_plan = understand_query(contextual_fallback)
+        fallback = QuestionResolution(canonical_question=contextual_fallback, plan=base_plan)
         if not normalized or not self.settings.question_resolution_enabled:
             return fallback
         schema_fallback = self._schema_clarification(
-            normalized,
+            contextual_fallback,
             base_plan,
-            normalized,
+            contextual_fallback,
             [],
         )
-        if not self.llm.enabled or not self._needs_model(normalized, base_plan):
+        if not self.llm.enabled or not self._needs_model(contextual_fallback, base_plan):
             if schema_fallback is not None:
                 return QuestionResolution(
-                    canonical_question=normalized,
+                    canonical_question=contextual_fallback,
                     plan=base_plan,
                     clarification=schema_fallback,
                 )
@@ -119,11 +151,19 @@ class QuestionResolver:
                 "role": "system",
                 "content": (
                     "你是 geowiki 的问题理解与歧义判断器，只理解问题，不回答问题，不检索标准，"
+                    "服务领域是矿产资源、地质勘查、矿业权登记、储量管理、标准规范和办事指南。"
+                    "先纠正常见输入错误、同音字和形近字，例如‘采矿正’应理解为‘采矿证’，"
+                    "再识别用户真正办理的事项；不得改写标准号、文号、数值或用户明确限定的对象。"
+                    "最近用户问题仅用于消解省略、回答追问或恢复被误解的原始目标，当前用户的纠正优先。"
+                    "出现‘与X无关、不是X、不要讨论X’时，canonical_question 必须排除X，不能继续检索X。"
                     "不得使用模型记忆生成专业结论。判断歧义时关注：不同解释是否会改变目标标准、"
                     "条款范围、业务事项或最终结论。只有存在两个以上实质不同且合理的专业方向，"
                     "或缺少决定结论的关键条件时，才要求确认；不要对表达清楚的问题过度追问。"
                     "矿产资源储量评审备案机构取决于许可证颁发机关；用户只给矿种或矿山规模而未说明"
                     "许可证由自然资源部还是省级自然资源主管部门颁发时，必须判为歧义并给出对应候选。"
+                    "上述发证机关规则只适用于用户明确询问矿产资源储量评审备案机构的情形，"
+                    "不得用于采矿许可证办理材料、申请要件或办理流程。"
+                    "采矿许可证办理材料首先按新立、延续、变更、注销区分，不按发证机关生成候选。"
                     "候选解释必须完整、互斥、仍属于地质矿产领域，并可直接作为后续知识库检索问题。"
                     "最多给出4个候选，不得在候选中预设答案。转采、权限、材料等已确认业务规则不能被改写。"
                     "只给出专业主题并询问‘怎么处理、怎么办、处理方法’而未说明目标、阶段或事项时，"
@@ -135,7 +175,10 @@ class QuestionResolver:
                 "role": "user",
                 "content": json.dumps(
                     {
-                        "question": normalized,
+                        "question": mechanical,
+                        "contextual_fallback": contextual_fallback,
+                        "original_input": normalized,
+                        "recent_user_questions": recent_questions,
                         "mode": mode,
                         "deterministic_plan": base_plan.to_llm_payload(),
                         "output_schema": {
@@ -166,7 +209,7 @@ class QuestionResolver:
             payload = ResolutionPayload.model_validate_json(raw)
         except (ValidationError, json.JSONDecodeError, TypeError, ValueError, OSError) as error:
             return QuestionResolution(
-                canonical_question=normalized,
+                canonical_question=contextual_fallback,
                 plan=base_plan,
                 model_used=True,
                 clarification=schema_fallback,
@@ -174,7 +217,7 @@ class QuestionResolver:
             )
         except Exception as error:
             return QuestionResolution(
-                canonical_question=normalized,
+                canonical_question=contextual_fallback,
                 plan=base_plan,
                 model_used=True,
                 clarification=schema_fallback,
@@ -182,11 +225,30 @@ class QuestionResolver:
             )
 
         canonical = self._validated_question(
-            normalized,
+            mechanical,
             base_plan,
             payload.canonical_question,
         )
-        options = self._options(payload.interpretations, base_plan)
+        canonical = self._apply_conversation_guard(
+            mechanical,
+            canonical,
+            recent_questions,
+        )
+        canonical_plan = understand_query(canonical)
+        options = self._options(payload.interpretations, canonical_plan)
+        schema_clarification = self._schema_clarification(
+            mechanical,
+            canonical_plan,
+            canonical,
+            options,
+        )
+        if schema_clarification is not None:
+            return QuestionResolution(
+                canonical_question=canonical,
+                plan=canonical_plan,
+                model_used=True,
+                clarification=schema_clarification,
+            )
         if (
             payload.is_ambiguous
             and payload.confidence >= self.settings.question_resolution_min_confidence
@@ -202,26 +264,13 @@ class QuestionResolver:
             )
             return QuestionResolution(
                 canonical_question=canonical,
-                plan=base_plan,
+                plan=canonical_plan,
                 model_used=True,
                 clarification=clarification,
             )
-        schema_clarification = self._schema_clarification(
-            normalized,
-            base_plan,
-            canonical,
-            options,
-        )
-        if schema_clarification is not None:
-            return QuestionResolution(
-                canonical_question=canonical,
-                plan=base_plan,
-                model_used=True,
-                clarification=schema_clarification,
-            )
         return QuestionResolution(
             canonical_question=canonical,
-            plan=understand_query(canonical),
+            plan=canonical_plan,
             model_used=True,
         )
 
@@ -232,7 +281,7 @@ class QuestionResolver:
         if plan.intent == "engineering_distance_lookup":
             return not plan.target_exploration_type or not plan.candidate_title_terms
         if plan.intent == "service_materials":
-            return not any(term in question for term in SPECIFIC_APPLICATION_TERMS)
+            return True
         if plan.intent == "authority_responsibility":
             return plan.authority_role_ambiguous or plan.license_issuer_level == "unknown"
         return plan.intent in {"projection_rule", "related_documents", "regulation_lookup"}
@@ -277,6 +326,40 @@ class QuestionResolver:
         canonical: str,
         model_options: list[ClarificationOption],
     ) -> Clarification | None:
+        if QuestionResolver._is_generic_mining_right_material_question(canonical, base_plan):
+            return Clarification(
+                interpreted_question=canonical or original,
+                reason=(
+                    "采矿许可证申请资料按办理类型分别规定；新立、延续、变更和注销的材料清单不同。"
+                ),
+                options=[
+                    ClarificationOption(
+                        option_id="option_1",
+                        label="新立申请",
+                        question="采矿权新立申请需要提交哪些材料和要件？",
+                        description="首次申请或探矿权转采矿权等新立情形。",
+                    ),
+                    ClarificationOption(
+                        option_id="option_2",
+                        label="延续申请",
+                        question="采矿权延续申请需要提交哪些材料和要件？",
+                        description="现有采矿许可证到期前申请延续。",
+                    ),
+                    ClarificationOption(
+                        option_id="option_3",
+                        label="变更申请",
+                        question="采矿权变更申请需要提交哪些材料和要件？",
+                        description="包括矿区范围、矿种或开采方式、名称及转让等变更。",
+                    ),
+                    ClarificationOption(
+                        option_id="option_4",
+                        label="注销申请",
+                        question="采矿权注销申请需要提交哪些材料和要件？",
+                        description="申请注销现有采矿许可证。",
+                    ),
+                ],
+                allow_free_text=True,
+            )
         if (
             base_plan.intent == "authority_responsibility"
             and base_plan.license_issuer_level == "unknown"
@@ -341,6 +424,59 @@ class QuestionResolver:
                 allow_free_text=True,
             )
         return None
+
+    @staticmethod
+    def _minimal_domain_corrections(question: str) -> str:
+        corrected = question
+        for source, target in (
+            ("采矿正", "采矿证"),
+            ("采矿症", "采矿证"),
+            ("采矿政", "采矿证"),
+        ):
+            corrected = corrected.replace(source, target)
+        return corrected
+
+    @staticmethod
+    def _is_generic_mining_right_material_question(
+        question: str,
+        plan: QueryPlan,
+    ) -> bool:
+        return bool(
+            plan.intent == "service_materials"
+            and any(term in question for term in MINING_RIGHT_LICENSE_TERMS)
+            and not any(term in question for term in MINING_RIGHT_APPLICATION_TERMS)
+        )
+
+    @classmethod
+    def _apply_conversation_guard(
+        cls,
+        current: str,
+        canonical: str,
+        recent_questions: tuple[str, ...],
+    ) -> str:
+        current_compact = re.sub(r"\s+", "", current)
+        correction = (
+            any(term in current_compact for term in ("无关", "不是", "不要讨论", "说的不是"))
+            and any(term in current_compact for term in MINING_RIGHT_LICENSE_TERMS)
+            and "评审备案" in current_compact
+        )
+        issuer_reply = (
+            any(term in current_compact for term in ("不知道哪个机关发证", "不知道谁发证", "不清楚发证机关"))
+            and any("采矿" in item for item in recent_questions)
+        )
+        if not correction and not issuer_reply:
+            return canonical
+        for previous in reversed(recent_questions):
+            candidate = cls._minimal_domain_corrections(previous)
+            candidate_plan = understand_query(candidate)
+            if candidate_plan.intent == "service_materials" or (
+                any(term in candidate for term in MINING_RIGHT_LICENSE_TERMS)
+                and any(term in candidate for term in MINING_RIGHT_MATERIAL_TERMS)
+            ):
+                return candidate
+        if correction:
+            return "采矿许可证办理需要什么要件"
+        return canonical
 
     @staticmethod
     def _is_broad_goaf_question(question: str) -> bool:

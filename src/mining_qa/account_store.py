@@ -939,6 +939,31 @@ class AccountStore:
             ).fetchone()
         return str(row["content"]) if row else None
 
+    def recent_user_questions(
+        self,
+        user_id: str,
+        conversation_id: str,
+        limit: int = 4,
+    ) -> list[str]:
+        with self._connect() as connection:
+            owner = connection.execute(
+                "SELECT user_id FROM conversations WHERE conversation_id = ? AND deleted_at IS NULL",
+                (conversation_id,),
+            ).fetchone()
+            if not owner:
+                raise ResourceNotFoundError(conversation_id)
+            if owner["user_id"] != user_id:
+                raise PermissionDeniedError(conversation_id)
+            rows = connection.execute(
+                """
+                SELECT content FROM messages
+                WHERE conversation_id = ? AND role = 'user'
+                ORDER BY created_at DESC, rowid DESC LIMIT ?
+                """,
+                (conversation_id, max(1, min(int(limit), 8))),
+            ).fetchall()
+        return [str(row["content"]) for row in reversed(rows)]
+
     def create_feedback(
         self,
         user_id: str | None,

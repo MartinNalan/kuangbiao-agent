@@ -295,6 +295,37 @@ class ApiAccountTests(unittest.TestCase):
         self.assertIn("勘查实施方案的评审或审查是怎么规定的", second.json()["answer"])
         self.assertIn("是否还有其他文件规定了相关内容", second.json()["answer"])
 
+    def test_question_resolution_receives_recent_user_context(self) -> None:
+        client = TestClient(app, raise_server_exceptions=False)
+        self.register(client, "resolution-context@example.com")
+        with patch("mining_qa.api.MiningQAAgent", FakeAnsweredAgent):
+            first = client.post(
+                "/api/ask",
+                json={"question": "采矿证办理需要什么要件"},
+            )
+        resolution = QuestionResolution(
+            canonical_question="采矿证办理需要什么要件",
+            plan=understand_query("采矿证办理需要什么要件"),
+            model_used=True,
+        )
+        resolver = AsyncMock(return_value=resolution)
+
+        with (
+            patch("mining_qa.api.resolve_question", resolver),
+            patch("mining_qa.api.MiningQAAgent", FakeAnsweredAgent),
+        ):
+            response = client.post(
+                "/api/ask",
+                json={
+                    "question": "我之前的问题是办理采矿证",
+                    "session_id": first.json()["session_id"],
+                },
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        context = resolver.await_args.kwargs["conversation_context"]
+        self.assertIn("采矿证办理需要什么要件", context)
+
     def test_feedback_enters_admin_triage_queue(self) -> None:
         user_client = TestClient(app, raise_server_exceptions=False)
         self.register(user_client, "feedback-api@example.com")
