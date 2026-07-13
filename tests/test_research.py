@@ -93,6 +93,8 @@ class ResearchPlannerTests(unittest.IsolatedAsyncioTestCase):
         plan = ResearchPlanner._fallback("不同标准对矿体无限外推所依据的间距有何差异？")
 
         self.assertIn("矿产地质勘查规范", plan.corpus_title_terms)
+        self.assertIn("DZ/T 0338.1-2020", plan.anchor_standard_numbers)
+        self.assertIn("DZ/T 0338.2-2020", plan.anchor_standard_numbers)
         self.assertEqual(len(plan.required_evidence_groups), 4)
         self.assertIn("外推", plan.required_evidence_groups[0])
         self.assertIn("工程间距", plan.required_evidence_groups[1])
@@ -107,7 +109,21 @@ class ResearchPlannerTests(unittest.IsolatedAsyncioTestCase):
 
         plan = await planner.plan("不同标准对矿体无限外推所依据的间距有何差异？")
 
+        self.assertEqual(plan.intent, "projection_comparison")
+        self.assertEqual(plan.strategy, "cross_document_comparison")
+        self.assertIn("DZ/T 0338.1-2020", plan.anchor_standard_numbers)
+        self.assertIn("DZ/T 0338.2-2020", plan.anchor_standard_numbers)
         self.assertTrue(any("无限外推" in group for group in plan.required_evidence_groups))
+        geometry = {
+            "title": "固体矿产资源量估算规程 第2部分：几何法",
+            "standard_no": "DZ/T 0338.2-2020",
+            "clause_no": "5.4.2",
+            "quote": (
+                "相邻的两个工程一个见矿，另一个不见矿时，采用有限外推法，"
+                "若实际工程间距大于推断资源量工程间距，则按推断资源量工程间距的1/2尖推。"
+            ),
+        }
+        self.assertTrue(ResearchTaskRunner._hit_matches_research_plan(geometry, plan))
 
     def test_direct_evidence_filter_rejects_an_ordinary_spacing_table(self) -> None:
         groups = ResearchPlanner._fallback("不同标准对矿体无限外推所依据的间距有何差异？").required_evidence_groups
@@ -130,6 +146,69 @@ class ResearchPlannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(ResearchTaskRunner._hit_matches_evidence_groups(ordinary, groups))
         self.assertTrue(ResearchTaskRunner._hit_matches_evidence_groups(direct, groups))
         self.assertFalse(ResearchTaskRunner._hit_matches_evidence_groups(finite_only, groups))
+
+    def test_projection_plan_keeps_geometry_clause_as_a_labeled_contrast(self) -> None:
+        plan = ResearchPlanner._fallback("不同标准对矿体无限外推所依据的间距有何差异？")
+        geometry = {
+            "title": "固体矿产资源量估算规程 第2部分：几何法",
+            "standard_no": "DZ/T 0338.2-2020",
+            "clause_no": "5.4.2",
+            "quote": (
+                "5.4.2 相邻的两个工程一个见矿，另一个不见矿时，采用有限外推法，"
+                "若实际工程间距大于推断资源量工程间距，则按推断资源量工程间距的1/2尖推。"
+            ),
+        }
+
+        self.assertTrue(ResearchTaskRunner._hit_matches_research_plan(geometry, plan))
+
+    def test_transfer_plan_anchors_policy_and_report_limit(self) -> None:
+        plan = ResearchPlanner._fallback("哪个标准或文件规定详查报告可以转采？")
+
+        self.assertEqual(plan.intent, "exploration_to_mining_eligibility")
+        self.assertEqual(plan.strategy, "relation_discovery")
+        self.assertIn("自然资规〔2023〕4号", plan.anchor_standard_numbers)
+        self.assertIn("DZ/T 0430-2023", plan.anchor_standard_numbers)
+
+    def test_transfer_filter_accepts_design_basis_but_rejects_stage_only_text(self) -> None:
+        plan = ResearchPlanner._fallback("哪个标准或文件规定详查报告可以转采？")
+        direct = {
+            "title": "矿产地质勘查规范 盐类 第1部分：总则",
+            "standard_no": "DZ/T 0212.1-2020",
+            "clause_no": "4.2.3",
+            "quote": (
+                "卤水矿及深层固体盐类矿床详查报告，经可行性研究具有工业价值，"
+                "可作为矿山设计开采依据。"
+            ),
+        }
+        ordinary = {
+            "title": "矿产地质勘查规范 某矿种",
+            "standard_no": "DZ/T 9999-2020",
+            "clause_no": "4.2.3",
+            "quote": "详查阶段应基本查明矿床地质特征，并做出是否有必要转入勘探的评价。",
+        }
+
+        self.assertTrue(ResearchTaskRunner._hit_matches_research_plan(direct, plan))
+        self.assertFalse(ResearchTaskRunner._hit_matches_research_plan(ordinary, plan))
+
+    def test_anchor_documents_are_prioritized_before_source_cap(self) -> None:
+        plan = ResearchPlanner._fallback("哪个标准或文件规定详查报告可以转采？")
+        documents = [
+            {"document_id": f"doc-{index}", "standard_no": f"DZ/T 9{index:03d}-2020"}
+            for index in range(35)
+        ]
+        documents.extend(
+            [
+                {"document_id": "policy", "standard_no": "自然资规〔2023〕4号"},
+                {"document_id": "limit", "standard_no": "DZ/T 0430-2023"},
+            ]
+        )
+
+        ordered = ResearchTaskRunner._prioritize_documents(documents, plan)
+
+        self.assertEqual(
+            {item["standard_no"] for item in ordered[:2]},
+            {"自然资规〔2023〕4号", "DZ/T 0430-2023"},
+        )
 
     def test_normative_reference_lists_are_not_treated_as_substantive_requirements(self) -> None:
         reference_hit = {
@@ -289,6 +368,56 @@ class ResearchAnalyzerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("**对比结果**", answer)
         self.assertIn("| 文件 | 判定 | 比较维度 | 具体发现 | 依据条款 |", answer)
         self.assertNotIn("**代表性直接依据**", answer)
+
+    async def test_transfer_answer_uses_relation_sections_without_internal_ids_or_table(self) -> None:
+        sources = [
+            Source(
+                title="自然资源部关于进一步完善矿产资源勘查开采登记管理的通知",
+                standard_no="自然资规〔2023〕4号",
+                chapter="二、#1",
+                quote=(
+                    "探矿权转采矿权，应当依据经评审备案的矿产资源储量报告。"
+                    "资源储量规模为大型的非煤矿山、大中型煤矿应当达到勘探程度，"
+                    "其他矿山应当达到详查（含）以上程度。"
+                ),
+                source_type="local_kb",
+                text_access="html_text",
+            ),
+            Source(
+                title="矿产地质勘查规范 盐类 第1部分：总则",
+                standard_no="DZ/T 0212.1-2020",
+                chapter="4.2.3",
+                quote=(
+                    "卤水矿及深层固体盐类矿床详查报告，经可行性研究具有工业价值，"
+                    "可作为矿山设计开采依据。"
+                ),
+                source_type="local_kb",
+                text_access="ocr_text",
+            ),
+            Source(
+                title="固体矿产资源储量核实报告编写规范",
+                standard_no="DZ/T 0430-2023",
+                chapter="A.9.5",
+                quote="矿产资源储量核实报告不能替代探矿权转采矿权时应提交的地质勘查报告。",
+                source_type="local_kb",
+                text_access="ocr_text",
+            ),
+        ]
+
+        answer = await ResearchTaskRunner()._render_answer(
+            "哪个标准或文件规定详查报告可以转采？",
+            ResearchPlanner._fallback("哪个标准或文件规定详查报告可以转采？"),
+            [],
+            sources,
+            DisabledResearchLLM(),  # type: ignore[arg-type]
+            Settings(),
+        )
+
+        self.assertIn("**一般转采规定**", answer)
+        self.assertIn("**分矿种特殊规定**", answer)
+        self.assertIn("**报告类型限制**", answer)
+        self.assertNotIn("| 文件 |", answer)
+        self.assertNotIn("compilation_", answer)
 
 
 if __name__ == "__main__":

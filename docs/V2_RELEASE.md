@@ -1,5 +1,30 @@
 # geowiki v2.x Releases
 
+## v2.2.0 Question Resolution and Protected Relation Retrieval
+
+- Added an LLM-led question-resolution stage before quota reservation and knowledge retrieval. Clear questions keep the deterministic fast path; materially ambiguous questions return 2-4 structured interpretations.
+- Added `clarification_required` to the basic and deep API contracts. Clarification does not consume quota, search the KB, create a research task, or enqueue enrichment work.
+- Added backend Schema guards so model output cannot drop user-supplied standard numbers, standard titles, exploration types, or known authority roles. High-value authority questions fall back to license-issuer clarification when that decisive condition is missing, including model timeout or invalid-JSON paths.
+- Reworked exploration-to-mining retrieval around the protected `探矿权转采矿权` relation. `可作为矿山设计开采依据`, `供矿山设计开采`, and `作为矿山建设设计的依据` are accepted only with report/stage objects and applicability conditions.
+- Basic and deep answers now retain general policy, mineral-specific provisions, and report-type limitations while rejecting ordinary exploration-stage definitions and `转入勘探` near-matches.
+- Protected `DZ/T 0338.1-2020` 6.2.2.1 and `DZ/T 0338.2-2020` 5.4.2 in cross-standard projection comparisons. Explicit infinite-projection questions label 5.4.2 as finite-projection contrast instead of merging the two rule types.
+- Deep projection comparison now uses deterministic fact extraction for protected clauses, one representative result per document, concise quotes, and explicit finite/infinite labels.
+- Added browser clarification controls, API/quota regression coverage, relation-filter tests, protected-source tests, and real private-KB validation.
+
+### v2.2.0 中文更新摘要
+
+- 新增“大模型主判、业务 Schema 校验、领域词典降级”的问题歧义确认层；确认阶段不扣次数、不检索知识库。
+- 修复“详查报告可以转采”深度模式主关系偏移，系统只保留一般政策、分矿种特殊规定和报告类型限制。
+- 修复跨标准外推比较漏选 `DZ/T 0338.2-2020`，并明确区分有限外推与无限外推。
+- 网页和 API 均支持结构化候选方向；API 客户端可读取 `clarification.options` 后重新提交完整问题。
+
+### v2.2.0 Validation
+
+- Automated suite: 134 tests passed.
+- Static checks: `git diff --check`, Python `compileall`, and `node --check web/static/app.js` passed.
+- Live private-KB transfer regression examined 30 governed candidate documents and retained general policy, 8 representative mineral-specific provisions, and the report-type limitation.
+- Live private-KB projection regression examined 32 governed candidate documents, retained 6 evidence documents, restored the protected `DZ/T 0338.2-2020` 5.4.2 clause, and labeled it as finite-projection contrast.
+
 ## v2.1.0 Domain Lexicon Governance
 
 - Added an administrator-only “领域词典” workspace for candidate review, runtime entries, status control, and audit history.

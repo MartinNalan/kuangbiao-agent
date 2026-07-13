@@ -12,7 +12,15 @@ from .evidence_reranker import EvidenceReranker, RerankResult
 from .gap_tasks import KnowledgeGapTaskStore
 from .knowledge_client import KnowledgeClient
 from .llm_client import LLMClient
-from .query_understanding import QueryPlan, normalize_user_query, understand_query
+from .query_understanding import (
+    PROJECTION_REFERENCE_STANDARD_NUMBERS,
+    QueryPlan,
+    TRANSFER_CONDITION_TERMS,
+    TRANSFER_EQUIVALENT_TERMS,
+    TRANSFER_REPORT_OBJECT_TERMS,
+    normalize_user_query,
+    understand_query,
+)
 from .retrieval_planner import QueryVariant, RetrievalPlanner
 from .retrieval_trace import RetrievalTraceLogger
 from .schemas import AskRequest, AskResponse, Limitations, RetrievalStats, Source
@@ -170,7 +178,7 @@ class MiningQAAgent:
                 reranker_ms += rerank_result.elapsed_ms
             evidence_hits = list(rerank_result.hits)
             if plan.intent == "projection_comparison":
-                concrete_hits = self._select_evidence_hits(evidence_hits, question, plan)
+                concrete_hits = self._select_evidence_hits(merged_hits, question, plan)
                 if concrete_hits:
                     evidence_hits = concrete_hits
         else:
@@ -178,8 +186,19 @@ class MiningQAAgent:
         sources = [self._source_from_hit(hit) for hit in evidence_hits]
         sources = self._trim_source_quotes(question, sources, plan)
         if rerank_result is not None and self.reranker.needs_model(plan):
-            has_usable_evidence = rerank_result.sufficient
-            has_clause_evidence = rerank_result.sufficient and bool(sources)
+            deterministic_usable, deterministic_clause = self._evaluate_evidence(
+                question,
+                kb_result.coverage,
+                sources,
+                plan,
+            )
+            has_usable_evidence = rerank_result.sufficient or (
+                plan.intent == "projection_comparison" and deterministic_usable
+            )
+            has_clause_evidence = bool(sources) and (
+                rerank_result.sufficient
+                or (plan.intent == "projection_comparison" and deterministic_clause)
+            )
         else:
             has_usable_evidence, has_clause_evidence = self._evaluate_evidence(
                 question,
@@ -210,7 +229,11 @@ class MiningQAAgent:
             vector_hits=sum(int(result.retrieval.get("vector_hits", 0)) for result in kb_results),
             graph_hits=sum(int(result.retrieval.get("graph_hits", 0)) for result in kb_results),
             web_hits=sum(int(result.retrieval.get("web_hits", 0)) for result in kb_results),
-            direct_evidence_hits=(rerank_result.direct_evidence_count if rerank_result else len(evidence_hits)),
+            direct_evidence_hits=(
+                max(rerank_result.direct_evidence_count, len(evidence_hits))
+                if rerank_result
+                else len(evidence_hits)
+            ),
             retrieval_rounds=logical_rounds,
             planner_used=planner_result.used,
             reranker_used=bool(rerank_result and rerank_result.used),
@@ -746,7 +769,37 @@ class MiningQAAgent:
                 ),
                 None,
             )
-            selected = [hit for hit in (policy, report_limit) if hit]
+            special_by_document: dict[str, dict] = {}
+            special_order: list[str] = []
+            for hit in hits:
+                context = " ".join(
+                    str(hit.get(key) or "")
+                    for key in ("evidence_text", "quote", "text")
+                )
+                if self._is_transfer_equivalent_evidence(context):
+                    prepared = dict(hit)
+                    if hit.get("evidence_text"):
+                        prepared["quote"] = hit["evidence_text"]
+                    document_id = str(hit.get("document_id") or hit.get("standard_no") or "")
+                    if document_id not in special_by_document:
+                        special_by_document[document_id] = prepared
+                        special_order.append(document_id)
+                    else:
+                        current = special_by_document[document_id]
+                        prepared_quality = (
+                            int(bool(prepared.get("clause_no"))),
+                            int(not self._hit_evidence_text(prepared).lstrip().startswith("前言")),
+                            float(prepared.get("score") or 0.0),
+                        )
+                        current_quality = (
+                            int(bool(current.get("clause_no"))),
+                            int(not self._hit_evidence_text(current).lstrip().startswith("前言")),
+                            float(current.get("score") or 0.0),
+                        )
+                        if prepared_quality > current_quality:
+                            special_by_document[document_id] = prepared
+            special = [special_by_document[key] for key in special_order[:4]]
+            selected = [hit for hit in (policy, *special, report_limit) if hit]
             if selected:
                 return selected
 
@@ -850,23 +903,7 @@ class MiningQAAgent:
                 return matched[:1]
             return matched[:3]
         if self._is_projection_distance_question(question, effective_plan):
-            selected = []
-            seen_documents: set[str | None] = set()
-            for hit in hits:
-                quote = hit.get("quote") or hit.get("text") or ""
-                if not hit.get("standard_no"):
-                    continue
-                if hit.get("document_id") in seen_documents:
-                    continue
-                if "具体要求按" in quote and "1/2" not in quote and "二分之一" not in quote:
-                    continue
-                has_ratio = any(term in quote for term in ("1/2", "二分之一", "１／２", "1/4", "四分之一", "１／４"))
-                has_distance_basis = "工程间距" in quote or "基本间距" in quote or "实际间距" in quote
-                if has_ratio and has_distance_basis:
-                    selected.append(hit)
-                    seen_documents.add(hit.get("document_id"))
-                if len(selected) >= 7:
-                    break
+            selected = self._projection_comparison_hits(hits, question)
             if selected:
                 return selected
         if self._is_policy_authority_question(question, effective_plan):
@@ -948,6 +985,135 @@ class MiningQAAgent:
     @staticmethod
     def _hit_evidence_text(hit: dict) -> str:
         return str(hit.get("quote") or hit.get("evidence_text") or hit.get("text") or "")
+
+    @staticmethod
+    def _is_transfer_equivalent_evidence(text: str) -> bool:
+        compact = re.sub(r"\s+", "", text or "")
+        return bool(
+            any(re.sub(r"\s+", "", term) in compact for term in TRANSFER_EQUIVALENT_TERMS)
+            and any(re.sub(r"\s+", "", term) in compact for term in TRANSFER_REPORT_OBJECT_TERMS)
+            and (
+                "详终" in compact
+                or any(re.sub(r"\s+", "", term) in compact for term in TRANSFER_CONDITION_TERMS)
+            )
+        )
+
+    @classmethod
+    def _projection_comparison_hits(cls, hits: list[dict], question: str = "") -> list[dict]:
+        valid: list[dict] = []
+        for hit in hits:
+            quote = " ".join(
+                str(hit.get(key) or "")
+                for key in ("evidence_text", "quote", "text")
+            ).strip()
+            if not hit.get("standard_no"):
+                continue
+            if "具体要求按" in quote and not any(term in quote for term in ("1/2", "二分之一")):
+                continue
+            has_ratio = any(
+                term in quote
+                for term in (
+                    "1/2",
+                    "二分之一",
+                    "１／２",
+                    "1/4",
+                    "四分之一",
+                    "１／４",
+                    "2/3",
+                    "1/3",
+                )
+            )
+            has_projection = any(term in quote for term in ("外推", "尖推", "平推", "尖灭"))
+            has_distance_basis = any(
+                term in quote
+                for term in (
+                    "工程间距",
+                    "基本间距",
+                    "实际间距",
+                    "相应间距",
+                    "理论工程间距",
+                )
+            )
+            if has_ratio and has_projection and has_distance_basis:
+                prepared = dict(hit)
+                if hit.get("evidence_text"):
+                    prepared["quote"] = hit["evidence_text"]
+                valid.append(prepared)
+        if not valid:
+            return []
+
+        def document_key(hit: dict) -> str:
+            return str(hit.get("document_id") or hit.get("standard_no") or "")
+
+        def standard_key(hit: dict) -> str:
+            return re.sub(r"\s+", "", str(hit.get("standard_no") or "")).upper()
+
+        def quality(hit: dict) -> tuple[int, int, int, float]:
+            standard = standard_key(hit)
+            clause = str(hit.get("clause_no") or hit.get("section_path") or "")
+            exact_reference = int(
+                (standard == "DZ/T0338.1-2020" and clause == "6.2.2.1")
+                or (standard == "DZ/T0338.2-2020" and clause == "5.4.2")
+            )
+            quote = cls._hit_evidence_text(hit)
+            focused_type = "无限外推" if "无限外推" in question else (
+                "有限外推" if "有限外推" in question else ""
+            )
+            return (
+                exact_reference,
+                int(bool(focused_type) and focused_type in quote),
+                int(bool(hit.get("clause_no"))),
+                float(hit.get("score") or 0.0),
+            )
+
+        best_by_document: dict[str, dict] = {}
+        order: list[str] = []
+        for hit in valid:
+            key = document_key(hit)
+            if key not in best_by_document:
+                best_by_document[key] = hit
+                order.append(key)
+            elif quality(hit) > quality(best_by_document[key]):
+                best_by_document[key] = hit
+
+        candidates = [best_by_document[key] for key in order]
+        selected: list[dict] = []
+        selected_documents: set[str] = set()
+
+        for standard_no in PROJECTION_REFERENCE_STANDARD_NUMBERS:
+            normalized = re.sub(r"\s+", "", standard_no).upper()
+            match = next((hit for hit in candidates if standard_key(hit) == normalized), None)
+            if match:
+                selected.append(match)
+                selected_documents.add(document_key(match))
+
+        seen_signatures = {
+            (cls._projection_type(cls._hit_evidence_text(hit)), cls._projection_distance_bucket(cls._hit_evidence_text(hit)))
+            for hit in selected
+        }
+        for hit in candidates:
+            if document_key(hit) in selected_documents:
+                continue
+            signature = (
+                cls._projection_type(cls._hit_evidence_text(hit)),
+                cls._projection_distance_bucket(cls._hit_evidence_text(hit)),
+            )
+            if signature in seen_signatures:
+                continue
+            selected.append(hit)
+            selected_documents.add(document_key(hit))
+            seen_signatures.add(signature)
+            if len(selected) >= 7:
+                return selected
+
+        for hit in candidates:
+            if document_key(hit) in selected_documents:
+                continue
+            selected.append(hit)
+            selected_documents.add(document_key(hit))
+            if len(selected) >= 7:
+                break
+        return selected
 
     def _is_comparison_question(self, question: str) -> bool:
         return any(term in question for term in CACHEABLE_COMPARISON_TERMS)
@@ -1183,26 +1349,36 @@ class MiningQAAgent:
         patterns = [
             r"(探矿权转采矿权，应当依据经评审备案的矿产资源储量报告。资源储量规模为大型的非煤矿山、大中型煤矿应当达到勘探程度，其他矿山应当达到详查（含）以上程度。)",
             r"(矿产资源储量核实报告不能替代探矿权转采矿权时应提交的地质勘查报告。)",
+            r"((?:卤水.*?|深层固体盐类.*?|详查报告.*?)(?:可作为矿山设计开采依据|供矿山设计开采|作为矿山建设设计的依据).*?。)",
         ]
         for pattern in patterns:
             match = re.search(pattern, clean)
             if match:
                 return match.group(1)
+        for sentence in re.split(r"(?<=[。！？；;])\s*", clean):
+            if self._is_transfer_equivalent_evidence(sentence):
+                return sentence[:700].strip()
         return clean[:260] + ("..." if len(clean) > 260 else "")
 
     def _direct_projection_quote(self, text: str) -> str:
         normalized = re.sub(r"\s+", " ", text).strip()
         patterns = [
+            r"(6\.2\.2\.1\s*采用几何法时.*?a\)有限外推：.*?b\)无限外推：.*?经验工程间距\s*1/2\s*尖推。)",
             r"(5\.4\.2\s*相邻的两个工程一个见矿.*?推断资源量工程间距.*?1/2尖推。)",
+            r"(8\.3\.4\.5\.3\s*无限外推：.*?1/2尖推、1/4平推。)",
+            r"(8\.2\.3\.2\s*无限外推原则：.*?1/2尖推或1/4平推。)",
+            r"(J\.3\.2\.1\s*无限外推.*?1/2尖\s*推或1/4平推。)",
             r"(8\.3\.4\.5\.2\s*有限外推：\s*a\).*?实际间距1/2尖推、1/4平推。)",
             r"(8\.2\.3\.1\s*有限外推原则：.*?实际工程间距2/3尖推或1/3平推。)",
             r"(G\.1\.3\s*应根据矿体.*?基本勘查工程间距的四分之一平推。)",
             r"(a\)当见矿工程与相邻工程.*?按推断资源量.*?1/2尖推或1/4平推推断\s*资源量。.*?b\)当见矿工程与相邻工程.*?实际.*?1/2尖推或1/4平推推断资源量)",
+            r"(\d+(?:\.\d+)+\s*矿体外推应合理.*?a\).*?)(?=b\)|$)",
         ]
         for pattern in patterns:
             match = re.search(pattern, normalized)
             if match:
-                return match.group(1).strip()
+                quote = match.group(1).strip()
+                return quote[:520].rstrip() + ("..." if len(quote) > 520 else "")
 
         sentences = re.split(r"(?<=[。；;])\s*", text)
         candidates = []
@@ -1226,7 +1402,8 @@ class MiningQAAgent:
             if len(candidates) >= 2:
                 break
         if candidates:
-            return "".join(candidates)
+            quote = "".join(candidates)
+            return quote[:520].rstrip() + ("..." if len(quote) > 520 else "")
         anchors = ("5.4.2", "有限外推", "外推", "尖推", "平推", "工程间距")
         idx = -1
         for anchor in anchors:
@@ -1526,6 +1703,22 @@ class MiningQAAgent:
                             f"（{limiting_source.chapter or '相关条款'}）：{limiting_source.quote}",
                         ]
                     )
+                special_sources = [
+                    source
+                    for source in sources
+                    if self._is_transfer_equivalent_evidence(source.quote or "")
+                ]
+                if special_sources:
+                    lines.extend(["", "**分矿种特殊规定**："])
+                    for source in special_sources[:4]:
+                        lines.append(
+                            f"- **{source.standard_no or '未知标准号'}《{source.title}》**"
+                            f"（{source.chapter or '相关条款'}）：{source.quote}"
+                        )
+                    lines.append(
+                        "上述“可作为/供矿山设计开采”及“作为矿山建设设计依据”等受控表述，"
+                        "在本项目业务语义中属于满足条款条件时可以转采的正向依据。"
+                    )
                 return "\n".join(lines)
 
         if effective_plan.intent == "companion_resource_type":
@@ -1594,41 +1787,46 @@ class MiningQAAgent:
             and (self._is_comparison_question(question) or effective_plan.search_mode in {"comparison", "exhaustive"})
             and sources
         ):
-            groups: dict[str, list[tuple[Source, str]]] = {
-                "按推断资源量工程间距与实际工程间距分情形": [],
-                "按理论工程间距与实际间距分情形": [],
-                "以拟推资源量类型的经验工程间距为外推依据": [],
-                "以推断资源量工程间距为外推依据": [],
-                "以理论工程间距为外推依据": [],
-                "以基本工程间距为外推依据": [],
-                "以实际工程间距为外推依据": [],
-                "以同类型资源量/相应工程间距为外推依据": [],
-                "其他或需要结合上下文判断": [],
-            }
+            groups: dict[str, dict[str, list[tuple[Source, str]]]] = {}
             for source in sources:
                 quote = self._evidence_quote_for_prompt(question, source.quote, effective_plan) or ""
+                projection_type = self._projection_type(quote)
                 bucket = self._projection_distance_bucket(quote)
-                groups[bucket].append((source, quote))
+                groups.setdefault(projection_type, {}).setdefault(bucket, []).append((source, quote))
 
             lines = [
                 "存在不一致。不同标准对矿体外推时采用的“距离基准”并不完全相同，主要差异如下：",
                 "",
             ]
+            if "无限外推" in question and "有限外推" in groups:
+                lines.extend(
+                    [
+                        "以下先列无限外推的直接规定，再单列有限外推对照。有限外推条款用于说明距离基准差异，不作为无限外推条款引用。",
+                        "",
+                    ]
+                )
             index = 1
-            for bucket, items in groups.items():
-                if not items:
+            type_order = ("无限外推", "有限外推", "有限与无限外推综合条款", "外推规则")
+            for projection_type in type_order:
+                type_groups = groups.get(projection_type) or {}
+                if not type_groups:
                     continue
-                lines.append(f"{index}. **{bucket}**")
-                for source, quote in items:
-                    lines.append(
-                        f"   - **{source.standard_no or '未知标准号'}《{source.title}》**"
-                        f"（{source.chapter or '相关章节'}）：{quote}"
-                    )
-                lines.append("")
-                index += 1
+                type_label = projection_type
+                if "无限外推" in question and projection_type == "有限外推":
+                    type_label = "有限外推对照"
+                lines.extend([f"**{type_label}**", ""])
+                for bucket, items in type_groups.items():
+                    lines.append(f"{index}. **{bucket}**")
+                    for source, quote in items:
+                        lines.append(
+                            f"   - **{source.standard_no or '未知标准号'}《{source.title}》**"
+                            f"（{source.chapter or '相关章节'}）：{quote}"
+                        )
+                    lines.append("")
+                    index += 1
             lines.append(
-                "结论：回答这类问题时不能只说“按1/2尖推或1/4平推”，还必须说明这个比例是作用在"
-                "“实际工程间距”“基本工程间距”“推断资源量工程间距”还是“同类型资源量工程间距”上。"
+                "结论：回答这类问题时，必须同时说明外推类型，以及比例所作用的“实际工程间距”"
+                "“基本工程间距”“推断资源量工程间距”或“经验工程间距”，不能只给出1/2、1/4等比例。"
             )
             return "\n".join(lines).strip()
 
@@ -1790,7 +1988,20 @@ class MiningQAAgent:
             )
         return None
 
-    def _projection_distance_bucket(self, quote: str) -> str:
+    @staticmethod
+    def _projection_type(quote: str) -> str:
+        has_infinite = "无限外推" in quote or "见矿工程向外再没有工程控制" in quote
+        has_finite = "有限外推" in quote or "相邻的两个工程一个见矿" in quote
+        if has_infinite and not has_finite:
+            return "无限外推"
+        if has_finite and not has_infinite:
+            return "有限外推"
+        if has_infinite and has_finite:
+            return "有限与无限外推综合条款"
+        return "外推规则"
+
+    @staticmethod
+    def _projection_distance_bucket(quote: str) -> str:
         if "经验工程间距" in quote:
             return "以拟推资源量类型的经验工程间距为外推依据"
         if "理论工程" in quote or "理论工程间距" in quote:

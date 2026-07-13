@@ -145,12 +145,58 @@ Authorization: Bearer your-api-key
 
 The basic endpoint atomically reserves one quota unit before processing. `answered`, `insufficient_evidence`, and `queued_for_enrichment` consume it. `out_of_scope` and `system_error` release the reservation without consumption. Browser sessions and every API Key owned by the same user share one account quota.
 
+If the question has materially different professional interpretations, the service responds before quota reservation and KB retrieval:
+
+```json
+{
+  "answer": "我目前理解为：采空区怎么处理？\n\n当前问题存在多个会影响检索范围的专业方向。",
+  "session_id": "session-id",
+  "request_id": "req_xxx",
+  "status": "clarification_required",
+  "mode": "basic",
+  "quota_cost": 0,
+  "clarification": {
+    "interpreted_question": "采空区怎么处理？",
+    "reason": "不同处理目标会对应不同标准和条款范围。",
+    "allow_free_text": true,
+    "options": [
+      {
+        "option_id": "option_1",
+        "label": "稳定性评价",
+        "question": "采空区稳定性评价应依据哪些标准？",
+        "description": "关注稳定性评价与监测。"
+      },
+      {
+        "option_id": "option_2",
+        "label": "积水治理",
+        "question": "采空区积水治理应依据哪些标准？",
+        "description": "关注积水调查与治理。"
+      }
+    ]
+  },
+  "quota": {
+    "date": "2026-07-13",
+    "daily_limit": 10,
+    "bonus": 0,
+    "effective_limit": 10,
+    "used": 0,
+    "reserved": 0,
+    "consumed": false,
+    "consumed_units": 0,
+    "remaining": 10
+  }
+}
+```
+
+Clients should present `clarification.options`, let the user choose or provide free text, and submit the selected option's complete `question` as a new request. The confirmation response does not call KB retrieval, enqueue enrichment, create a deep-research task, or consume quota. `POST /api/research/tasks` may likewise return HTTP 200 with this response instead of HTTP 202; only a confirmed question creates a task and reserves three units.
+
 `status` suggested values:
 
 - `answered`: 已根据证据回答。
 - `insufficient_evidence`: 问题属于服务范围，但没有条款级证据。
 - `out_of_scope`: 问题不属于矿产资源标准规范相关服务范围。
 - `queued_for_enrichment`: 已返回证据不足，同时创建补库任务。
+- `clarification_required`: 问题存在会改变检索范围或结论的歧义，等待用户确认；本次不扣次数。
 
 When `status=out_of_scope`, the service must not call KB retrieval, web supplement, OCR, multimodal parsing, or long LLM reasoning. It returns a fixed refusal message, does not create a knowledge-gap task, and does not consume the daily quota. Account/IP/API-Key rate limiting and audit logging still apply.
 

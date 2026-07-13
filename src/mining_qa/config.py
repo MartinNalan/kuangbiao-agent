@@ -33,6 +33,19 @@ class Settings(BaseSettings):
     embedding_batch_size: int = Field(default=10, alias="EMBEDDING_BATCH_SIZE")
     query_planner_enabled: bool = Field(default=True, alias="QUERY_PLANNER_ENABLED")
     evidence_reranker_enabled: bool = Field(default=True, alias="EVIDENCE_RERANKER_ENABLED")
+    question_resolution_enabled: bool = Field(default=True, alias="QUESTION_RESOLUTION_ENABLED")
+    question_resolution_max_tokens: int = Field(
+        default=500,
+        ge=100,
+        le=1000,
+        alias="QUESTION_RESOLUTION_MAX_TOKENS",
+    )
+    question_resolution_min_confidence: float = Field(
+        default=0.55,
+        ge=0.0,
+        le=1.0,
+        alias="QUESTION_RESOLUTION_MIN_CONFIDENCE",
+    )
     query_planner_max_tokens: int = Field(default=600, alias="QUERY_PLANNER_MAX_TOKENS")
     evidence_reranker_max_tokens: int = Field(default=800, alias="EVIDENCE_RERANKER_MAX_TOKENS")
     answer_max_tokens: int = Field(default=1000, alias="ANSWER_MAX_TOKENS")

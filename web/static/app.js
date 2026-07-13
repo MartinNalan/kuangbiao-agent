@@ -563,21 +563,41 @@ function quotaLabel(quota) {
   return `${action} · 今日剩余 ${displayCount(quota.remaining)} 次`;
 }
 
+function renderClarification(data) {
+  const clarification = data.clarification;
+  if (data.status !== "clarification_required" || !clarification?.options?.length) return "";
+  return `
+    <div class="clarification-panel">
+      <div class="clarification-options">
+        ${clarification.options.map((option) => `
+          <button class="clarification-option" type="button" data-question="${escapeHtml(option.question)}">
+            <strong>${escapeHtml(option.label)}</strong>
+            ${option.description ? `<span>${escapeHtml(option.description)}</span>` : ""}
+          </button>
+        `).join("")}
+      </div>
+      ${clarification.allow_free_text ? '<p>以上方向都不准确时，可以在输入框中直接补充你的实际需求。</p>' : ""}
+    </div>
+  `;
+}
+
 function appendAssistantMessage(data, existingNode = null) {
+  const isClarification = data.status === "clarification_required";
   const node = existingNode || document.createElement("article");
   node.className = "message assistant-message";
   node.innerHTML = `
     <div class="assistant-avatar">G</div>
     <div class="assistant-body">
       <div class="answer-content">${renderMarkdown(data.answer || "未返回答案。")}</div>
+      ${renderClarification(data)}
       <div class="answer-meta">
         <span class="status-chip ${escapeHtml(data.status || "")}">${escapeHtml(statusLabel(data.status))}</span>
         <span class="mode-chip">${data.mode === "deep" ? "深度模式" : "基本模式"}</span>
         ${data.quota ? `<span>${escapeHtml(quotaLabel(data.quota))}</span>` : ""}
         ${data.request_id ? `<span>请求 ${escapeHtml(data.request_id.slice(0, 12))}</span>` : ""}
       </div>
-      ${renderEvidence(data)}
-      <div class="message-actions" aria-label="回答反馈">
+      ${isClarification ? "" : renderEvidence(data)}
+      ${isClarification ? "" : `<div class="message-actions" aria-label="回答反馈">
         <button class="message-action-button feedback-positive" type="button" title="满意" aria-label="满意"><i data-lucide="thumbs-up"></i></button>
         <button class="message-action-button feedback-negative" type="button" title="不满意" aria-label="不满意"><i data-lucide="thumbs-down"></i></button>
         ${data.mode !== "deep" && data.mode_recommendation === "deep" && data.question ? '<button class="deep-upgrade-button" type="button"><i data-lucide="microscope"></i><span>转深度研究 · 追加 2 次</span></button>' : ""}
@@ -594,10 +614,24 @@ function appendAssistantMessage(data, existingNode = null) {
         </select>
         <input maxlength="500" placeholder="补充说明，可选" />
         <button class="primary-command" type="submit">提交</button>
-      </form>
+      </form>`}
     </div>
   `;
   if (!existingNode) $("#messageList").appendChild(node);
+  if (isClarification) {
+    $$(".clarification-option", node).forEach((button) => {
+      button.addEventListener("click", () => {
+        $$(".clarification-option", node).forEach((item) => { item.disabled = true; });
+        setQAMode(data.mode === "deep" ? "deep" : "basic");
+        const input = $("#questionInput");
+        input.value = button.dataset.question || "";
+        resizeComposer();
+        $("#askForm").requestSubmit();
+      });
+    });
+    refreshIcons();
+    return node;
+  }
   const positive = $(".feedback-positive", node);
   const negative = $(".feedback-negative", node);
   const form = $(".feedback-form", node);
@@ -647,6 +681,7 @@ function statusLabel(status) {
     answered: "已回答",
     out_of_scope: "领域外拒答",
     queued_for_enrichment: "已进入补库队列",
+    clarification_required: "等待确认",
     insufficient_evidence: "证据不足",
     completed: "研究完成",
     partial: "研究部分完成",
@@ -768,6 +803,15 @@ async function startDeepResearch(question, options = {}) {
         source_request_id: options.sourceRequestId || null,
       }),
     });
+    if (task.status === "clarification_required") {
+      task.question = question;
+      task.mode = "deep";
+      state.currentConversation = task.session_id || state.currentConversation;
+      appendAssistantMessage(task, pending);
+      if (task.quota) updateQuota(task.quota);
+      await Promise.allSettled([loadConversations(), loadAccountSummary()]);
+      return true;
+    }
     state.activeResearchTask = task.task_id;
     state.currentConversation = task.session_id;
     storeActiveResearchTask(task, question);

@@ -184,8 +184,17 @@
     "canonical_term": "探矿权转采矿权",
     "intent_label": "exploration_to_mining_eligibility",
     "domain": "mining_right_registration",
-    "positive_expansions": ["申请采矿权", "采矿权新立", "勘查程度", "经评审备案的矿产资源储量报告"],
-    "negative_terms": [],
+    "aliases": ["转采"],
+    "positive_expansions": [
+      "申请采矿权",
+      "采矿权新立",
+      "勘查程度",
+      "经评审备案的矿产资源储量报告",
+      "可作为矿山设计开采依据",
+      "供矿山设计开采",
+      "作为矿山建设设计的依据"
+    ],
+    "negative_terms": ["转入勘探", "提出可供勘探的范围", "是否有必要转入勘探", "详查阶段要求"],
     "evidence_required_patterns": ["探矿权转采矿权", "勘查程度", "申请采矿权"],
     "priority": 98,
     "status": "active",
@@ -359,5 +368,33 @@
     "status": "active",
     "created_at": "2026-07-12T00:00:00+08:00",
     "updated_at": "2026-07-12T00:00:00+08:00"
+  },
+  {
+    "lexicon_id": "lex-mine-goaf",
+    "user_expression": "采空区",
+    "canonical_term": "矿山采空区",
+    "intent_label": "general",
+    "intent_trigger_enabled": false,
+    "domain": "mine_safety_and_geology",
+    "aliases": ["采空场", "老空区", "老窑采空区", "采空塌陷区"],
+    "positive_expansions": [
+      "地下采空区",
+      "老采空区",
+      "采空区调查",
+      "采空区稳定性评价",
+      "采空区积水",
+      "采空区治理",
+      "采空区监测",
+      "采空区塌陷",
+      "采空区防治"
+    ],
+    "negative_terms": [],
+    "evidence_required_patterns": [],
+    "domain_gate_enabled": true,
+    "priority": 93,
+    "risk_level": "low",
+    "status": "active",
+    "created_at": "2026-07-13T00:00:00+08:00",
+    "updated_at": "2026-07-13T00:00:00+08:00"
   }
 ]

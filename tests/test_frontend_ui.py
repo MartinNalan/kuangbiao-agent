@@ -62,6 +62,15 @@ process.stdout.write(JSON.stringify({html: renderer.render(input, {baseUrl: 'htt
         self.assertIn("updateResearchProgress", script)
         self.assertIn("转深度研究 · 追加 2 次", script)
 
+    def test_clarification_options_resubmit_without_rendering_feedback_controls(self) -> None:
+        script = (PROJECT_ROOT / "web" / "static" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('data.status === "clarification_required"', script)
+        self.assertIn('class="clarification-option"', script)
+        self.assertIn('input.value = button.dataset.question || ""', script)
+        self.assertIn('${isClarification ? "" : renderEvidence(data)}', script)
+        self.assertIn("if (isClarification)", script)
+
     def test_quota_label_uses_backend_consumed_units(self) -> None:
         script = (PROJECT_ROOT / "web" / "static" / "app.js").read_text(encoding="utf-8")
 

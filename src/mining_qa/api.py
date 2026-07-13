@@ -45,6 +45,11 @@ from .lexicon_governance import (
     get_lexicon_governance_store,
 )
 from .query_understanding import contextualize_follow_up
+from .question_resolution import (
+    QuestionResolution,
+    QuestionResolver,
+    clarification_answer,
+)
 from .rate_limit import RateLimiter
 from .schemas import (
     ApiKeyCreateRequest,
@@ -127,6 +132,53 @@ def admin_principal(request: Request) -> Principal:
 async def enforce_rate_limit(rate_limit_key: str) -> None:
     result = await rate_limiter.check(rate_limit_key, get_settings())
     rate_limiter.raise_if_limited(result)
+
+
+async def resolve_question(
+    settings,
+    question: str,
+    *,
+    mode: str,
+) -> QuestionResolution:
+    resolver = QuestionResolver(settings)
+    try:
+        return await resolver.resolve(question, mode=mode)
+    finally:
+        await resolver.aclose()
+
+
+def clarification_response(
+    resolution: QuestionResolution,
+    *,
+    session_id: str,
+    request_id: str,
+    mode: str,
+    quota: dict[str, object] | None = None,
+) -> AskResponse:
+    clarification = resolution.clarification
+    if clarification is None:
+        raise ValueError("clarification response requires clarification data")
+    quota_info = None
+    if quota is not None:
+        snapshot = dict(quota)
+        snapshot["consumed"] = False
+        snapshot["consumed_units"] = 0
+        quota_info = QuotaInfo(**snapshot)
+    return AskResponse(
+        answer=clarification_answer(clarification),
+        session_id=session_id,
+        request_id=request_id,
+        status="clarification_required",
+        confidence="medium",
+        quota=quota_info,
+        mode="deep" if mode == "deep" else "basic",
+        quota_cost=0,
+        clarification=clarification,
+        limitations={
+            "has_clause_level_evidence": False,
+            "notes": ["问题尚未确认，本次未执行知识库检索，也未使用问答次数。"],
+        },
+    )
 
 
 @app.on_event("startup")
@@ -518,7 +570,8 @@ async def delete_conversation(
     summary="Ask a domain-scoped question",
     description=(
         "Answers mineral-resource standards, technical specification, and related policy questions. "
-        "Answered and in-scope evidence-gap requests consume daily quota; out-of-scope and system-error results do not."
+        "Answered and in-scope evidence-gap requests consume daily quota; clarification, out-of-scope, "
+        "and system-error results do not."
     ),
 )
 async def ask(
@@ -534,35 +587,110 @@ async def ask(
     conversation_id: str | None = None
     quota_reserved = False
     unreserved_quota: dict[str, object] | None = None
+    resolution: QuestionResolution | None = None
 
     await enforce_rate_limit(principal.rate_limit_key)
+    retrieval_question = payload.question
     if principal.user_id:
         try:
             conversation_id = store.ensure_conversation(principal.user_id, payload.session_id, payload.question)
             payload.session_id = conversation_id
             previous_question = store.latest_user_question(principal.user_id, conversation_id)
-            payload._retrieval_question = contextualize_follow_up(payload.question, previous_question)
-            if principal.quota_managed:
-                if domain_gate.check(payload.retrieval_question).in_scope:
-                    store.reserve_qa_quota(
+            retrieval_question = contextualize_follow_up(payload.question, previous_question)
+        except AccountStoreError as error:
+            raise account_error(error) from error
+    payload._retrieval_question = retrieval_question
+
+    domain_decision = domain_gate.check(payload.retrieval_question)
+    if domain_decision.in_scope:
+        resolution = await resolve_question(
+            settings,
+            payload.retrieval_question,
+            mode="basic",
+        )
+        if resolution.requires_clarification:
+            quota_snapshot = None
+            if principal.user_id and principal.quota_managed:
+                quota_snapshot = store.quota_snapshot(
+                    principal.user_id,
+                    settings.quota_timezone,
+                )
+            result = clarification_response(
+                resolution,
+                session_id=conversation_id or payload.session_id or str(uuid4()),
+                request_id=request_id,
+                mode="basic",
+                quota=quota_snapshot,
+            )
+            if principal.user_id and conversation_id:
+                try:
+                    store.save_exchange(
                         principal.user_id,
-                        request_id,
-                        channel,
-                        principal.credential_id if principal.auth_type == "api_key" else None,
                         conversation_id,
-                        len(payload.question),
-                        settings.quota_timezone,
-                        quota_units=1,
-                        request_mode="basic",
+                        request_id,
+                        payload.question,
+                        result.answer,
+                        {
+                            "status": result.status,
+                            "mode": "basic",
+                            "clarification": result.clarification.model_dump(mode="json")
+                            if result.clarification
+                            else None,
+                            "retrieval_question": payload.retrieval_question,
+                            "question_resolution": {
+                                "model_used": resolution.model_used,
+                                "canonical_question": resolution.canonical_question,
+                                "error": resolution.error,
+                            },
+                            "quota": result.quota.model_dump(mode="json") if result.quota else None,
+                        },
                     )
-                    quota_reserved = True
-                else:
-                    unreserved_quota = store.quota_snapshot(
-                        principal.user_id,
-                        settings.quota_timezone,
-                    )
-                    unreserved_quota["consumed"] = False
-                    unreserved_quota["consumed_units"] = 0
+                except AccountStoreError:
+                    logger.exception("Unable to persist clarification for %s", conversation_id)
+            usage_logger.write(
+                {
+                    "user_id": principal.user_id,
+                    "credential_id": principal.credential_id,
+                    "auth_type": principal.auth_type,
+                    "endpoint": "/api/ask",
+                    "method": "POST",
+                    "client_host": http_request.client.host if http_request.client else None,
+                    "request_id": request_id,
+                    "question_chars": len(payload.question),
+                    "status": result.status,
+                    "quota_consumed": False,
+                    "quota_consumed_units": 0,
+                    "quota_remaining": result.quota.remaining if result.quota else None,
+                    "question_resolution_used": resolution.model_used,
+                    "question_resolution_error": resolution.error,
+                    "duration_ms": round((perf_counter() - started) * 1000, 2),
+                }
+            )
+            return result
+        payload._retrieval_question = resolution.canonical_question
+
+    if principal.user_id and principal.quota_managed:
+        try:
+            if domain_decision.in_scope:
+                store.reserve_qa_quota(
+                    principal.user_id,
+                    request_id,
+                    channel,
+                    principal.credential_id if principal.auth_type == "api_key" else None,
+                    conversation_id,
+                    len(payload.question),
+                    settings.quota_timezone,
+                    quota_units=1,
+                    request_mode="basic",
+                )
+                quota_reserved = True
+            else:
+                unreserved_quota = store.quota_snapshot(
+                    principal.user_id,
+                    settings.quota_timezone,
+                )
+                unreserved_quota["consumed"] = False
+                unreserved_quota["consumed_units"] = 0
         except AccountStoreError as error:
             raise account_error(error) from error
 
@@ -609,6 +737,13 @@ async def ask(
                     "retrieval_question": payload.retrieval_question
                     if payload.retrieval_question != payload.question
                     else None,
+                    "question_resolution": {
+                        "model_used": resolution.model_used,
+                        "canonical_question": resolution.canonical_question,
+                        "error": resolution.error,
+                    }
+                    if resolution
+                    else None,
                     "mode": "basic",
                     "mode_recommendation": result.mode_recommendation,
                 },
@@ -635,6 +770,8 @@ async def ask(
             "quota_consumed": result.quota.consumed if result.quota else False,
             "quota_consumed_units": result.quota.consumed_units if result.quota else 0,
             "quota_remaining": result.quota.remaining if result.quota else None,
+            "question_resolution_used": resolution.model_used if resolution else False,
+            "question_resolution_error": resolution.error if resolution else None,
             "duration_ms": round((perf_counter() - started) * 1000, 2),
         }
     )
@@ -643,20 +780,22 @@ async def ask(
 
 @app.post(
     "/api/research/tasks",
-    response_model=ResearchTaskResponse,
+    response_model=ResearchTaskResponse | AskResponse,
     status_code=status.HTTP_202_ACCEPTED,
     tags=["research"],
     summary="Create a persistent deep-research task",
     description=(
         "Deep mode enumerates a governed candidate corpus and reviews documents asynchronously. "
-        "A new task costs three quota units; upgrading the same basic answer reserves only two additional units."
+        "A new task costs three quota units; upgrading the same basic answer reserves only two additional units. "
+        "Ambiguous questions return clarification before task creation and do not reserve quota."
     ),
 )
 async def create_research_task(
     payload: ResearchTaskCreateRequest,
     http_request: Request,
+    response: Response,
     principal: Annotated[Principal, Depends(authenticated_principal)],
-) -> ResearchTaskResponse:
+) -> ResearchTaskResponse | AskResponse:
     if not principal.user_id or not principal.quota_managed:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -688,6 +827,64 @@ async def create_research_task(
                     "message": "深度模式仅处理矿产资源、地质标准规范和相关政策技术问题。",
                 },
             )
+        resolution = await resolve_question(
+            settings,
+            retrieval_question,
+            mode="deep",
+        )
+        if resolution.requires_clarification:
+            response.status_code = status.HTTP_200_OK
+            quota_snapshot = store.quota_snapshot(
+                principal.user_id,
+                settings.quota_timezone,
+            )
+            result = clarification_response(
+                resolution,
+                session_id=conversation_id,
+                request_id=request_id,
+                mode="deep",
+                quota=quota_snapshot,
+            )
+            store.save_exchange(
+                principal.user_id,
+                conversation_id,
+                request_id,
+                payload.question,
+                result.answer,
+                {
+                    "status": result.status,
+                    "mode": "deep",
+                    "clarification": result.clarification.model_dump(mode="json")
+                    if result.clarification
+                    else None,
+                    "retrieval_question": retrieval_question,
+                    "question_resolution": {
+                        "model_used": resolution.model_used,
+                        "canonical_question": resolution.canonical_question,
+                        "error": resolution.error,
+                    },
+                    "quota": result.quota.model_dump(mode="json") if result.quota else None,
+                },
+            )
+            usage_logger.write(
+                {
+                    "user_id": principal.user_id,
+                    "credential_id": principal.credential_id,
+                    "auth_type": principal.auth_type,
+                    "endpoint": "/api/research/tasks",
+                    "method": "POST",
+                    "client_host": http_request.client.host if http_request.client else None,
+                    "request_id": request_id,
+                    "question_chars": len(payload.question),
+                    "status": result.status,
+                    "quota_reserved_units": 0,
+                    "quota_remaining": result.quota.remaining if result.quota else None,
+                    "question_resolution_used": resolution.model_used,
+                    "question_resolution_error": resolution.error,
+                }
+            )
+            return result
+        retrieval_question = resolution.canonical_question
         reserved_units = store.research_upgrade_quota_cost(
             principal.user_id,
             payload.source_request_id,
@@ -741,6 +938,8 @@ async def create_research_task(
             "status": "queued",
             "quota_reserved_units": int(task["reserved_quota_units"]),
             "quota_remaining": quota["remaining"],
+            "question_resolution_used": resolution.model_used,
+            "question_resolution_error": resolution.error,
         }
     )
     return research_task_response(task, quota)

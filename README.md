@@ -4,7 +4,7 @@
 
 ## 当前阶段
 
-当前版本为 **v2.1.0**。已具备私有知识库问答、受控 Agentic RAG、基本/深度双模式、持久化跨文档研究任务、邀请码与邮箱验证注册、登录会话、用户 API Key、每日次数配额、会话历史、标准目录、开发者控制台，以及由管理员审核发布的领域词典治理入口。
+当前版本为 **v2.2.0**。已具备私有知识库问答、受控 Agentic RAG、基本/深度双模式、持久化跨文档研究任务、大模型主导的问题歧义确认、邀请码与邮箱验证注册、登录会话、用户 API Key、每日次数配额、会话历史、标准目录、开发者控制台，以及由管理员审核发布的领域词典治理入口。
 
 基本模式检索链路为：领域门控 -> 机械归一/定义槽位 -> 复杂问题 DeepSeek 规划 -> Schema/FTS/KG/ANN 混合检索 -> 证据审查 -> 最多一次补充检索 -> 受证据约束的回答。深度模式使用独立异步流程：研究规划 -> Schema/目录候选枚举 -> 逐文件限定检索 -> AND 证据组校验 -> 分批结构化事实抽取 -> 对比矩阵与覆盖说明。
 
@@ -31,6 +31,9 @@
 OPENAI_API_KEY=<your-model-api-key>
 OPENAI_BASE_URL=https://api.deepseek.com
 OPENAI_MODEL=deepseek-v4-flash
+QUESTION_RESOLUTION_ENABLED=true
+QUESTION_RESOLUTION_MAX_TOKENS=500
+QUESTION_RESOLUTION_MIN_CONFIDENCE=0.55
 DEFINITION_ANSWER_MAX_TOKENS=1600
 RESEARCH_PLANNER_MAX_TOKENS=1000
 RESEARCH_ANALYSIS_MAX_TOKENS=1800
@@ -68,6 +71,8 @@ AGENTMAIL_BASE_URL=https://api.agentmail.to/v0
 ```
 
 `KNOWLEDGE_BASE_URL` 为空时，系统不会编造答案，会返回证据不足提示。知识库服务完成后，填入知识库后端地址即可接入 `/knowledge/search` 和 `/knowledge/standards`。
+
+`QUESTION_RESOLUTION_ENABLED=true` 会在配额预留和知识库检索前，对可能改变目标标准、业务事项或结论的歧义进行结构化确认。明确问题继续走快速路径；确认响应不扣次数，API 客户端应读取 `clarification.options` 后重新提交完整问题。
 
 稠密向量使用阿里云百炼 `text-embedding-v4`，运行时通过 USEARCH ANN 索引检索，不再逐条解析 SQLite 中的 JSON 向量。v1.0.6 默认使用 `ANN_EXPANSION_SEARCH=64`；embedding 请求按 `EMBEDDING_BATCH_SIZE` 分批并复用连接。完成或更新 `chunk_embeddings` 后重建私有索引：
 

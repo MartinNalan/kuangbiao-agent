@@ -11,7 +11,15 @@ from .auth import get_account_store
 from .config import Settings, get_settings
 from .knowledge_client import KnowledgeClient
 from .llm_client import LLMClient
-from .query_understanding import QueryPlan, normalize_user_query, understand_query
+from .query_understanding import (
+    PROJECTION_REFERENCE_STANDARD_NUMBERS,
+    QueryPlan,
+    TRANSFER_ANCHOR_STANDARD_NUMBERS,
+    TRANSFER_EQUIVALENT_TERMS,
+    TRANSFER_REPORT_OBJECT_TERMS,
+    normalize_user_query,
+    understand_query,
+)
 from .schemas import (
     Limitations,
     QuotaInfo,
@@ -50,10 +58,29 @@ CLASSIFICATION_LABELS = {
     "possible_conflict": "疑似冲突，需人工复核",
 }
 
+TRANSFER_RELATION_TERMS = (
+    "探矿权转采矿权",
+    "转采",
+    "采矿权新立",
+    "申请采矿权",
+    *TRANSFER_EQUIVALENT_TERMS,
+)
+TRANSFER_OBJECT_TERMS = (
+    "详查报告",
+    "地质勘查报告",
+    "矿产资源储量报告",
+    "经评审备案",
+    "勘查程度",
+    "详查（含）以上程度",
+    *TRANSFER_REPORT_OBJECT_TERMS,
+)
+
 
 @dataclass(frozen=True)
 class ResearchPlan:
     canonical_question: str
+    intent: str = "cross_document_audit"
+    strategy: str = "cross_document_comparison"
     anchor_titles: tuple[str, ...] = ()
     anchor_standard_numbers: tuple[str, ...] = ()
     corpus_title_terms: tuple[str, ...] = ()
@@ -230,9 +257,34 @@ class ResearchPlanner:
 
     @staticmethod
     def _enforce_protected_scope(question: str, plan: ResearchPlan) -> ResearchPlan:
+        base = understand_query(question)
+        if base.intent == "exploration_to_mining_eligibility":
+            fallback = ResearchPlanner._fallback(question)
+            return replace(
+                plan,
+                intent=fallback.intent,
+                strategy=fallback.strategy,
+                anchor_standard_numbers=tuple(
+                    dict.fromkeys((*fallback.anchor_standard_numbers, *plan.anchor_standard_numbers))
+                ),
+                corpus_title_terms=tuple(
+                    dict.fromkeys((*fallback.corpus_title_terms, *plan.corpus_title_terms))
+                )[:12],
+                corpus_standard_numbers=(),
+                document_types=tuple(
+                    dict.fromkeys((*fallback.document_types, *plan.document_types))
+                ),
+                comparison_dimensions=fallback.comparison_dimensions,
+                evidence_queries=fallback.evidence_queries,
+                required_evidence_groups=(),
+                scope_note=(
+                    "围绕探矿权转采矿权及其正向等价表述检索一般政策、分矿种特殊规定和报告类型限制。"
+                ),
+            )
         focus = _projection_focus(question)
         if not focus:
             return plan
+        fallback = ResearchPlanner._fallback(question)
         focus_query, focus_group = focus
         groups = list(plan.required_evidence_groups)
         if focus_group not in groups:
@@ -242,8 +294,24 @@ class ResearchPlanner:
             queries.append(focus_query)
         return replace(
             plan,
+            intent=fallback.intent,
+            strategy=fallback.strategy,
+            anchor_standard_numbers=tuple(
+                dict.fromkeys((*fallback.anchor_standard_numbers, *plan.anchor_standard_numbers))
+            ),
+            corpus_title_terms=tuple(
+                dict.fromkeys((*fallback.corpus_title_terms, *plan.corpus_title_terms))
+            )[:12],
+            document_types=tuple(
+                dict.fromkeys((*fallback.document_types, *plan.document_types))
+            ),
+            comparison_dimensions=fallback.comparison_dimensions,
             evidence_queries=tuple(dict.fromkeys(queries))[:3],
             required_evidence_groups=tuple(groups),
+            scope_note=(
+                "围绕用户限定的外推类型，检索分矿种规范，并固定保留 DZ/T 0338.1-2020 "
+                "6.2.2.1 与 DZ/T 0338.2-2020 5.4.2 作为无限、有限外推对照。"
+            ),
         )
 
     @staticmethod
@@ -251,7 +319,19 @@ class ResearchPlanner:
         base = understand_query(question)
         title_terms: list[str] = []
         document_types = list(base.document_types)
-        if any(term in question for term in ("分矿种规范", "单矿种规范", "各矿种规范", "矿种勘查规范")):
+        if base.intent == "exploration_to_mining_eligibility":
+            title_terms.append("矿产地质勘查规范")
+            document_types = [
+                "policy_document",
+                "law",
+                "regulation",
+                "department_rule",
+                "guidance",
+                "standard",
+                "national_standard",
+                "industry_standard",
+            ]
+        elif any(term in question for term in ("分矿种规范", "单矿种规范", "各矿种规范", "矿种勘查规范")):
             title_terms.append("矿产地质勘查规范")
             document_types = ["standard", "national_standard", "industry_standard"]
         if "外推" in question:
@@ -278,7 +358,20 @@ class ResearchPlanner:
         )
         evidence_queries = (base.retrieval_query or base.normalized_query,)
         required_evidence_groups: tuple[tuple[str, ...], ...] = ()
-        if "选冶" in question or "加工技术性能试验" in question:
+        if base.intent == "exploration_to_mining_eligibility":
+            dimensions = (
+                "一般转采条件",
+                "分矿种详查报告转采规定",
+                "适用矿种和前置条件",
+                "报告类型限制",
+            )
+            evidence_queries = (
+                "探矿权转采矿权 经评审备案的矿产资源储量报告 详查（含）以上程度",
+                "详查报告 可作为矿山设计开采依据 供矿山设计开采 可行性研究 工业价值",
+                "不能替代探矿权转采矿权 地质勘查报告",
+            )
+            required_evidence_groups = ()
+        elif "选冶" in question or "加工技术性能试验" in question:
             dimensions = (
                 "勘查阶段对应的试验研究程度",
                 "可选性、实验室流程、扩大连续、半工业和工业试验要求",
@@ -296,7 +389,8 @@ class ResearchPlanner:
         elif "外推" in question:
             dimensions = ("外推类型", "所依据的工程间距", "尖推和平推比例", "适用条件和例外")
             evidence_queries = (
-                "矿体有限外推 无限外推 工程间距 基本工程间距 实际工程间距 经验工程间距",
+                "矿体有限外推 无限外推 工程间距 基本工程间距 实际工程间距 经验工程间距 "
+                "DZ/T 0338.1-2020 6.2.2.1 DZ/T 0338.2-2020 5.4.2",
                 "1/2尖推 1/4平推 2/3尖推 1/3平推",
             )
             required_evidence_groups = (
@@ -311,12 +405,34 @@ class ResearchPlanner:
                 required_evidence_groups = (*required_evidence_groups, focus_group)
         return ResearchPlan(
             canonical_question=base.normalized_query,
+            intent=base.intent,
+            strategy=(
+                "relation_discovery"
+                if base.intent == "exploration_to_mining_eligibility"
+                else "cross_document_comparison"
+            ),
             anchor_titles=_explicit_titles(question),
             anchor_standard_numbers=tuple(
-                number for number in base.standard_numbers if number in question
+                dict.fromkeys(
+                    (
+                        *TRANSFER_ANCHOR_STANDARD_NUMBERS,
+                        *base.standard_numbers,
+                    )
+                    if base.intent == "exploration_to_mining_eligibility"
+                    else (
+                        *PROJECTION_REFERENCE_STANDARD_NUMBERS,
+                        *(number for number in base.standard_numbers if number in question),
+                    )
+                    if base.intent == "projection_comparison"
+                    else tuple(number for number in base.standard_numbers if number in question)
+                )
             ),
             corpus_title_terms=tuple(dict.fromkeys(title_terms)),
-            corpus_standard_numbers=base.standard_numbers if not title_terms else (),
+            corpus_standard_numbers=(
+                ()
+                if base.intent == "exploration_to_mining_eligibility"
+                else base.standard_numbers if not title_terms else ()
+            ),
             document_types=tuple(dict.fromkeys(document_types)),
             comparison_dimensions=tuple(dimensions),
             evidence_queries=evidence_queries,
@@ -635,6 +751,7 @@ class ResearchTaskRunner:
                 }
             )
             documents = list(corpus.get("items") or [])
+            documents = self._prioritize_documents(documents, plan)
             total_documents = int(corpus.get("total") or len(documents))
             candidate_truncated = bool(corpus.get("truncated"))
             snapshot = corpus.get("knowledge_snapshot")
@@ -715,15 +832,20 @@ class ResearchTaskRunner:
             ]
             analyzer = ResearchAnalyzer(settings, llm)
             facts: list[dict[str, Any]] = []
-            batch_size = settings.research_analysis_batch_size
-            for start in range(0, len(indexed_sources), batch_size):
-                facts.extend(
-                    await analyzer.analyze_batch(
-                        task["retrieval_question"],
-                        plan,
-                        indexed_sources[start : start + batch_size],
+            if plan.intent == "exploration_to_mining_eligibility":
+                facts = self._transfer_facts(indexed_sources)
+            elif plan.intent == "projection_comparison":
+                facts = self._projection_facts(indexed_sources)
+            else:
+                batch_size = settings.research_analysis_batch_size
+                for start in range(0, len(indexed_sources), batch_size):
+                    facts.extend(
+                        await analyzer.analyze_batch(
+                            task["retrieval_question"],
+                            plan,
+                            indexed_sources[start : start + batch_size],
+                        )
                     )
-                )
             facts, sources = self._compact_fact_sources(facts, sources)
             store.update_research_task(
                 task_id,
@@ -840,7 +962,11 @@ class ResearchTaskRunner:
                     original_query=task["retrieval_question"],
                     normalized_query=plan.canonical_question,
                     retrieval_query=combined_query,
-                    intent="cross_document_audit",
+                    intent=(
+                        "exploration_to_mining_eligibility"
+                        if plan.intent == "exploration_to_mining_eligibility"
+                        else "cross_document_audit"
+                    ),
                     candidate_title_terms=(),
                     standard_numbers=(),
                     document_types=(str(document.get("document_type") or "standard"),),
@@ -861,17 +987,25 @@ class ResearchTaskRunner:
                         top_k=6,
                         allow_web_supplement=False,
                     )
+                    per_document_limit = (
+                        1
+                        if plan.intent in {
+                            "exploration_to_mining_eligibility",
+                            "projection_comparison",
+                        }
+                        else 2
+                    )
                     sources = [
                         _source_from_hit(hit)
                         for hit in response.results
                         if (hit.get("quote") or hit.get("evidence_text"))
                         and (hit.get("clause_no") or hit.get("section_path"))
-                        and self._hit_matches_evidence_groups(hit, plan.required_evidence_groups)
+                        and self._hit_matches_research_plan(hit, plan)
                         and not self._hit_is_normative_reference_list(
                             hit,
                             task["retrieval_question"],
                         )
-                    ][:2]
+                    ][:per_document_limit]
                     if sources:
                         results[document_id] = sources
                 except Exception:
@@ -894,6 +1028,92 @@ class ResearchTaskRunner:
 
         await asyncio.gather(*(retrieve(document) for document in documents))
         return results, failed_documents
+
+    @staticmethod
+    def _prioritize_documents(
+        documents: list[dict[str, Any]],
+        plan: ResearchPlan,
+    ) -> list[dict[str, Any]]:
+        anchors = {
+            re.sub(r"\s+", "", number).upper()
+            for number in plan.anchor_standard_numbers
+            if number
+        }
+        if not anchors:
+            return documents
+        return sorted(
+            documents,
+            key=lambda document: (
+                re.sub(r"\s+", "", str(document.get("standard_no") or "")).upper()
+                not in anchors,
+            ),
+        )
+
+    @staticmethod
+    def _transfer_facts(
+        indexed_sources: list[tuple[int, Source, str]],
+    ) -> list[dict[str, Any]]:
+        facts: list[dict[str, Any]] = []
+        for index, source, document_id in indexed_sources:
+            quote = normalize_user_query(source.quote or "")[:700]
+            if not quote:
+                continue
+            if "不能替代探矿权转采矿权" in quote:
+                dimension = "报告类型限制"
+            elif any(term in quote for term in TRANSFER_EQUIVALENT_TERMS):
+                dimension = "分矿种详查报告转采规定"
+            else:
+                dimension = "一般转采条件"
+            facts.append(
+                {
+                    "document_id": document_id,
+                    "classification": "special_provision",
+                    "dimension": dimension,
+                    "finding": quote,
+                    "source_indices": [index],
+                }
+            )
+        return facts
+
+    @staticmethod
+    def _projection_facts(
+        indexed_sources: list[tuple[int, Source, str]],
+    ) -> list[dict[str, Any]]:
+        facts: list[dict[str, Any]] = []
+        for index, source, document_id in indexed_sources:
+            quote = normalize_user_query(source.quote or "")[:700]
+            if not quote:
+                continue
+            has_infinite = any(
+                term in quote
+                for term in (
+                    "无限外推",
+                    "见矿工程向外再没有工程控制",
+                    "见矿工程外无控制工程",
+                    "边缘见矿工程外",
+                )
+            )
+            has_finite = "有限外推" in quote or (
+                "相邻工程" in quote and "实际工程间距" in quote
+            ) or "相邻的两个工程一个见矿" in quote
+            if has_infinite and has_finite:
+                dimension = "有限与无限外推综合条款"
+            elif has_infinite:
+                dimension = "无限外推规则"
+            elif has_finite:
+                dimension = "有限外推规则"
+            else:
+                dimension = "外推规则"
+            facts.append(
+                {
+                    "document_id": document_id,
+                    "classification": "special_provision",
+                    "dimension": dimension,
+                    "finding": quote,
+                    "source_indices": [index],
+                }
+            )
+        return facts
 
     @staticmethod
     def _compact_fact_sources(
@@ -930,6 +1150,42 @@ class ResearchTaskRunner:
             for key in ("title", "standard_no", "clause_no", "section_path", "quote", "evidence_text")
         )
         return all(any(term and term in context for term in group) for group in groups)
+
+    @classmethod
+    def _hit_matches_research_plan(
+        cls,
+        hit: dict[str, Any],
+        plan: ResearchPlan,
+    ) -> bool:
+        if plan.intent == "projection_comparison":
+            standard_no = re.sub(r"\s+", "", str(hit.get("standard_no") or "")).upper()
+            clause = str(hit.get("clause_no") or hit.get("section_path") or "")
+            if standard_no == "DZ/T0338.2-2020" and clause == "5.4.2":
+                focus_markers = {
+                    "无限外推",
+                    "有限外推",
+                    "见矿工程向外再没有工程控制",
+                    "见矿工程向外无工程控制",
+                    "见矿工程外无控制工程",
+                    "边缘见矿工程外",
+                    "边缘见矿工程向外",
+                    "相邻工程一个见矿",
+                    "相邻的两个工程一个见矿",
+                    "相邻工程未见矿",
+                }
+                base_groups = tuple(
+                    group
+                    for group in plan.required_evidence_groups
+                    if not set(group).issubset(focus_markers)
+                )
+                return cls._hit_matches_evidence_groups(hit, base_groups)
+        if plan.intent != "exploration_to_mining_eligibility":
+            return cls._hit_matches_evidence_groups(hit, plan.required_evidence_groups)
+        context = " ".join(
+            str(hit.get(key) or "")
+            for key in ("title", "standard_no", "clause_no", "section_path", "quote", "evidence_text")
+        )
+        return bool(cls._transfer_direct_quote(context))
 
     @staticmethod
     def _hit_is_normative_reference_list(hit: dict[str, Any], question: str) -> bool:
@@ -988,6 +1244,8 @@ class ResearchTaskRunner:
         llm: LLMClient,
         settings: Settings,
     ) -> str:
+        if plan.intent == "exploration_to_mining_eligibility":
+            return self._render_transfer_answer(sources)
         summary = "本次研究已按知识库候选范围逐份检索，并仅使用命中的直接条款形成下列比较结果。"
         document_count = len({fact.get("document_id") for fact in facts if fact.get("document_id")})
         if document_count:
@@ -995,8 +1253,41 @@ class ResearchTaskRunner:
                 f"本次研究在 {document_count} 份文件中形成了可回溯到直接条款的比较事实。"
                 "下表分别列出所依据的工程间距、外推比例和适用条件；相同数值不代表适用前提相同。"
             )
-        if llm.enabled and facts:
+        if plan.intent == "projection_comparison" and facts:
+            has_finite = any(fact.get("dimension") == "有限外推规则" for fact in facts)
+            has_infinite = any(fact.get("dimension") == "无限外推规则" for fact in facts)
+            if "无限外推" in question and has_finite:
+                summary = (
+                    f"本次在 {document_count} 份文件中形成直接证据。下表以无限外推规定为主，"
+                    "并单列有限外推条款作为距离基准对照；有限外推证据不作为无限外推规定使用。"
+                )
+            elif has_finite and has_infinite:
+                summary = (
+                    f"本次在 {document_count} 份文件中形成直接证据，并分别标注有限外推与无限外推。"
+                    "比较时必须同时核对外推类型、距离基准、比例和适用条件。"
+                )
+        if llm.enabled and facts and plan.intent != "projection_comparison":
             try:
+                source_by_index = {index: source for index, source in enumerate(sources, start=1)}
+                summary_facts = []
+                for fact in facts:
+                    indices = [
+                        index
+                        for index in fact.get("source_indices", [])
+                        if index in source_by_index
+                    ]
+                    source = source_by_index[indices[0]] if indices else None
+                    summary_facts.append(
+                        {
+                            **fact,
+                            "document_id": None,
+                            "document_label": (
+                                f"{source.standard_no or ''}《{source.title}》"
+                                if source
+                                else "未知文件"
+                            ),
+                        }
+                    )
                 completion = await llm.complete_detailed(
                     [
                         {
@@ -1014,7 +1305,7 @@ class ResearchTaskRunner:
                                 {
                                     "question": question,
                                     "comparison_dimensions": plan.comparison_dimensions,
-                                    "facts": facts,
+                                    "facts": summary_facts,
                                 },
                                 ensure_ascii=False,
                             ),
@@ -1073,8 +1364,108 @@ class ResearchTaskRunner:
 
         return "\n".join(lines).strip()
 
+    @classmethod
+    def _render_transfer_answer(cls, sources: list[Source]) -> str:
+        general = []
+        special = []
+        limitations = []
+        seen: set[tuple[str, str]] = set()
+        for source in sources:
+            quote = cls._transfer_direct_quote(source.quote or "")
+            if not quote:
+                continue
+            key = (source.standard_no or "", source.title)
+            if key in seen:
+                continue
+            seen.add(key)
+            item = (source, quote)
+            if "不能替代探矿权转采矿权" in quote:
+                limitations.append(item)
+            elif any(term in quote for term in TRANSFER_EQUIVALENT_TERMS):
+                special.append(item)
+            elif "探矿权转采矿权" in quote:
+                general.append(item)
+
+        special.sort(
+            key=lambda item: (
+                0
+                if "可作为矿山设计开采依据" in item[1]
+                else 1
+                if "供矿山设计开采" in item[1]
+                else 2,
+                item[0].standard_no or "",
+            )
+        )
+
+        lines = [
+            "**研究结论**",
+            "",
+            "判断详查报告能否用于转采，应以条款是否明确支持探矿权转采矿权，或是否规定该报告可作为/供矿山设计开采、作为矿山建设设计依据为核心。后类受控表述在本项目的矿业权业务语义中，属于满足条款条件时可以转采的正向依据。",
+        ]
+        if general:
+            lines.extend(["", "**一般转采规定**", ""])
+            for source, quote in general[:4]:
+                lines.append(
+                    f"- **{source.standard_no or '未知文号'}《{source.title}》**"
+                    f"（{source.chapter or '相关条款'}）：{quote}"
+                )
+        if special:
+            lines.extend(["", "**分矿种特殊规定**", ""])
+            for source, quote in special[:8]:
+                lines.append(
+                    f"- **{source.standard_no or '未知标准号'}《{source.title}》**"
+                    f"（{source.chapter or '相关条款'}）：{quote}"
+                )
+        if limitations:
+            lines.extend(["", "**报告类型限制**", ""])
+            for source, quote in limitations[:4]:
+                lines.append(
+                    f"- **{source.standard_no or '未知标准号'}《{source.title}》**"
+                    f"（{source.chapter or '相关条款'}）：{quote}"
+                )
+        if not any((general, special, limitations)):
+            lines.extend(
+                [
+                    "",
+                    "本次没有检索到直接表达转采关系或“可作为矿山设计开采依据”的条款，不能使用普通详查阶段定义替代。",
+                ]
+            )
+        return "\n".join(lines).strip()
+
+    @staticmethod
+    def _transfer_direct_quote(text: str) -> str:
+        clean = re.sub(r"\s+", " ", text).strip()
+        patterns = (
+            r"(探矿权转采矿权，应当依据经评审备案的矿产资源储量报告。资源储量规模为大型的非煤矿山、大中型煤矿应当达到勘探程度，其他矿山应当达到详查（含）以上程度。)",
+            r"(矿产资源储量核实报告不能替代探矿权转采矿权时应提交的地质勘查报告。)",
+            r"((?:卤水.*?|深层固体盐类.*?|详查报告.*?)(?:可作为矿山设计开采依据|供矿山设计开采|作为矿山建设设计的依据).*?。)",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, clean)
+            if match:
+                return match.group(1).strip()
+        for sentence in re.split(r"(?<=[。！？；;])\s*", clean):
+            compact = re.sub(r"\s+", "", sentence)
+            if (
+                any(re.sub(r"\s+", "", term) in compact for term in TRANSFER_EQUIVALENT_TERMS)
+                and any(re.sub(r"\s+", "", term) in compact for term in TRANSFER_REPORT_OBJECT_TERMS)
+                and ("详终" in compact or "可行性研究" in compact or "工业价值" in compact)
+            ):
+                return sentence[:700].strip()
+        for sentence in re.split(r"(?<=[。！？；;])\s*", clean):
+            if "探矿权转采矿权" not in sentence:
+                continue
+            if not any(term in sentence for term in TRANSFER_OBJECT_TERMS):
+                continue
+            if not any(term in sentence for term in ("依据", "条件", "达到", "应提交", "不能替代")):
+                continue
+            return sentence[:700].strip()
+        return ""
+
     @staticmethod
     def _summary_matches_scope(question: str, summary: str) -> bool:
+        if re.search(r"\b(?:compilation_|chunk-)[A-Za-z0-9_-]+", summary):
+            return False
         if UNSUPPORTED_ABSENCE_PATTERN.search(summary):
             return False
         if "无限外推" in question and "有限外推" in summary:

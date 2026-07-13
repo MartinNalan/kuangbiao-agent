@@ -47,6 +47,7 @@ class DomainLexiconTests(unittest.TestCase):
             "矿权价款需要什么缴纳材料": "矿业权出让收益（价款）",
             "共伴生资源量怎么评价": "GB/T 25283-2023",
             "工程网度怎么确定": "勘查工程间距",
+            "采空区积水如何治理": "矿山采空区",
         }
         for query, expected in cases.items():
             with self.subTest(query=query):
@@ -112,6 +113,22 @@ class DomainLexiconTests(unittest.TestCase):
 
         self.assertTrue(decision.in_scope)
         self.assertIn("探转采", decision.matched_terms)
+
+    def test_goaf_terms_pass_domain_gate_without_a_generic_mining_word(self) -> None:
+        questions = (
+            "采空区怎么处理",
+            "采空区积水如何治理",
+            "老采空区稳定性怎么评价",
+            "采空场需要如何监测",
+            "老空区塌陷怎么防治",
+        )
+
+        for question in questions:
+            with self.subTest(question=question):
+                decision = DomainGate().check(question)
+                self.assertTrue(decision.in_scope)
+                self.assertIn("采空区", decision.matched_terms)
+                self.assertEqual(understand_query(question).intent, "general")
 
     def test_generic_action_phrase_needs_domain_context(self) -> None:
         self.assertFalse(DomainGate().check("护照应该去哪里申请").in_scope)

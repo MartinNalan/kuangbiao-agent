@@ -59,13 +59,43 @@ curl -sS -X POST http://127.0.0.1:18080/api/ask \
 
 Important response fields:
 
-- `status`: `answered`, `queued_for_enrichment`, `out_of_scope`, or `insufficient_evidence`.
+- `status`: `answered`, `queued_for_enrichment`, `out_of_scope`, `insufficient_evidence`, or `clarification_required`.
 - `answer`: final user-facing answer.
 - `sources`: capped evidence snippets and source links.
 - `retrieval`: full-text, vector, graph, and web hit counts.
 - `knowledge_gap_task`: present only when an in-scope question lacks usable evidence.
 - `request_id`: exact request identifier for quota accounting and feedback.
 - `quota`: whether this request consumed a use and the remaining daily count.
+
+When `status=clarification_required`, the request has not consumed quota and has not searched the private KB. Present `clarification.options` to the user, then submit the selected option's complete `question` as a new request:
+
+```json
+{
+  "status": "clarification_required",
+  "quota_cost": 0,
+  "clarification": {
+    "interpreted_question": "采空区怎么处理？",
+    "reason": "不同处理目标会对应不同标准和条款范围。",
+    "allow_free_text": true,
+    "options": [
+      {
+        "option_id": "option_1",
+        "label": "稳定性评价",
+        "question": "采空区稳定性评价应依据哪些标准？"
+      },
+      {
+        "option_id": "option_2",
+        "label": "积水治理",
+        "question": "采空区积水治理应依据哪些标准？"
+      }
+    ]
+  },
+  "quota": {
+    "consumed": false,
+    "consumed_units": 0
+  }
+}
+```
 
 ## Deep Research
 
@@ -79,6 +109,8 @@ curl -sS -X POST http://127.0.0.1:18080/api/research/tasks \
     "question":"不同矿种规范对矿体无限外推所依据的间距有哪些代表性差异？"
   }'
 ```
+
+If the deep question still requires clarification, task creation returns HTTP 200 with `status=clarification_required`; no task ID is created and no quota is reserved. A confirmed deep question returns HTTP 202 and starts the normal research workflow.
 
 Poll progress:
 

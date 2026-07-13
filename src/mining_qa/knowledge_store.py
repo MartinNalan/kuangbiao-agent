@@ -29,6 +29,9 @@ from .domain_lexicon import (
 from .embedding_provider import EmbeddingProvider, cosine_dense, embedding_config
 from .query_understanding import (
     QueryPlan,
+    TRANSFER_CONDITION_TERMS,
+    TRANSFER_EQUIVALENT_TERMS,
+    TRANSFER_REPORT_OBJECT_TERMS,
     canonical_exploration_type,
     query_plan_from_payload,
     understand_query,
@@ -440,6 +443,22 @@ def transfer_evidence_quote(text: str) -> tuple[str | None, str | None]:
     )
     if report_limit:
         return report_limit.group(1), "A.9.5"
+    for sentence in split_evidence_sentences(clean):
+        compact = re.sub(r"\s+", "", sentence)
+        has_equivalent_relation = any(
+            re.sub(r"\s+", "", term) in compact
+            for term in TRANSFER_EQUIVALENT_TERMS
+        )
+        has_report_object = any(
+            re.sub(r"\s+", "", term) in compact
+            for term in TRANSFER_REPORT_OBJECT_TERMS
+        )
+        has_applicability_condition = "详终" in compact or any(
+            re.sub(r"\s+", "", term) in compact
+            for term in TRANSFER_CONDITION_TERMS
+        )
+        if has_equivalent_relation and has_report_object and has_applicability_condition:
+            return sentence[:700].strip(), None
     return None, None
 
 
@@ -1224,19 +1243,8 @@ def row_has_authority_evidence(row: sqlite3.Row) -> bool:
 
 
 def row_has_transfer_eligibility_evidence(row: sqlite3.Row) -> bool:
-    standard_no = (row["standard_no"] or "").replace(" ", "")
-    text = re.sub(r"\s+", "", row["text"] or "")
-    policy = (
-        "自然资规〔2023〕4号" in standard_no
-        and "探矿权转采矿权" in text
-        and "经评审备案的矿产资源储量报告" in text
-        and "详查（含）以上程度" in text
-    )
-    report_limit = (
-        standard_no.upper() == "DZ/T0430-2023"
-        and "不能替代探矿权转采矿权时应提交的地质勘查报告" in text
-    )
-    return policy or report_limit
+    quote, _ = transfer_evidence_quote(row["text"] or "")
+    return bool(quote)
 
 
 def row_has_companion_resource_type_evidence(row: sqlite3.Row) -> bool:
@@ -1421,8 +1429,16 @@ def query_plan_score(row: sqlite3.Row, plan: QueryPlan) -> float:
             score -= 12.0
     elif plan.intent == "authority_responsibility" and row_has_authority_evidence(row):
         score += 12.0
-    elif plan.intent == "exploration_to_mining_eligibility" and row_has_transfer_eligibility_evidence(row):
-        score += 18.0
+    elif plan.intent == "exploration_to_mining_eligibility":
+        if row_has_transfer_eligibility_evidence(row):
+            score += 18.0
+            compact = re.sub(r"\s+", "", text)
+            if any(re.sub(r"\s+", "", term) in compact for term in TRANSFER_EQUIVALENT_TERMS):
+                score += 8.0
+            if row["clause_no"]:
+                score += 6.0
+            if text.lstrip().startswith("前言"):
+                score -= 10.0
     elif plan.intent == "companion_resource_type" and row_has_companion_resource_type_evidence(row):
         score += 18.0
     elif plan.intent == "exploration_type_factors" and row_has_exploration_factor_evidence(row):

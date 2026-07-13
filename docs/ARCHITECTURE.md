@@ -56,6 +56,9 @@ Request
   -> Session or API Key authentication / rate limit
   -> Domain relevance gate
        -> If irrelevant: fixed refusal, no KB/LLM/OCR/web supplement, no quota consumption
+  -> Conversation context + mechanical normalization
+  -> LLM-led ambiguity resolution with protected Schema validation
+       -> If clarification is required: return structured options, no KB retrieval and no quota consumption
   -> Reserve one basic-mode quota unit for the current Asia/Shanghai day
   -> Local KB retrieval
        -> If clause evidence exists: answer with citations
@@ -70,6 +73,8 @@ Request
 ```text
 Create research task
   -> Domain gate before quota reservation
+  -> Shared ambiguity resolution
+       -> If clarification is required: HTTP 200 structured options, no task and no reservation
   -> Atomically reserve 3 units, or 2 additional units for a validated basic-answer upgrade
   -> Persist queued task
   -> DeepSeek research plan
@@ -155,7 +160,9 @@ User question
   -> conversation-dependent follow-up resolution
   -> domain relevance check
   -> mechanical normalization and deterministic fallback intent
-  -> DeepSeek structured planner for ambiguous/complex questions
+  -> DeepSeek structured ambiguity judgment
+  -> protected Schema validation and optional user confirmation
+  -> DeepSeek retrieval planner only when the confirmed question needs semantic planning
   -> validated intent schema and document-type routing
   -> mandatory-relation FTS + KG expansion + USEARCH ANN
   -> reciprocal-rank fusion and candidate diversity

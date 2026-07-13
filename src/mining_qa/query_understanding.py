@@ -84,7 +84,39 @@ AUTHORITY_TOPIC_TERMS = (
 AUTHENTICITY_TERMS = ("真实性", "真实准确", "弄虚作假", "真实性负责")
 RESERVE_REPORT_TERMS = ("资源储量报告", "矿产资源储量报告", "储量报告")
 EXPLORATION_STAGE_TERMS = ("详查", "勘探", "普查", "勘查程度", "勘查阶段")
-MINING_CONVERSION_TERMS = ("转采", "探转采", "探矿权转采矿权", "申请采矿权", "采矿权新立")
+MINING_CONVERSION_TERMS = (
+    "转采",
+    "探转采",
+    "探矿权转采矿权",
+    "申请采矿权",
+    "采矿权新立",
+    "可作为矿山设计开采依据",
+    "供矿山设计开采",
+    "作为矿山建设设计的依据",
+)
+TRANSFER_ANCHOR_STANDARD_NUMBERS = ("自然资规〔2023〕4号", "DZ/T 0430-2023")
+TRANSFER_EQUIVALENT_TERMS = (
+    "可作为矿山设计开采依据",
+    "供矿山设计开采",
+    "作为矿山建设设计的依据",
+)
+TRANSFER_REPORT_OBJECT_TERMS = (
+    "详查报告",
+    "详终报告",
+    "详终矿区",
+    "地质勘查报告",
+)
+TRANSFER_CONDITION_TERMS = (
+    "可行性研究",
+    "工业价值",
+    "经济价值",
+    "勘探程度要求",
+)
+PROJECTION_REFERENCE_STANDARD_NUMBERS = ("DZ/T 0338.1-2020", "DZ/T 0338.2-2020")
+PROJECTION_REFERENCE_QUERIES = (
+    "DZ/T 0338.1-2020 6.2.2.1 矿体外推 经验工程间距",
+    "DZ/T 0338.2-2020 5.4.2 有限外推 推断资源量工程间距",
+)
 COMPANION_MINERAL_TERMS = ("共伴生", "伴生矿产", "伴生矿", "伴生资源")
 RESOURCE_TYPE_TERMS = ("资源量类型", "资源储量类型", "类型如何确定", "类型怎么确定", "类型划分")
 EXPLORATION_FACTOR_TERMS = ("划分因素", "因素表格", "因素表", "划分表格", "划分表")
@@ -276,8 +308,23 @@ DEFAULT_EVIDENCE_GROUPS: dict[str, tuple[tuple[str, ...], ...]] = {
     ),
     "service_time_limit": (("办结时限", "工作日", "日内办结"),),
     "exploration_to_mining_eligibility": (
-        ("详查", "勘查程度", "勘查阶段", "地质勘查报告", "核实报告"),
-        ("探矿权转采矿权", "转采", "申请采矿权", "采矿权新立"),
+        (
+            "详查",
+            "详终",
+            "勘查程度",
+            "勘查阶段",
+            "地质勘查报告",
+            "核实报告",
+        ),
+        (
+            "探矿权转采矿权",
+            "转采",
+            "申请采矿权",
+            "采矿权新立",
+            "可作为矿山设计开采依据",
+            "供矿山设计开采",
+            "作为矿山建设设计的依据",
+        ),
         ("依据", "条件", "符合", "达到", "不能替代", "应提交"),
     ),
     "companion_resource_type": (
@@ -938,7 +985,7 @@ def understand_query(query: str) -> QueryPlan:
         retrieval_terms.extend([*time_limit_titles, "办结时限", "工作日"])
     elif has_exploration_to_mining:
         intent = "exploration_to_mining_eligibility"
-        standards.extend(["自然资规〔2023〕4号", "DZ/T 0430-2023"])
+        search_mode = "comparison"
         retrieval_terms.extend(
             [
                 "探矿权转采矿权",
@@ -947,6 +994,10 @@ def understand_query(query: str) -> QueryPlan:
                 "经评审备案的矿产资源储量报告",
                 "地质勘查报告",
                 "核实报告不能替代",
+                "可作为矿山设计开采依据",
+                "供矿山设计开采",
+                "作为矿山建设设计的依据",
+                *TRANSFER_ANCHOR_STANDARD_NUMBERS,
             ]
         )
     elif has_companion_resource_type:
@@ -1011,6 +1062,12 @@ def understand_query(query: str) -> QueryPlan:
     elif has_projection and has_comparison:
         intent = "projection_comparison"
         search_mode = "comparison"
+        retrieval_terms.extend(
+            [
+                "矿体外推 工程间距 尖推 平推",
+                *PROJECTION_REFERENCE_QUERIES,
+            ]
+        )
     elif "无限外推" in normalized and (
         any(term in normalized for term in PROJECTION_RATIO_TERMS)
         or any(term in normalized for term in ("多少", "怎么推", "如何外推", "比例"))

@@ -14,6 +14,7 @@ from mining_qa.knowledge_store import (
     connect,
     table_quote,
     table_references,
+    transfer_evidence_quote,
 )
 from mining_qa.query_understanding import (
     PROTECTED_QUERY_INTENTS,
@@ -130,8 +131,23 @@ class QueryUnderstandingTests(unittest.TestCase):
         self.assertFalse(plan.exhaustive_search)
         self.assertIn("探矿权转采矿权", plan.retrieval_query)
         self.assertEqual(len(plan.required_evidence_groups), 3)
-        self.assertEqual(plan.scope_origin, "deterministic")
-        self.assertTrue(plan.has_hard_candidate_scope)
+        self.assertEqual(plan.search_mode, "comparison")
+        self.assertEqual(plan.scope_origin, "none")
+        self.assertFalse(plan.has_hard_candidate_scope)
+        self.assertIn("自然资规〔2023〕4号", plan.retrieval_query)
+        self.assertIn("DZ/T 0430-2023", plan.retrieval_query)
+
+    def test_transfer_evidence_accepts_governed_design_basis_and_rejects_stage_definition(self) -> None:
+        direct, _ = transfer_evidence_quote(
+            "4.2.3 卤水矿及深层固体盐类矿床详查报告，经可行性研究具有工业价值，"
+            "可作为矿山设计开采依据。"
+        )
+        ordinary, _ = transfer_evidence_quote(
+            "4.2.3 详查阶段应基本查明矿床地质特征，并做出是否有必要转入勘探的评价。"
+        )
+
+        self.assertIn("可作为矿山设计开采依据", direct or "")
+        self.assertIsNone(ordinary)
 
     def test_feedback_topics_use_protected_relation_intents(self) -> None:
         cases = {
@@ -695,6 +711,76 @@ class FastAnswerTests(unittest.TestCase):
             "以拟推资源量类型的经验工程间距为外推依据",
         )
 
+    def test_projection_selection_protects_reference_clause_and_prefers_infinite_focus(self) -> None:
+        agent = object.__new__(MiningQAAgent)
+        hits = [
+            {
+                "document_id": "doc-common",
+                "title": "矿产地质勘查规范 稀有金属类",
+                "standard_no": "DZ/T 0203-2020",
+                "clause_no": "8.2.3.1",
+                "quote": "8.2.3.1 有限外推原则：按实际工程间距或基本工程间距的1/2尖推。",
+                "score": 0.9,
+            },
+            {
+                "document_id": "doc-common",
+                "title": "矿产地质勘查规范 稀有金属类",
+                "standard_no": "DZ/T 0203-2020",
+                "clause_no": "8.2.3.2",
+                "quote": "8.2.3.2 无限外推原则：按基本工程间距的1/2尖推或1/4平推。",
+                "score": 0.8,
+            },
+            {
+                "document_id": "doc-geometry",
+                "title": "固体矿产资源量估算规程 第2部分：几何法",
+                "standard_no": "DZ/T 0338.2-2020",
+                "clause_no": "5.4.2",
+                "quote": (
+                    "5.4.2 相邻的两个工程一个见矿，另一个不见矿时，采用有限外推法，"
+                    "若实际工程间距大于推断资源量工程间距，则按推断资源量工程间距的1/2尖推。"
+                ),
+                "score": 0.7,
+            },
+        ]
+
+        selected = agent._projection_comparison_hits(hits, "不同标准如何规定无限外推间距？")
+
+        clauses = {(hit["standard_no"], hit["clause_no"]) for hit in selected}
+        self.assertIn(("DZ/T 0338.2-2020", "5.4.2"), clauses)
+        self.assertIn(("DZ/T 0203-2020", "8.2.3.2"), clauses)
+        self.assertNotIn(("DZ/T 0203-2020", "8.2.3.1"), clauses)
+
+    def test_projection_answer_labels_finite_reference_as_contrast(self) -> None:
+        agent = object.__new__(MiningQAAgent)
+        question = "不同标准对矿体无限外推所依据的间距有何差异？"
+        sources = [
+            Source(
+                title="固体矿产资源量估算规程 第1部分：通则",
+                standard_no="DZ/T 0338.1-2020",
+                chapter="6.2.2.1",
+                quote="b)无限外推：按拟推资源量类型的经验工程间距1/2尖推。",
+                source_type="local_kb",
+                text_access="ocr_text",
+            ),
+            Source(
+                title="固体矿产资源量估算规程 第2部分：几何法",
+                standard_no="DZ/T 0338.2-2020",
+                chapter="5.4.2",
+                quote=(
+                    "5.4.2 相邻的两个工程一个见矿，另一个不见矿时，采用有限外推法，"
+                    "若实际工程间距大于推断资源量工程间距，则按推断资源量工程间距的1/2尖推。"
+                ),
+                source_type="local_kb",
+                text_access="ocr_text",
+            ),
+        ]
+
+        answer = agent._fast_answer(question, sources, understand_query(question)) or ""
+
+        self.assertIn("有限外推对照", answer)
+        self.assertIn("不作为无限外推条款引用", answer)
+        self.assertIn("DZ/T 0338.2-2020", answer)
+
     def test_authenticity_answer_names_mining_right_holder(self) -> None:
         agent = object.__new__(MiningQAAgent)
         source = Source(
@@ -848,6 +934,35 @@ class ControlledRetrievalEnhancementTests(unittest.TestCase):
         self.assertIn("经评审备案的矿产资源储量报告", answer)
         self.assertIn("详查（含）以上程度", answer)
         self.assertIn("不能替代", answer)
+
+    def test_transfer_selection_rejects_equivalent_wording_without_required_conditions(self) -> None:
+        agent = object.__new__(MiningQAAgent)
+        question = "哪些标准、制度规定了详查报告就可以转采？"
+        hits = [
+            {
+                "document_id": "preface",
+                "title": "某矿产地质勘查规范",
+                "standard_no": "DZ/T 9999-2020",
+                "clause_no": "前言",
+                "quote": "前言提到本次修订增加了可作为矿山设计开采依据的相关内容。",
+                "score": 0.95,
+            },
+            {
+                "document_id": "salt",
+                "title": "矿产地质勘查规范 盐类 第1部分：总则",
+                "standard_no": "DZ/T 0212.1-2020",
+                "clause_no": "4.2.3",
+                "quote": (
+                    "卤水矿及深层固体盐类矿床详查报告，经可行性研究具有工业价值，"
+                    "可作为矿山设计开采依据。"
+                ),
+                "score": 0.8,
+            },
+        ]
+
+        selected = agent._select_evidence_hits(hits, question, understand_query(question))
+
+        self.assertEqual([hit["document_id"] for hit in selected], ["salt"])
 
     def test_transfer_paraphrases_produce_the_same_answer(self) -> None:
         agent = object.__new__(MiningQAAgent)

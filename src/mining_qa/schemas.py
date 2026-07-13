@@ -99,11 +99,31 @@ class Limitations(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
+class ClarificationOption(BaseModel):
+    option_id: str
+    label: str
+    question: str
+    description: str | None = None
+
+
+class Clarification(BaseModel):
+    interpreted_question: str
+    reason: str
+    options: list[ClarificationOption] = Field(default_factory=list)
+    allow_free_text: bool = True
+
+
 class AskResponse(BaseModel):
     answer: str
     session_id: str
     request_id: str | None = None
-    status: Literal["answered", "insufficient_evidence", "out_of_scope", "queued_for_enrichment"] = "answered"
+    status: Literal[
+        "answered",
+        "insufficient_evidence",
+        "out_of_scope",
+        "queued_for_enrichment",
+        "clarification_required",
+    ] = "answered"
     sources: list[Source] = Field(default_factory=list)
     retrieval: RetrievalStats = Field(default_factory=RetrievalStats)
     limitations: Limitations = Field(default_factory=Limitations)
@@ -114,6 +134,7 @@ class AskResponse(BaseModel):
     quota_cost: int = 1
     mode_recommendation: Literal["deep"] | None = None
     mode_recommendation_reason: str | None = None
+    clarification: Clarification | None = None
 
 
 ResearchTaskStatus = Literal[

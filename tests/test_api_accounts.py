@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -21,10 +21,18 @@ os.environ["EMAIL_VERIFICATION_SECRET"] = "api-test-verification-secret-with-suf
 os.environ["EMAIL_CODE_COOLDOWN_SECONDS"] = "0"
 os.environ["EMAIL_CODE_DAILY_LIMIT"] = "10"
 os.environ["EMAIL_DEBUG"] = "true"
+os.environ["QUESTION_RESOLUTION_ENABLED"] = "false"
 
 from mining_qa.api import app  # noqa: E402
 from mining_qa.auth import get_account_store  # noqa: E402
-from mining_qa.schemas import AskResponse, Limitations  # noqa: E402
+from mining_qa.question_resolution import QuestionResolution  # noqa: E402
+from mining_qa.query_understanding import understand_query  # noqa: E402
+from mining_qa.schemas import (  # noqa: E402
+    AskResponse,
+    Clarification,
+    ClarificationOption,
+    Limitations,
+)
 
 
 class FakeAnsweredAgent:
@@ -125,6 +133,30 @@ class ApiAccountTests(unittest.TestCase):
         self.assertEqual(registration.status_code, 200, registration.text)
         return registration.json()["user"]
 
+    @staticmethod
+    def ambiguous_resolution(question: str) -> QuestionResolution:
+        return QuestionResolution(
+            canonical_question=question,
+            plan=understand_query(question),
+            model_used=True,
+            clarification=Clarification(
+                interpreted_question=question,
+                reason="该问题可能对应不同的专业处理事项。",
+                options=[
+                    ClarificationOption(
+                        option_id="option_1",
+                        label="稳定性评价",
+                        question="采空区稳定性应依据哪些标准评价？",
+                    ),
+                    ClarificationOption(
+                        option_id="option_2",
+                        label="积水治理",
+                        question="采空区积水治理应依据哪些标准？",
+                    ),
+                ],
+            ),
+        )
+
     def test_registration_login_and_shared_web_api_quota(self) -> None:
         user = self.register(self.client, "api-user@example.com")
         self.assertTrue(user["email_verified"])
@@ -165,6 +197,60 @@ class ApiAccountTests(unittest.TestCase):
         usage = self.client.get("/api/usage", headers={"X-API-Key": api_key})
         self.assertEqual(usage.status_code, 200, usage.text)
         self.assertEqual(usage.json()["usage"]["quota"]["used"], 2)
+
+    def test_basic_clarification_does_not_call_agent_or_consume_quota(self) -> None:
+        user = self.register(self.client, "clarification-basic@example.com")
+        resolution = self.ambiguous_resolution("采空区怎么处理？")
+        resolver = AsyncMock(return_value=resolution)
+
+        with (
+            patch("mining_qa.api.resolve_question", resolver),
+            patch("mining_qa.api.MiningQAAgent") as agent_class,
+        ):
+            response = self.client.post("/api/ask", json={"question": "采空区怎么处理？"})
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["status"], "clarification_required")
+        self.assertEqual(payload["quota_cost"], 0)
+        self.assertFalse(payload["quota"]["consumed"])
+        self.assertEqual(payload["quota"]["used"], 0)
+        self.assertEqual(len(payload["clarification"]["options"]), 2)
+        agent_class.assert_not_called()
+        summary = self.store.account_summary(user["user_id"], "Asia/Shanghai")
+        self.assertEqual(summary["quota"]["used"], 0)
+        self.assertEqual(summary["quota"]["reserved"], 0)
+
+    def test_deep_clarification_does_not_create_task_or_reserve_quota(self) -> None:
+        user = self.register(self.client, "clarification-deep@example.com")
+        self.store.set_daily_limit(
+            user["user_id"],
+            5,
+            "deep clarification test",
+            self.admin["user_id"],
+            "Asia/Shanghai",
+        )
+        resolution = self.ambiguous_resolution("采空区怎么处理？")
+        resolver = AsyncMock(return_value=resolution)
+
+        with (
+            patch("mining_qa.api.resolve_question", resolver),
+            patch("mining_qa.api.research_runner.schedule") as schedule,
+        ):
+            response = self.client.post(
+                "/api/research/tasks",
+                json={"question": "采空区怎么处理？"},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["status"], "clarification_required")
+        self.assertEqual(payload["quota_cost"], 0)
+        self.assertEqual(payload["quota"]["reserved"], 0)
+        schedule.assert_not_called()
+        summary = self.store.account_summary(user["user_id"], "Asia/Shanghai")
+        self.assertEqual(summary["quota"]["used"], 0)
+        self.assertEqual(summary["quota"]["reserved"], 0)
 
     def test_api_key_list_hides_revoked_and_revoke_is_idempotent(self) -> None:
         self.register(self.client, "key-lifecycle@example.com")
