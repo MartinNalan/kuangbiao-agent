@@ -622,6 +622,23 @@ def _target_table_quote(matrix: list[Any], caption: str, plan: QueryPlan, limit:
     return text if len(text) <= limit else text[:limit].rstrip() + "..."
 
 
+def _table_matrix(table: dict[str, Any]) -> list[Any]:
+    matrix = table.get("matrix")
+    if isinstance(matrix, list) and matrix:
+        return matrix
+    headers = table.get("headers")
+    rows = table.get("rows")
+    if not isinstance(headers, list) or not isinstance(rows, list):
+        return []
+    normalized: list[Any] = [headers]
+    for row in rows:
+        if isinstance(row, dict):
+            normalized.append([row.get(str(header), "") for header in headers])
+        elif isinstance(row, list):
+            normalized.append(row)
+    return normalized
+
+
 def _service_material_table_quote(matrix: list[Any], caption: str, limit: int) -> str | None:
     rows = [row for row in matrix if isinstance(row, list) and any(str(cell).strip() for cell in row)]
     if len(rows) < 2:
@@ -635,6 +652,14 @@ def _service_material_table_quote(matrix: list[Any], caption: str, limit: int) -
         ),
         1 if len(headers) > 1 else 0,
     )
+    requirement_index = next(
+        (
+            index
+            for index, header in enumerate(headers)
+            if any(marker in header for marker in ("要求", "说明", "备注"))
+        ),
+        -1,
+    )
     lines = [caption.strip() or "申请材料目录"]
     for row in rows[1:]:
         if material_index >= len(row):
@@ -644,6 +669,10 @@ def _service_material_table_quote(matrix: list[Any], caption: str, limit: int) -
             continue
         sequence = re.sub(r"\s+", "", str(row[0])).strip() if row else ""
         line = f"{sequence}. {material}" if sequence else material
+        if requirement_index >= 0 and requirement_index < len(row):
+            requirement = re.sub(r"\s+", " ", str(row[requirement_index])).strip()
+            if requirement:
+                line += f"；要求：{requirement}"
         candidate = "\n".join([*lines, line])
         if len(candidate) > limit:
             break
@@ -668,7 +697,7 @@ def table_quote(
         return quote_text(fallback, query, limit)
 
     caption = table.get("caption") or ""
-    matrix = table.get("matrix") or []
+    matrix = _table_matrix(table)
     query_plan = plan or understand_query(query)
     if query_plan.output_mode == "table":
         markdown_quote = _markdown_table_quote(matrix, str(caption), limit)
@@ -1037,7 +1066,7 @@ def table_has_exploration_type(table_json: str | None, target_type: str | None) 
         table = json.loads(table_json)
     except json.JSONDecodeError:
         return False
-    for row in table.get("matrix") or []:
+    for row in _table_matrix(table):
         if isinstance(row, list) and row and canonical_exploration_type(row[0]) == target_type:
             return True
     return False
@@ -1855,16 +1884,26 @@ class KnowledgeStore:
             row = candidate["row"]
             score = min(0.99, max(0.05, float(candidate["final_score"])))
             structured_quote, structured_clause = structured_intent_quote(row, plan)
+            quote_limit = (
+                1800
+                if plan.output_mode == "table"
+                else 1400 if plan.intent == "service_materials" else QUOTE_LIMIT
+            )
+            evidence_limit = (
+                1800
+                if plan.output_mode == "table" or plan.intent == "service_materials"
+                else 800
+            )
             compact_quote = structured_quote or (
                 table_quote(
                     row["table_json"],
                     row["text"],
                     plan.normalized_query,
-                    limit=1800 if plan.output_mode == "table" else QUOTE_LIMIT,
+                    limit=quote_limit,
                     plan=plan,
                 )
                 if row["chunk_type"] == "table"
-                else quote_text(row["text"], plan.retrieval_query)
+                else quote_text(row["text"], plan.retrieval_query, limit=quote_limit)
             )
             item = {
                 "chunk_id": row["chunk_id"],
@@ -1882,11 +1921,16 @@ class KnowledgeStore:
                         row["table_json"],
                         row["text"],
                         plan.retrieval_query,
-                        limit=1800 if plan.output_mode == "table" else 800,
+                        limit=evidence_limit,
                         plan=plan,
                     )
                     if row["chunk_type"] == "table"
-                    else quote_text(row["text"], plan.retrieval_query, limit=800, max_sentences=6)
+                    else quote_text(
+                        row["text"],
+                        plan.retrieval_query,
+                        limit=evidence_limit,
+                        max_sentences=6,
+                    )
                 ),
                 "score": round(score, 4),
                 "hit_type": sorted(candidate["hit_types"]),

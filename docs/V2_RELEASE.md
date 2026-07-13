@@ -1,5 +1,23 @@
 # geowiki v2.x Releases
 
+## v2.2.3 Mining Registration Workflow Hotfix
+
+- Added a protected workflow relation for questions asking what remains between mineral-resource-reserve filing and receipt of a mining licence.
+- The first semantic stage now classifies this relation as registration materials and procedures instead of a generic licence reference.
+- Basic retrieval targets the official mining-right change/renewal service guide and bypasses unnecessary ANN search when the governed title scope is sufficient.
+- Added support for structured tables stored as `headers + rows`, preserving all material names and requirements instead of truncating the table before later rows.
+- Both modes convert documentary requirements into actionable steps, including “complete mining-right transfer-income payment or compensated disposal and obtain supporting proof.”
+- Deep mode uses a one-document governed inventory plan instead of cross-regulation comparison, and includes the official guide link.
+- Kept the evidence-first architecture: the LLM plans retrieval before answering; unrestricted model-memory answers are not used as an internet fallback.
+- Validation: 149 automated tests passed. Live local regressions completed in about 1.56 seconds for basic mode and 4.77 seconds for deep mode; both returned the five-item official checklist.
+
+### v2.2.3 中文更新摘要
+
+- 修复“评审备案后、领采矿证前还需办什么”被误判为普通证件或跨法规比较的问题。
+- 完整读取办事指南 `headers + rows` 表格中的五项材料和要求，不再在第4项后截断。
+- 基本、深度模式统一输出可执行手续，第5项明确为完成出让收益缴纳或有偿处置并取得证明。
+- 深度模式只审查正确的自然资源部办事指南，不再返回零证据；保留官方网页链接。
+
 ## v2.2.2 First-Stage Semantic Resolution Hotfix
 
 - Moved domain-aware typo correction, intent understanding, negation, correction, and short conversation recovery into the first LLM semantic stage after authentication, rate limiting, and the low-cost domain gate.

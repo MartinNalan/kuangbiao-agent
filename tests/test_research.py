@@ -157,6 +157,21 @@ class ResearchPlannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("policy_attachment", plan.document_types)
         self.assertNotIn("发证机关", plan.comparison_dimensions)
 
+    async def test_post_filing_steps_plan_cannot_become_cross_document_comparison(self) -> None:
+        planner = ResearchPlanner(
+            Settings(OPENAI_API_KEY="configured"),
+            BadServicePlannerLLM(),  # type: ignore[arg-type]
+        )
+
+        plan = await planner.plan("资源储量评审备案后，在领取采矿证之前还需要办什么手续")
+
+        self.assertEqual(plan.intent, "service_materials")
+        self.assertEqual(plan.strategy, "document_inventory")
+        self.assertEqual(plan.corpus_title_terms, ("采矿权变更（续期）登记临时服务指南",))
+        self.assertEqual(plan.document_types, ("service_guide", "administrative_service_guide"))
+        self.assertEqual(plan.anchor_standard_numbers, ())
+        self.assertIn("矿业权出让收益", plan.required_evidence_groups[2])
+
     def test_direct_evidence_filter_rejects_an_ordinary_spacing_table(self) -> None:
         groups = ResearchPlanner._fallback("不同标准对矿体无限外推所依据的间距有何差异？").required_evidence_groups
         ordinary = {
@@ -481,6 +496,32 @@ class ResearchAnalyzerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("自然资规〔2023〕4号附件4", answer)
         self.assertLess(answer.index("第1项"), answer.index("第4项"))
         self.assertNotIn("发证机关", answer)
+
+    def test_post_filing_research_answer_converts_material_to_procedure(self) -> None:
+        question = "资源储量评审备案后，在领取采矿证之前还需要办什么手续"
+        source = Source(
+            title="采矿权变更（续期）登记临时服务指南",
+            chapter="申请材料 > 申请材料目录",
+            quote=(
+                "申请材料目录 1.采矿权登记申请书 2.申请人的企业法人营业执照副本 "
+                "3.不动产权证书（采矿权）或采矿许可证 4.矿产资源储量评审备案文件 "
+                "5.矿业权出让收益（价款）缴纳或有偿处置证明材料。"
+            ),
+            source_type="official_fulltext",
+            text_access="html_text",
+            url="https://www.mnr.gov.cn/bsznxxk/fwzn/202507/t20250729_2895981.html",
+            source_role="service_guide",
+        )
+
+        answer = ResearchTaskRunner._render_service_material_answer(
+            ResearchPlanner._fallback(question),
+            [source],
+        )
+
+        self.assertIn("以下 5 项", answer)
+        self.assertIn("完成矿业权出让收益（价款）缴纳或有偿处置", answer)
+        self.assertIn("2895981.html", answer)
+        self.assertNotIn("没有命中", answer)
 
 
 if __name__ == "__main__":

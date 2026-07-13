@@ -52,6 +52,16 @@ SERVICE_PROCEDURE_TERMS = (
     "按哪个文件",
 )
 SERVICE_TIME_LIMIT_TERMS = ("办结时限", "办理时限", "需要多久", "多久办结", "多少个工作日", "时限是多久")
+POST_FILING_LICENSE_ACTION_TERMS = (
+    "还需要",
+    "还需",
+    "还要",
+    "接下来",
+    "下一步",
+    "什么手续",
+    "哪些手续",
+    "怎么办",
+)
 AUTHORITY_INTENT_TERMS = (
     "哪个机构",
     "去哪个机构",
@@ -739,9 +749,41 @@ def contextualize_follow_up(query: str, previous_user_question: str | None) -> s
     return f"{previous}；追问：{current}"
 
 
+def is_post_filing_license_steps_query(query: str) -> bool:
+    normalized = normalize_user_query(query)
+    has_filing = any(
+        term in normalized
+        for term in (
+            "矿产资源储量评审备案",
+            "资源储量评审备案",
+            "储量评审备案",
+            "储量备案",
+        )
+    )
+    has_license_target = any(
+        term in normalized
+        for term in (
+            "领取采矿证",
+            "领采矿证",
+            "拿采矿证",
+            "取得采矿证",
+            "领取采矿许可证",
+            "取得采矿许可证",
+            "采矿权登记",
+        )
+    )
+    return bool(
+        has_filing
+        and has_license_target
+        and any(term in normalized for term in POST_FILING_LICENSE_ACTION_TERMS)
+    )
+
+
 def service_guide_title_terms(query: str) -> tuple[str, ...]:
     terms: list[str] = []
-    if any(term in query for term in ("压矿", "压覆审批", "压覆矿产资源")) and "审批" in query:
+    if is_post_filing_license_steps_query(query):
+        terms.append("采矿权变更（续期）登记临时服务指南")
+    elif any(term in query for term in ("压矿", "压覆审批", "压覆矿产资源")) and "审批" in query:
         terms.extend(["建设项目压覆矿产资源审批", "压覆重要矿产资源审批"])
     elif "探矿权首次登记" in query:
         terms.append("探矿权首次登记")
@@ -851,8 +893,10 @@ def understand_query(query: str) -> QueryPlan:
     has_related_documents = any(term in normalized for term in RELATED_DOCUMENT_TERMS)
     has_license = any(term in normalized for term in LICENSE_TERMS)
     guide_titles = service_guide_title_terms(normalized)
-    has_service_materials = (bool(guide_titles) or has_license) and any(
-        term in normalized for term in SERVICE_MATERIAL_TERMS
+    post_filing_license_steps = is_post_filing_license_steps_query(normalized)
+    has_service_materials = post_filing_license_steps or (
+        (bool(guide_titles) or has_license)
+        and any(term in normalized for term in SERVICE_MATERIAL_TERMS)
     )
     has_service_procedure = (bool(guide_titles) or has_license) and any(
         term in normalized for term in SERVICE_PROCEDURE_TERMS
@@ -940,12 +984,23 @@ def understand_query(query: str) -> QueryPlan:
         )
     elif has_service_materials:
         intent = "service_materials"
-        if "采矿权申请资料清单及要求" in guide_titles:
+        if post_filing_license_steps:
+            candidate_titles.append("采矿权变更（续期）登记临时服务指南")
+            retrieval_terms.extend(
+                [
+                    "采矿权变更（续期）登记临时服务指南",
+                    "申请材料目录",
+                    "采矿权登记申请书",
+                    "矿产资源储量评审备案文件",
+                    "矿业权出让收益（价款）缴纳或有偿处置证明材料",
+                ]
+            )
+        elif "采矿权申请资料清单及要求" in guide_titles:
             standards.append("自然资规〔2023〕4号")
-        if guide_titles:
+        if guide_titles and not post_filing_license_steps:
             candidate_titles.extend(guide_titles)
             retrieval_terms.extend([*guide_titles, "申请材料", "申请材料目录"])
-        else:
+        elif not post_filing_license_steps:
             candidate_titles.extend(["采矿权申请资料清单及要求", "矿产资源勘查开采登记管理"])
             standards.append("自然资规〔2023〕4号")
             retrieval_terms.extend(

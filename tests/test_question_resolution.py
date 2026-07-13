@@ -227,6 +227,31 @@ class QuestionResolverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.plan.intent, "service_materials")
         self.assertFalse(result.requires_clarification)
 
+    async def test_post_filing_license_steps_use_first_semantic_stage_without_type_clarification(self) -> None:
+        llm = FakeResolutionLLM(
+            {
+                "canonical_question": "矿产资源储量评审备案后，在领取采矿许可证前还需办理哪些登记手续？",
+                "intent": "service_materials",
+                "is_ambiguous": False,
+                "confidence": 0.96,
+                "missing_slots": [],
+                "reason": "目标是领取采矿许可证前的登记材料和待办事项。",
+                "interpretations": [],
+            }
+        )
+        resolver = QuestionResolver(self.settings(), llm=llm)  # type: ignore[arg-type]
+
+        result = await resolver.resolve(
+            "资源储量评审备案后，在领取采矿证之前还需要办什么手续",
+            mode="deep",
+        )
+
+        self.assertTrue(result.model_used)
+        self.assertEqual(llm.calls, 1)
+        self.assertEqual(result.plan.intent, "service_materials")
+        self.assertFalse(result.requires_clarification)
+        self.assertIn("领取采矿许可证", result.canonical_question)
+
     async def test_clear_engineering_distance_question_uses_fast_path(self) -> None:
         llm = FakeResolutionLLM({})
         resolver = QuestionResolver(self.settings(), llm=llm)  # type: ignore[arg-type]

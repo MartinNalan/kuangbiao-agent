@@ -134,10 +134,12 @@ v2.0 当前实现：
 - Scoped vector fallback：ANN 缺失或失效时，只允许在已限定到少量候选文档的范围内精确计算；无范围的全库 JSON 向量扫描被禁用。
 - Controlled hybrid retrieval：Schema 文档类型过滤、证据关系 FTS、知识图谱和 ANN 多路召回，通过 reciprocal-rank fusion 与意图得分统一排序。
 - Intent-aware retrieval：第一语义阶段结合当前问题与最近用户问题形成规范化目标；领域术语归一、查询扩展和证据可回答性校验再处理权限归属、标准适用、材料清单、表格数值和条款差异类问题。
+- Workflow relation routing：对“A 已完成、B 尚未取得、还需办什么”的问题，把 A 作为背景、B 作为检索目标；优先路由 B 对应的办事指南和申请材料目录。材料名称可在证据约束下转换为动作，但不得添加证据外的前置审批。
 - Authority roles：权限问题分别提取许可证颁发层级、矿业权出让层级和评审备案机关；回答按许可证颁发机关判断，不能把“自然资源部出让”误读为“自然资源部颁证”。
 - Query plan：本地确定性规则统一 `1/I/Ⅰ/一类型` 等无歧义写法；DeepSeek 第一语义阶段先校准 `采矿正/采矿证` 等领域输入并识别真实事项，模糊、比较和跨文件问题随后输出受校验的结构化计划。受保护问题保留标准号、文号、数值、事项类型和输出模式，模型不能用自由改写覆盖系统 Schema。
 - Conversation resolver：只向第一语义阶段提供最近最多 4 轮用户问题，不回放旧助手答案；当前用户的否定和纠正优先，并可恢复被错误分叉前的有效业务目标。
 - Mining-right materials Schema：通用采矿许可证材料问题按新立、延续、变更、注销确认。自然资规〔2023〕4号附件4和 `policy_attachment` 属于受保护候选范围，深度研究按办理类型逐项召回材料，不按发证机关分叉。
+- Service-guide tables：知识库表格同时兼容 `matrix` 和 `headers + rows` 两种结构。材料清单按完整性预算保留全部直接相关行和“要求”字段，不能套用普通短引文上限截断后续材料。
 - Evidence judge：复杂问题由 DeepSeek 审查前 10 个候选是否直接回答目标关系，并同时生成受证据约束的答案草稿。
 - Second retrieval：证据不足时，根据缺口执行最多一次补充检索；复杂问题可以在该轮并发执行最多 2 条受控查询，仍不足则创建异步补库任务。
 - Candidate diversity：仅当适用意图的前 5 条候选至少 4 条来自同一文档时，以 MMR 重排已召回的最多 80 条候选；精确标准、表格、附件材料和硬 Schema 范围禁用。
@@ -172,6 +174,8 @@ User question
   -> deterministic high-value formatter or grounded answer
   -> async web/OCR enrichment when evidence remains insufficient
 ```
+
+第一语义模型不得先生成自由答案再要求检索器为其寻找依据。受控联网补充也必须先取得白名单官方来源的实际文本或元数据、形成可审计证据，再进入答案生成；模型训练知识不能冒充互联网证据。
 
 `domain_lexicon` 在 v2.1.0 由 SQLite 治理表和运行时 JSON 两层组成。内置词条在应用数据库初始化时登记；管理员新增或修改内容先进入候选表。候选记录用户表达、规范术语、意图标签、领域、别名、上下文条件、正向扩展、负面降权词、证据要求、优先级、风险等级、正例和反例。
 

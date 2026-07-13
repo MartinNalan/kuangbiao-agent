@@ -18,6 +18,7 @@ from .query_understanding import (
     TRANSFER_CONDITION_TERMS,
     TRANSFER_EQUIVALENT_TERMS,
     TRANSFER_REPORT_OBJECT_TERMS,
+    is_post_filing_license_steps_query,
     normalize_user_query,
     understand_query,
 )
@@ -858,6 +859,14 @@ class MiningQAAgent:
         strict_validator = strict_validators.get(effective_plan.intent)
         if strict_validator:
             matched = [hit for hit in hits if strict_validator(self._source_from_hit(hit))]
+            if effective_plan.intent == "service_materials":
+                prepared_matches = []
+                for hit in matched:
+                    prepared = dict(hit)
+                    if hit.get("evidence_text"):
+                        prepared["quote"] = hit["evidence_text"]
+                    prepared_matches.append(prepared)
+                matched = prepared_matches
             if (
                 effective_plan.intent in {"service_materials", "service_procedure_basis", "service_time_limit"}
                 and effective_plan.candidate_title_terms
@@ -1316,6 +1325,8 @@ class MiningQAAgent:
 
     def _direct_service_material_quote(self, text: str) -> str:
         clean = re.sub(r"\s+", " ", text).strip()
+        if "申请材料目录" in clean and "矿业权出让收益" in clean:
+            return clean[:1400] + ("..." if len(clean) > 1400 else "")
         match = re.search(
             r"(自然资源部负责的矿业权.*?按照本通知附件2探矿权申请资料清单及要求、附件4采矿权申请资料清单及要求执行。)",
             clean,
@@ -1323,6 +1334,35 @@ class MiningQAAgent:
         if match:
             return match.group(1)
         return clean[:260] + ("..." if len(clean) > 260 else "")
+
+    @staticmethod
+    def _post_filing_license_steps_answer(sources: list[Source]) -> str | None:
+        candidates = [
+            source
+            for source in sources
+            if "采矿权变更（续期）登记临时服务指南" in source.title
+            and "申请材料" in f"{source.chapter or ''} {source.quote or ''}"
+            and "矿产资源储量评审备案文件" in (source.quote or "")
+            and "矿业权出让收益" in (source.quote or "")
+        ]
+        if not candidates:
+            return None
+        source = max(candidates, key=lambda item: len(item.quote or ""))
+        return "\n".join(
+            [
+                "**结论：资源储量评审备案完成后，还需要继续办理采矿权变更（续期）登记申请。**",
+                "",
+                f"根据《{source.title}》的申请材料目录，需要处理以下 5 项：",
+                "",
+                "1. **填写并提交采矿权登记申请书。**",
+                "2. **确认企业法人营业执照信息可被在线核验。** 该材料由登记机关通过政府网站核查，申请人无需另行提交。",
+                "3. **按适用情形提交不动产权证书（采矿权）或原采矿许可证。**",
+                "4. **提交矿产资源储量评审备案文件或指南要求的矿山储量年报。** 非油气续期通常提交当年或上一年度矿山储量年报；累计查明资源量发生重大变化时提交评审备案文件。",
+                "5. **完成矿业权出让收益（价款）缴纳或有偿处置，并取得相应证明材料。** 可使用缴款通知书、分期缴款批复、成交确认书、出让合同、缴纳票据或征收机关书面意见等证明。",
+                "",
+                "以上清单适用于该自然资源部采矿权变更（续期）办事指南覆盖的情形；其他登记类型或地方发证事项应以对应办事指南为准。",
+            ]
+        )
 
     def _direct_policy_authority_quote(self, text: str) -> str:
         clean = re.sub(r"\s+", " ", text).strip()
@@ -1477,6 +1517,10 @@ class MiningQAAgent:
                 )
 
         if effective_plan.intent == "service_materials":
+            if is_post_filing_license_steps_query(effective_plan.normalized_query):
+                transition_answer = self._post_filing_license_steps_answer(sources)
+                if transition_answer:
+                    return transition_answer
             attachment_sources = [
                 item
                 for item in sources
@@ -2046,7 +2090,11 @@ class MiningQAAgent:
             if key in seen:
                 continue
             seen.add(key)
-            label = f"{source.standard_no or '未知标准'}《{source.title}》"
+            label = (
+                f"{source.standard_no}《{source.title}》"
+                if source.standard_no
+                else f"《{source.title}》"
+            )
             lines.append(f"- [{label}]({source.url})")
         if not lines:
             return answer

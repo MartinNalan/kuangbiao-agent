@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError
@@ -13,6 +13,9 @@ from .llm_client import LLMClient
 from .query_understanding import (
     PROTECTED_QUERY_INTENTS,
     QueryPlan,
+    default_document_types,
+    default_evidence_groups,
+    is_post_filing_license_steps_query,
     normalize_user_query,
     understand_query,
 )
@@ -164,6 +167,12 @@ class QuestionResolver:
                     "上述发证机关规则只适用于用户明确询问矿产资源储量评审备案机构的情形，"
                     "不得用于采矿许可证办理材料、申请要件或办理流程。"
                     "采矿许可证办理材料首先按新立、延续、变更、注销区分，不按发证机关生成候选。"
+                    "当用户询问‘评审备案后、领取采矿许可证前还需办理什么’时，目标是采矿权登记的"
+                    "申请材料、缴费或有偿处置等待办事项，intent 应为 service_materials，不能归为"
+                    "license_reference、authority_responsibility 或跨文件比较。"
+                    "intent 优先使用 authority_responsibility、service_materials、service_procedure_basis、"
+                    "service_time_limit、standard_selection、definition_explanation、engineering_distance_lookup、"
+                    "projection_numeric_rule、projection_comparison、legal_responsibility、general 之一。"
                     "候选解释必须完整、互斥、仍属于地质矿产领域，并可直接作为后续知识库检索问题。"
                     "最多给出4个候选，不得在候选中预设答案。转采、权限、材料等已确认业务规则不能被改写。"
                     "只给出专业主题并询问‘怎么处理、怎么办、处理方法’而未说明目标、阶段或事项时，"
@@ -234,7 +243,11 @@ class QuestionResolver:
             canonical,
             recent_questions,
         )
-        canonical_plan = understand_query(canonical)
+        canonical_plan = self._apply_model_intent(
+            base_plan,
+            understand_query(canonical),
+            payload,
+        )
         options = self._options(payload.interpretations, canonical_plan)
         schema_clarification = self._schema_clarification(
             mechanical,
@@ -284,7 +297,38 @@ class QuestionResolver:
             return True
         if plan.intent == "authority_responsibility":
             return plan.authority_role_ambiguous or plan.license_issuer_level == "unknown"
-        return plan.intent in {"projection_rule", "related_documents", "regulation_lookup"}
+        return plan.intent in {
+            "license_reference",
+            "service_procedure_basis",
+            "projection_rule",
+            "related_documents",
+            "regulation_lookup",
+        }
+
+    def _apply_model_intent(
+        self,
+        base_plan: QueryPlan,
+        canonical_plan: QueryPlan,
+        payload: ResolutionPayload,
+    ) -> QueryPlan:
+        suggested = payload.intent.strip()
+        if (
+            payload.is_ambiguous
+            or payload.confidence < self.settings.question_resolution_min_confidence
+            or suggested not in PROTECTED_QUERY_INTENTS
+        ):
+            return canonical_plan
+        if base_plan.intent in PROTECTED_QUERY_INTENTS and suggested != base_plan.intent:
+            return canonical_plan
+        if canonical_plan.intent in PROTECTED_QUERY_INTENTS:
+            return canonical_plan
+        return replace(
+            canonical_plan,
+            intent=suggested,
+            document_types=default_document_types(suggested),
+            required_evidence_groups=default_evidence_groups(suggested),
+            planner_confidence=payload.confidence,
+        )
 
     def _options(
         self,
@@ -445,6 +489,7 @@ class QuestionResolver:
             plan.intent == "service_materials"
             and any(term in question for term in MINING_RIGHT_LICENSE_TERMS)
             and not any(term in question for term in MINING_RIGHT_APPLICATION_TERMS)
+            and not is_post_filing_license_steps_query(question)
         )
 
     @classmethod

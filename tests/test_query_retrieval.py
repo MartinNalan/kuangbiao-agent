@@ -210,6 +210,14 @@ class QueryUnderstandingTests(unittest.TestCase):
                 self.assertEqual(plan.intent, intent)
                 self.assertIn(document_no, plan.standard_numbers)
 
+    def test_post_filing_license_steps_route_to_registration_guide(self) -> None:
+        plan = understand_query("资源储量评审备案后，在领取采矿证之前还需要办什么手续")
+
+        self.assertEqual(plan.intent, "service_materials")
+        self.assertIn("采矿权变更（续期）登记临时服务指南", plan.candidate_title_terms)
+        self.assertNotIn("矿产资源储量评审备案", plan.candidate_title_terms)
+        self.assertIn("矿业权出让收益（价款）缴纳或有偿处置证明材料", plan.retrieval_query)
+
     def test_generic_mining_right_requirements_include_policy_attachment(self) -> None:
         plan = apply_semantic_plan(
             understand_query("采矿权申请的前置条件及要件有哪些"),
@@ -324,6 +332,30 @@ class TableExtractionTests(unittest.TestCase):
         self.assertIn("| 规模等级 | 走向/m |", quote)
         self.assertIn("| --- | --- |", quote)
         self.assertIn("| 大型 | >500 |", quote)
+
+    def test_service_material_rows_format_keeps_every_item_and_requirement(self) -> None:
+        table = json.dumps(
+            {
+                "caption": "申请材料目录",
+                "headers": ["序号", "材料名称", "要求"],
+                "rows": [
+                    {"序号": "1", "材料名称": "采矿权登记申请书", "要求": ""},
+                    {"序号": "2", "材料名称": "企业法人营业执照副本", "要求": "登记机关在线核查。"},
+                    {"序号": "3", "材料名称": "不动产权证书（采矿权）或采矿许可证", "要求": "按适用情形提交。"},
+                    {"序号": "4", "材料名称": "矿产资源储量评审备案文件", "要求": "重大变化时提交。"},
+                    {"序号": "5", "材料名称": "矿业权出让收益（价款）缴纳或有偿处置证明材料", "要求": "提供缴纳凭证。"},
+                ],
+            },
+            ensure_ascii=False,
+        )
+        plan = understand_query("资源储量评审备案后，在领取采矿证之前还需要办什么手续")
+
+        quote = table_quote(table, "", plan.normalized_query, limit=1400, plan=plan)
+
+        for sequence in range(1, 6):
+            self.assertIn(f"{sequence}.", quote)
+        self.assertIn("矿业权出让收益（价款）缴纳或有偿处置证明材料", quote)
+        self.assertIn("要求：提供缴纳凭证", quote)
 
     def test_table_reference_range_is_expanded(self) -> None:
         self.assertEqual(
@@ -584,6 +616,30 @@ class PlannerFallbackTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastAnswerTests(unittest.TestCase):
+    def test_post_filing_materials_are_converted_to_actionable_steps(self) -> None:
+        agent = object.__new__(MiningQAAgent)
+        question = "资源储量评审备案后，在领取采矿证之前还需要办什么手续"
+        source = Source(
+            title="采矿权变更（续期）登记临时服务指南",
+            chapter="申请材料 > 申请材料目录",
+            quote=(
+                "申请材料目录 1.采矿权登记申请书 2.申请人的企业法人营业执照副本，登记机关在线核查。"
+                "3.不动产权证书（采矿权）或采矿许可证 4.矿产资源储量评审备案文件 "
+                "5.矿业权出让收益（价款）缴纳或有偿处置证明材料。"
+            ),
+            source_type="official_fulltext",
+            text_access="html_text",
+            url="https://www.mnr.gov.cn/bsznxxk/fwzn/202507/t20250729_2895981.html",
+            source_role="service_guide",
+        )
+
+        answer = agent._fast_answer(question, [source], understand_query(question)) or ""
+
+        self.assertIn("以下 5 项", answer)
+        self.assertIn("完成矿业权出让收益（价款）缴纳或有偿处置", answer)
+        self.assertIn("无需另行提交", answer)
+        self.assertNotIn("环境影响评价", answer)
+
     def test_compound_definition_uses_direct_resource_and_reserve_clauses(self) -> None:
         agent = object.__new__(MiningQAAgent)
         plan = understand_query("资源储量的定义")

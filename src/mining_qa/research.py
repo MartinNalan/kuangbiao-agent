@@ -19,6 +19,7 @@ from .query_understanding import (
     TRANSFER_REPORT_OBJECT_TERMS,
     default_document_types,
     default_evidence_groups,
+    is_post_filing_license_steps_query,
     normalize_user_query,
     understand_query,
 )
@@ -262,6 +263,24 @@ class ResearchPlanner:
         base = understand_query(question)
         if base.intent == "service_materials":
             fallback = ResearchPlanner._fallback(question)
+            if is_post_filing_license_steps_query(question):
+                return replace(
+                    plan,
+                    intent="service_materials",
+                    strategy="document_inventory",
+                    anchor_titles=fallback.anchor_titles,
+                    anchor_standard_numbers=(),
+                    corpus_title_terms=fallback.corpus_title_terms,
+                    corpus_standard_numbers=(),
+                    document_types=fallback.document_types,
+                    comparison_dimensions=fallback.comparison_dimensions,
+                    evidence_queries=fallback.evidence_queries,
+                    required_evidence_groups=fallback.required_evidence_groups,
+                    scope_note=(
+                        "只检索采矿权变更（续期）登记办事指南中的申请材料目录，"
+                        "将材料要求转换为评审备案后至领证前的待办手续。"
+                    ),
+                )
             return replace(
                 plan,
                 intent="service_materials",
@@ -339,11 +358,16 @@ class ResearchPlanner:
     @staticmethod
     def _fallback(question: str) -> ResearchPlan:
         base = understand_query(question)
+        post_filing_steps = is_post_filing_license_steps_query(question)
         title_terms: list[str] = []
         document_types = list(base.document_types or default_document_types(base.intent))
         if base.intent == "service_materials":
-            title_terms.append("采矿权申请资料清单及要求")
-            document_types = list(default_document_types("service_materials"))
+            if post_filing_steps:
+                title_terms.append("采矿权变更（续期）登记临时服务指南")
+                document_types = ["service_guide", "administrative_service_guide"]
+            else:
+                title_terms.append("采矿权申请资料清单及要求")
+                document_types = list(default_document_types("service_materials"))
         elif base.intent == "exploration_to_mining_eligibility":
             title_terms.append("矿产地质勘查规范")
             document_types = [
@@ -384,13 +408,25 @@ class ResearchPlanner:
         evidence_queries = (base.retrieval_query or base.normalized_query,)
         required_evidence_groups: tuple[tuple[str, ...], ...] = ()
         if base.intent == "service_materials":
-            application = ResearchTaskRunner._service_application_label(base.normalized_query)
-            dimensions = ("办理类型", "申请材料", "特殊适用条件", "提交形式")
-            evidence_queries = (
-                f"采矿权{application or ''}申请资料清单及要求 附件4 必须提交 材料名称",
-                f"采矿权{application or ''}申请 表中标记 要求 提交形式",
-            )
-            required_evidence_groups = default_evidence_groups("service_materials")
+            if post_filing_steps:
+                dimensions = ("下一步办理事项", "对应申请材料", "适用条件", "缴费或有偿处置")
+                evidence_queries = (
+                    "采矿权变更（续期）登记 申请材料目录 采矿权登记申请书 矿产资源储量评审备案文件",
+                    "矿业权出让收益（价款）缴纳或有偿处置证明材料",
+                )
+                required_evidence_groups = (
+                    ("申请材料目录", "采矿权登记申请书"),
+                    ("矿产资源储量评审备案文件", "矿山储量年报"),
+                    ("矿业权出让收益", "有偿处置证明材料"),
+                )
+            else:
+                application = ResearchTaskRunner._service_application_label(base.normalized_query)
+                dimensions = ("办理类型", "申请材料", "特殊适用条件", "提交形式")
+                evidence_queries = (
+                    f"采矿权{application or ''}申请资料清单及要求 附件4 必须提交 材料名称",
+                    f"采矿权{application or ''}申请 表中标记 要求 提交形式",
+                )
+                required_evidence_groups = default_evidence_groups("service_materials")
         elif base.intent == "exploration_to_mining_eligibility":
             dimensions = (
                 "一般转采条件",
@@ -449,7 +485,9 @@ class ResearchPlanner:
             anchor_titles=tuple(
                 dict.fromkeys(
                     (
-                        "采矿权申请资料清单及要求",
+                        "采矿权变更（续期）登记临时服务指南"
+                        if post_filing_steps
+                        else "采矿权申请资料清单及要求",
                         *_explicit_titles(question),
                     )
                     if base.intent == "service_materials"
@@ -458,7 +496,7 @@ class ResearchPlanner:
             ),
             anchor_standard_numbers=tuple(
                 dict.fromkeys(
-                    ("自然资规〔2023〕4号附件4", *base.standard_numbers)
+                    (() if post_filing_steps else ("自然资规〔2023〕4号附件4", *base.standard_numbers))
                     if base.intent == "service_materials"
                     else (
                         *TRANSFER_ANCHOR_STANDARD_NUMBERS,
@@ -483,7 +521,11 @@ class ResearchPlanner:
             comparison_dimensions=tuple(dimensions),
             evidence_queries=evidence_queries,
             required_evidence_groups=required_evidence_groups,
-            scope_note="按知识库目录中的受控文件范围逐份检索。",
+            scope_note=(
+                "按采矿权变更（续期）登记办事指南核对评审备案后至领证前的材料和手续。"
+                if post_filing_steps
+                else "按知识库目录中的受控文件范围逐份检索。"
+            ),
             planner_used=False,
         )
 
@@ -1446,6 +1488,10 @@ class ResearchTaskRunner:
         plan: ResearchPlan,
         sources: list[Source],
     ) -> str:
+        if is_post_filing_license_steps_query(plan.canonical_question):
+            transition_answer = cls._render_post_filing_license_steps(sources)
+            if transition_answer:
+                return transition_answer
         application = cls._service_application_label(plan.canonical_question)
         relevant = [
             source
@@ -1495,6 +1541,38 @@ class ResearchTaskRunner:
             "**深度研究未形成可引用结论。**\n\n"
             "未检索到自然资规〔2023〕4号附件4《采矿权申请资料清单及要求》的直接材料记录。"
         )
+
+    @staticmethod
+    def _render_post_filing_license_steps(sources: list[Source]) -> str | None:
+        candidates = [
+            source
+            for source in sources
+            if "采矿权变更（续期）登记临时服务指南" in source.title
+            and "申请材料" in f"{source.chapter or ''} {source.quote or ''}"
+            and "矿产资源储量评审备案文件" in (source.quote or "")
+            and "矿业权出让收益" in (source.quote or "")
+        ]
+        if not candidates:
+            return None
+        source = max(candidates, key=lambda item: len(item.quote or ""))
+        lines = [
+                "**研究结论**",
+                "",
+                "资源储量评审备案完成后，还需要继续办理采矿权变更（续期）登记申请。",
+                "",
+                f"根据《{source.title}》的申请材料目录，需要处理以下 5 项：",
+                "",
+                "1. **填写并提交采矿权登记申请书。**",
+                "2. **确认企业法人营业执照信息可被在线核验。** 该材料由登记机关核查，无需申请人另行提交。",
+                "3. **按适用情形提交不动产权证书（采矿权）或原采矿许可证。**",
+                "4. **提交矿产资源储量评审备案文件或指南要求的矿山储量年报。** 非油气续期通常提交当年或上一年度矿山储量年报；累计查明资源量发生重大变化时提交评审备案文件。",
+                "5. **完成矿业权出让收益（价款）缴纳或有偿处置，并取得相应证明材料。** 可使用缴款通知书、分期缴款批复、成交确认书、出让合同、缴纳票据或征收机关书面意见等证明。",
+                "",
+                "该结论适用于上述自然资源部采矿权变更（续期）办事指南覆盖的情形；其他登记类型或地方发证事项应核对对应办事指南。",
+            ]
+        if source.url:
+            lines.extend(["", f"**官方来源**：[《{source.title}》]({source.url})"])
+        return "\n".join(lines)
 
     @staticmethod
     def _service_application_label(question: str) -> str | None:
