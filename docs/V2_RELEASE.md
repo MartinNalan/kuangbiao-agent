@@ -1,5 +1,13 @@
 # geowiki v2.x Releases
 
+## v2.2.1 Broad-Action Clarification Hotfix
+
+- Added a deterministic Schema fallback for broad goaf questions after production validation showed that the model could occasionally under-confirm `采空区怎么处理？`.
+- Broad questions now return four distinct directions: stability evaluation, accumulated-water and water-hazard review, subsidence monitoring, and engineering treatment.
+- Questions that already name a concrete goal continue directly to retrieval without an extra confirmation step.
+- Deployment probes that return clarification still consume zero quota; model-led interpretation remains primary for general ambiguity.
+- Validation: 136 automated tests passed, including model under-confirmation, explicit-goal bypass, API quota, and frontend clarification regressions.
+
 ## v2.2.0 Question Resolution and Protected Relation Retrieval
 
 - Added an LLM-led question-resolution stage before quota reservation and knowledge retrieval. Clear questions keep the deterministic fast path; materially ambiguous questions return 2-4 structured interpretations.

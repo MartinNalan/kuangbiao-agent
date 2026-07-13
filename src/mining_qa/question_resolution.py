@@ -28,6 +28,31 @@ SPECIFIC_APPLICATION_TERMS = (
     "扩大矿区范围",
     "缩小矿区范围",
 )
+BROAD_ACTION_MARKERS = (
+    "怎么处理",
+    "如何处理",
+    "怎么办",
+    "如何解决",
+    "怎么解决",
+    "处理方法",
+    "处理措施",
+    "治理方法",
+    "治理措施",
+)
+GOAF_SPECIFIC_GOALS = (
+    "稳定性",
+    "积水",
+    "水害",
+    "塌陷",
+    "沉陷",
+    "监测",
+    "调查",
+    "评价",
+    "充填",
+    "封闭",
+    "支护",
+    "复垦",
+)
 
 
 class ResolutionOptionPayload(BaseModel):
@@ -101,6 +126,8 @@ class QuestionResolver:
                     "许可证由自然资源部还是省级自然资源主管部门颁发时，必须判为歧义并给出对应候选。"
                     "候选解释必须完整、互斥、仍属于地质矿产领域，并可直接作为后续知识库检索问题。"
                     "最多给出4个候选，不得在候选中预设答案。转采、权限、材料等已确认业务规则不能被改写。"
+                    "只给出专业主题并询问‘怎么处理、怎么办、处理方法’而未说明目标、阶段或事项时，"
+                    "应判为歧义，并按实质不同的专业任务给出候选方向。"
                     "只返回 JSON。"
                 ),
             },
@@ -251,35 +278,77 @@ class QuestionResolver:
         model_options: list[ClarificationOption],
     ) -> Clarification | None:
         if (
-            base_plan.intent != "authority_responsibility"
-            or base_plan.license_issuer_level != "unknown"
+            base_plan.intent == "authority_responsibility"
+            and base_plan.license_issuer_level == "unknown"
         ):
-            return None
-        options = model_options if len(model_options) >= 2 else [
-            ClarificationOption(
-                option_id="option_1",
-                label="自然资源部颁发",
-                question=(
-                    "我的勘查许可证或采矿许可证由自然资源部颁发，"
-                    "矿产资源储量评审备案应向哪个机构申请？"
+            options = model_options if len(model_options) >= 2 else [
+                ClarificationOption(
+                    option_id="option_1",
+                    label="自然资源部颁发",
+                    question=(
+                        "我的勘查许可证或采矿许可证由自然资源部颁发，"
+                        "矿产资源储量评审备案应向哪个机构申请？"
+                    ),
+                    description="按自然资源部本级颁发许可证的情形核验。",
                 ),
-                description="按自然资源部本级颁发许可证的情形核验。",
-            ),
-            ClarificationOption(
-                option_id="option_2",
-                label="省级部门颁发",
-                question=(
-                    "我的勘查许可证或采矿许可证由省级自然资源主管部门颁发，"
-                    "矿产资源储量评审备案应向哪个机构申请？"
+                ClarificationOption(
+                    option_id="option_2",
+                    label="省级部门颁发",
+                    question=(
+                        "我的勘查许可证或采矿许可证由省级自然资源主管部门颁发，"
+                        "矿产资源储量评审备案应向哪个机构申请？"
+                    ),
+                    description="按省级自然资源主管部门颁发许可证的情形核验。",
                 ),
-                description="按省级自然资源主管部门颁发许可证的情形核验。",
-            ),
-        ]
-        return Clarification(
-            interpreted_question=canonical or original,
-            reason="当前缺少许可证颁发机关；该条件会直接改变评审备案权限结论。",
-            options=options[:4],
-            allow_free_text=True,
+            ]
+            return Clarification(
+                interpreted_question=canonical or original,
+                reason="当前缺少许可证颁发机关；该条件会直接改变评审备案权限结论。",
+                options=options[:4],
+                allow_free_text=True,
+            )
+        if QuestionResolver._is_broad_goaf_question(original):
+            options = model_options if len(model_options) >= 2 else [
+                ClarificationOption(
+                    option_id="option_1",
+                    label="稳定性评价",
+                    question="采空区稳定性评价应依据哪些标准和条款？",
+                    description="关注顶板、矿柱、岩体结构和邻近工程影响。",
+                ),
+                ClarificationOption(
+                    option_id="option_2",
+                    label="积水与水害",
+                    question="采空区积水调查、评价与水害防治应依据哪些标准和条款？",
+                    description="关注积水分布、水量、水质和突水风险。",
+                ),
+                ClarificationOption(
+                    option_id="option_3",
+                    label="塌陷监测",
+                    question="采空区塌陷监测与防治应依据哪些标准和条款？",
+                    description="关注地表沉陷、变形监测和防治要求。",
+                ),
+                ClarificationOption(
+                    option_id="option_4",
+                    label="工程治理",
+                    question="采空区充填、封闭或其他工程治理应依据哪些标准和条款？",
+                    description="关注具体工程处置方案及其适用条件。",
+                ),
+            ]
+            return Clarification(
+                interpreted_question=canonical or original,
+                reason="“处理”可能指稳定性、积水水害、塌陷监测或工程治理，不同目标对应不同标准和条款。",
+                options=options[:4],
+                allow_free_text=True,
+            )
+        return None
+
+    @staticmethod
+    def _is_broad_goaf_question(question: str) -> bool:
+        compact = re.sub(r"\s+", "", question or "")
+        return bool(
+            any(term in compact for term in ("采空区", "采空场", "老空区", "老窑采空区"))
+            and any(marker in compact for marker in BROAD_ACTION_MARKERS)
+            and not any(goal in compact for goal in GOAF_SPECIFIC_GOALS)
         )
 
     def _validated_question(

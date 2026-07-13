@@ -73,6 +73,46 @@ class QuestionResolverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result.clarification.options), 2)  # type: ignore[union-attr]
         self.assertEqual(llm.calls, 1)
 
+    async def test_broad_goaf_schema_overrides_model_under_confirmation(self) -> None:
+        llm = FakeResolutionLLM(
+            {
+                "canonical_question": "采空区怎么处理？",
+                "intent": "general",
+                "is_ambiguous": False,
+                "confidence": 0.88,
+                "missing_slots": [],
+                "reason": "问题可以直接检索。",
+                "interpretations": [],
+            }
+        )
+        resolver = QuestionResolver(self.settings(), llm=llm)  # type: ignore[arg-type]
+
+        result = await resolver.resolve("采空区怎么处理？")
+
+        self.assertTrue(result.requires_clarification)
+        self.assertEqual(len(result.clarification.options), 4)  # type: ignore[union-attr]
+        labels = {item.label for item in result.clarification.options}  # type: ignore[union-attr]
+        self.assertEqual(labels, {"稳定性评价", "积水与水害", "塌陷监测", "工程治理"})
+
+    async def test_specific_goaf_goal_does_not_trigger_schema_confirmation(self) -> None:
+        llm = FakeResolutionLLM(
+            {
+                "canonical_question": "采空区稳定性应如何评价？",
+                "intent": "general",
+                "is_ambiguous": False,
+                "confidence": 0.92,
+                "missing_slots": [],
+                "reason": "目标已经明确。",
+                "interpretations": [],
+            }
+        )
+        resolver = QuestionResolver(self.settings(), llm=llm)  # type: ignore[arg-type]
+
+        result = await resolver.resolve("采空区稳定性怎么评价？")
+
+        self.assertFalse(result.requires_clarification)
+        self.assertEqual(result.canonical_question, "采空区稳定性应如何评价?")
+
     async def test_clear_engineering_distance_question_uses_fast_path(self) -> None:
         llm = FakeResolutionLLM({})
         resolver = QuestionResolver(self.settings(), llm=llm)  # type: ignore[arg-type]
@@ -133,8 +173,8 @@ class QuestionResolverTests(unittest.IsolatedAsyncioTestCase):
     async def test_invalid_or_out_of_domain_options_degrade_without_confirmation(self) -> None:
         llm = FakeResolutionLLM(
             {
-                "canonical_question": "采空区怎么处理？",
-                "intent": "goaf_management",
+                "canonical_question": "矿山地质环境问题怎么处理？",
+                "intent": "general",
                 "is_ambiguous": True,
                 "confidence": 0.9,
                 "missing_slots": ["处理目标"],
@@ -142,8 +182,8 @@ class QuestionResolverTests(unittest.IsolatedAsyncioTestCase):
                 "interpretations": [
                     {"label": "数学", "question": "1+1等于几？", "description": "领域外"},
                     {
-                        "label": "稳定性",
-                        "question": "采空区稳定性评价应依据哪些标准？",
+                        "label": "环境治理",
+                        "question": "矿山地质环境治理应依据哪些标准？",
                         "description": "领域内",
                     },
                 ],
@@ -151,10 +191,10 @@ class QuestionResolverTests(unittest.IsolatedAsyncioTestCase):
         )
         resolver = QuestionResolver(self.settings(), llm=llm)  # type: ignore[arg-type]
 
-        result = await resolver.resolve("采空区怎么处理？")
+        result = await resolver.resolve("矿山地质环境问题怎么处理？")
 
         self.assertFalse(result.requires_clarification)
-        self.assertEqual(result.canonical_question, "采空区怎么处理?")
+        self.assertEqual(result.canonical_question, "矿山地质环境问题怎么处理?")
 
     async def test_model_cannot_drop_user_supplied_standard_number(self) -> None:
         llm = FakeResolutionLLM(
