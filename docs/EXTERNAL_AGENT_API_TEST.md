@@ -15,19 +15,19 @@ http://172.168.206.253:18080
 Test API key:
 
 ```text
-agent-client-test-20260710
+<your-api-key>
 ```
 
 Authentication header:
 
 ```text
-X-API-Key: agent-client-test-20260710
+X-API-Key: <your-api-key>
 ```
 
 Alternative bearer form:
 
 ```text
-Authorization: Bearer agent-client-test-20260710
+Authorization: Bearer <your-api-key>
 ```
 
 ## Health Check
@@ -43,7 +43,7 @@ Expected: JSON with `"ok": true`.
 ```bash
 curl -sS -X POST http://172.168.206.253:18080/api/ask \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: agent-client-test-20260710" \
+  -H "X-API-Key: <your-api-key>" \
   -d '{"question":"我是一个大型的金矿，我的储量报告评审应该去哪个机构？"}'
 ```
 
@@ -58,7 +58,7 @@ Expected behavior:
 
 ```bash
 curl -sS "http://172.168.206.253:18080/api/standards?standard_no=DZ/T%200205-2020&page_size=5" \
-  -H "X-API-Key: agent-client-test-20260710"
+  -H "X-API-Key: <your-api-key>"
 ```
 
 Expected: catalog items for `DZ/T 0205-2020`.
@@ -70,7 +70,7 @@ Replace `SESSION_ID_FROM_ASK` with the `session_id` returned by `/api/ask`.
 ```bash
 curl -sS -X POST http://172.168.206.253:18080/api/feedback \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: agent-client-test-20260710" \
+  -H "X-API-Key: <your-api-key>" \
   -d '{
     "session_id":"SESSION_ID_FROM_ASK",
     "rating":"satisfied",
@@ -101,7 +101,7 @@ Allowed `reason` values:
 
 ```bash
 curl -sS http://172.168.206.253:18080/api/usage \
-  -H "X-API-Key: agent-client-test-20260710"
+  -H "X-API-Key: <your-api-key>"
 ```
 
 Expected: usage counters for this test key.
@@ -112,7 +112,7 @@ Expected: usage counters for this test key.
 import requests
 
 base_url = "http://172.168.206.253:18080"
-headers = {"X-API-Key": "agent-client-test-20260710"}
+headers = {"X-API-Key": "<your-api-key>"}
 
 response = requests.post(
     f"{base_url}/api/ask",

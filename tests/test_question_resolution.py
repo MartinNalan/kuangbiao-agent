@@ -367,6 +367,82 @@ class QuestionResolverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.canonical_question, "DZ/T 0338.1-2020 对矿体外推如何规定?")
         self.assertIn("DZ/T 0338.1-2020", result.plan.standard_numbers)
 
+    async def test_explicit_expand_area_materials_skip_clarification(self) -> None:
+        resolver = QuestionResolver(
+            Settings(QUESTION_RESOLUTION_ENABLED=True, OPENAI_API_KEY=""),
+        )
+
+        result = await resolver.resolve("采矿权扩大范围需要什么材料？")
+
+        self.assertFalse(result.requires_clarification)
+        self.assertEqual(result.plan.classification.primary_intent, "service_materials")  # type: ignore[union-attr]
+        self.assertEqual(result.plan.classification.application_type, "change")  # type: ignore[union-attr]
+        self.assertEqual(result.plan.classification.change_subtype, "expand_area")  # type: ignore[union-attr]
+
+    async def test_generic_change_materials_returns_five_subtypes(self) -> None:
+        resolver = QuestionResolver(
+            Settings(QUESTION_RESOLUTION_ENABLED=True, OPENAI_API_KEY=""),
+        )
+
+        result = await resolver.resolve("采矿权变更申请需要提交哪些材料和要件？")
+
+        self.assertTrue(result.requires_clarification)
+        self.assertEqual(result.clarification.pending_slot, "change_subtype")  # type: ignore[union-attr]
+        self.assertEqual(len(result.clarification.options), 5)  # type: ignore[union-attr]
+        self.assertEqual(
+            {item.option_id for item in result.clarification.options},  # type: ignore[union-attr]
+            {
+                "change_expand_area",
+                "change_shrink_area",
+                "change_mineral_method",
+                "change_holder_name",
+                "change_transfer",
+            },
+        )
+
+    async def test_hierarchical_selection_preserves_prior_slots(self) -> None:
+        resolver = QuestionResolver(
+            Settings(QUESTION_RESOLUTION_ENABLED=True, OPENAI_API_KEY=""),
+        )
+        first = await resolver.resolve("采矿证办理需要什么要件？")
+        change = next(item for item in first.clarification.options if item.option_id == "option_3")  # type: ignore[union-attr]
+        second = await resolver.resolve(
+            change.question,
+            inherited_plan=first.plan,
+            resolved_slots=change.slot_updates,
+        )
+        expand = next(
+            item
+            for item in second.clarification.options  # type: ignore[union-attr]
+            if item.option_id == "change_expand_area"
+        )
+        resolved = await resolver.resolve(
+            expand.question,
+            inherited_plan=second.plan,
+            resolved_slots=expand.slot_updates,
+        )
+
+        self.assertTrue(second.requires_clarification)
+        self.assertEqual(second.clarification.pending_slot, "change_subtype")  # type: ignore[union-attr]
+        self.assertFalse(resolved.requires_clarification)
+        self.assertEqual(
+            resolved.plan.classification.resolved_slots,  # type: ignore[union-attr]
+            {"application_type": "change", "change_subtype": "expand_area"},
+        )
+
+    async def test_basic_and_deep_share_the_same_classification(self) -> None:
+        resolver = QuestionResolver(
+            Settings(QUESTION_RESOLUTION_ENABLED=True, OPENAI_API_KEY=""),
+        )
+        question = "资源储量评审备案后，在领取采矿证之前还需要办什么手续？"
+        basic = await resolver.resolve(question, mode="basic")
+        deep = await resolver.resolve(question, mode="deep")
+
+        self.assertEqual(
+            basic.plan.classification.to_payload(),  # type: ignore[union-attr]
+            deep.plan.classification.to_payload(),  # type: ignore[union-attr]
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -252,6 +252,50 @@ class ApiAccountTests(unittest.TestCase):
         self.assertEqual(summary["quota"]["used"], 0)
         self.assertEqual(summary["quota"]["reserved"], 0)
 
+    def test_structured_material_clarification_is_persistent_and_free_until_resolved(self) -> None:
+        user = self.register(self.client, "structured-clarification@example.com")
+        with patch("mining_qa.api.MiningQAAgent", FakeAnsweredAgent):
+            first = self.client.post("/api/ask", json={"question": "采矿证办理需要什么要件？"})
+            self.assertEqual(first.status_code, 200, first.text)
+            first_payload = first.json()
+            self.assertEqual(first_payload["status"], "clarification_required")
+            self.assertEqual(first_payload["clarification"]["pending_slot"], "application_type")
+            self.assertTrue(first_payload["clarification"]["clarification_id"])
+            self.assertEqual(first_payload["quota"]["used"], 0)
+
+            second = self.client.post(
+                "/api/ask",
+                json={
+                    "clarification_id": first_payload["clarification"]["clarification_id"],
+                    "option_id": "option_3",
+                },
+            )
+            self.assertEqual(second.status_code, 200, second.text)
+            second_payload = second.json()
+            self.assertEqual(second_payload["status"], "clarification_required")
+            self.assertEqual(second_payload["clarification"]["pending_slot"], "change_subtype")
+            self.assertEqual(len(second_payload["clarification"]["options"]), 5)
+            self.assertEqual(second_payload["quota"]["used"], 0)
+
+            answered = self.client.post(
+                "/api/ask",
+                json={
+                    "clarification_id": second_payload["clarification"]["clarification_id"],
+                    "option_id": "change_expand_area",
+                },
+            )
+
+        self.assertEqual(answered.status_code, 200, answered.text)
+        payload = answered.json()
+        self.assertEqual(payload["status"], "answered")
+        self.assertEqual(payload["quota"]["used"], 1)
+        self.assertEqual(
+            payload["query_classification"]["change_subtype"],
+            "expand_area",
+        )
+        summary = self.store.account_summary(user["user_id"], "Asia/Shanghai")
+        self.assertEqual(summary["quota"]["used"], 1)
+
     def test_api_key_list_hides_revoked_and_revoke_is_idempotent(self) -> None:
         self.register(self.client, "key-lifecycle@example.com")
         first = self.client.post("/api/account/api-keys", json={"name": "first"}).json()["item"]

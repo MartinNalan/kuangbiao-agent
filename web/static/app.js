@@ -13,6 +13,7 @@ const state = {
   registrationEnabled: true,
   qaMode: "basic",
   activeResearchTask: null,
+  pendingClarification: null,
   lexiconData: null,
   lexiconCandidate: null,
   lexiconStatusEntry: null,
@@ -570,7 +571,7 @@ function renderClarification(data) {
     <div class="clarification-panel">
       <div class="clarification-options">
         ${clarification.options.map((option) => `
-          <button class="clarification-option" type="button" data-question="${escapeHtml(option.question)}">
+          <button class="clarification-option" type="button" data-option-id="${escapeHtml(option.option_id)}" data-question="${escapeHtml(option.question)}">
             <strong>${escapeHtml(option.label)}</strong>
             ${option.description ? `<span>${escapeHtml(option.description)}</span>` : ""}
           </button>
@@ -623,6 +624,11 @@ function appendAssistantMessage(data, existingNode = null) {
       button.addEventListener("click", () => {
         $$(".clarification-option", node).forEach((item) => { item.disabled = true; });
         setQAMode(data.mode === "deep" ? "deep" : "basic");
+        state.pendingClarification = {
+          clarificationId: data.clarification?.clarification_id || null,
+          optionId: button.dataset.optionId || null,
+          mode: data.mode === "deep" ? "deep" : "basic",
+        };
         const input = $("#questionInput");
         input.value = button.dataset.question || "";
         resizeComposer();
@@ -728,7 +734,9 @@ async function submitQuestion(event) {
   const input = $("#questionInput");
   const question = input.value.trim();
   if (!question) return;
-  if (state.qaMode === "deep" && !window.confirm("深度模式将消耗 3 次配额，并以异步任务逐份审查候选文件。继续？")) {
+  const clarificationSelection = state.pendingClarification;
+  state.pendingClarification = null;
+  if (state.qaMode === "deep" && !clarificationSelection && !window.confirm("深度模式将消耗 3 次配额，并以异步任务逐份审查候选文件。继续？")) {
     return;
   }
   state.asking = true;
@@ -745,6 +753,8 @@ async function submitQuestion(event) {
         sessionId: state.currentConversation,
         existingNode: pending,
         appendUser: false,
+        clarificationId: clarificationSelection?.clarificationId || null,
+        optionId: clarificationSelection?.optionId || null,
       });
     } else {
       const data = await apiRequest("/api/ask", {
@@ -752,6 +762,8 @@ async function submitQuestion(event) {
         body: JSON.stringify({
           question,
           session_id: state.currentConversation,
+          clarification_id: clarificationSelection?.clarificationId || null,
+          option_id: clarificationSelection?.optionId || null,
         }),
       });
       data.question = question;
@@ -801,6 +813,8 @@ async function startDeepResearch(question, options = {}) {
         question,
         session_id: options.sessionId || state.currentConversation,
         source_request_id: options.sourceRequestId || null,
+        clarification_id: options.clarificationId || null,
+        option_id: options.optionId || null,
       }),
     });
     if (task.status === "clarification_required") {

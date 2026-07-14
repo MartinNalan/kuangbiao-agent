@@ -111,9 +111,9 @@ class LexiconGovernanceTests(unittest.TestCase):
         self.assertTrue(self.runtime_path.exists())
         self.assertTrue(matched_lexicon_entries("矿证如何办理", purpose="domain_gate"))
         plan = understand_query("矿证如何办理")
-        self.assertEqual(plan.intent, "license_reference")
-        self.assertIn(("采矿许可证",), plan.required_evidence_groups)
-        self.assertIn("毕业证", plan.negative_terms)
+        self.assertEqual(plan.intent, "service_procedure_basis")
+        self.assertNotIn("采矿许可证", plan.retrieval_query)
+        self.assertNotIn("毕业证", plan.negative_terms)
 
         self.store.set_entry_status(lexicon_id, "disabled", "误判率过高", "admin-1")
         clear_domain_lexicon_cache()

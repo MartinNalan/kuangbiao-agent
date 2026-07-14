@@ -683,7 +683,7 @@ class FastAnswerTests(unittest.TestCase):
         self.assertNotIn("2.14", answer)
         self.assertIn("没有作为同名、独立术语", answer)
 
-    def test_generic_mining_right_requirements_use_attachment_overview(self) -> None:
+    def test_generic_mining_right_requirements_do_not_bypass_confirmation(self) -> None:
         agent = object.__new__(MiningQAAgent)
         sources = [
             Source(
@@ -715,11 +715,11 @@ class FastAnswerTests(unittest.TestCase):
             understand_query("采矿权申请的前置条件及要件有哪些"),
         ) or ""
 
-        self.assertIn("附件4已经完整、结构化入库", answer)
-        for label in ("新立", "延续", "变更", "注销"):
-            self.assertIn(f"**{label}**", answer)
-        self.assertIn("请说明办理类型", answer)
-        self.assertNotIn("附件4逐项材料尚未结构化入库", answer)
+        self.assertEqual(answer, "")
+        self.assertIn(
+            "application_type",
+            understand_query("采矿权申请的前置条件及要件有哪些").classification.missing_slots,
+        )
 
     def test_equivalent_questions_produce_identical_structured_answer(self) -> None:
         agent = object.__new__(MiningQAAgent)

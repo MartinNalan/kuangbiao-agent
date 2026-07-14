@@ -4,7 +4,7 @@
 
 ## 当前阶段
 
-当前版本为 **v2.2.3**。已具备私有知识库问答、受控 Agentic RAG、基本/深度双模式、持久化跨文档研究任务、大模型第一语义阶段、矿业权办事流程关系检索、邀请码与邮箱验证注册、登录会话、用户 API Key、每日次数配额、会话历史、标准目录、开发者控制台，以及由管理员审核发布的领域词典治理入口。
+当前版本为 **v3.0.0**。已具备私有知识库问答、受控 Agentic RAG、基本/深度双模式、持久化跨文档研究任务、统一问题分类与多级业务确认、大模型第一语义阶段、矿业权办事流程关系检索、邀请码与邮箱验证注册、登录会话、用户 API Key、每日次数配额、会话历史、标准目录、开发者控制台，以及由管理员审核发布的领域词典治理入口。
 
 基本模式检索链路为：认证/限流 -> 低成本领域门控 -> 当前问题与最近用户问题 -> DeepSeek 错别字校准、意图理解和歧义判断 -> 业务 Schema 校验 -> Schema/FTS/KG/ANN 混合检索 -> 证据审查 -> 最多一次补充检索 -> 受证据约束的回答。深度模式使用相同的第一语义阶段，再进入独立异步流程：研究规划 -> Schema/目录候选枚举 -> 逐文件限定检索 -> AND 证据组校验 -> 分批结构化事实抽取 -> 对比矩阵与覆盖说明。
 
@@ -72,7 +72,9 @@ AGENTMAIL_BASE_URL=https://api.agentmail.to/v0
 
 `KNOWLEDGE_BASE_URL` 为空时，系统不会编造答案，会返回证据不足提示。知识库服务完成后，填入知识库后端地址即可接入 `/knowledge/search` 和 `/knowledge/standards`。
 
-`QUESTION_RESOLUTION_ENABLED=true` 会在配额预留和知识库检索前，对可能改变目标标准、业务事项或结论的歧义进行结构化确认。明确问题继续走快速路径；确认响应不扣次数，API 客户端应读取 `clarification.options` 后重新提交完整问题。
+`QUESTION_RESOLUTION_ENABLED=true` 会在配额预留和知识库检索前，对可能改变目标标准、业务事项或结论的歧义进行结构化确认。确认状态会保存在应用数据库中；API 客户端优先提交 `clarification_id` 与 `option_id`，服务端会保留原问题、已确认槽位和会话上下文。明确问题继续走快速路径，确认响应不扣次数。
+
+`PROMPT_REGISTRY_ENABLED=true` 启用版本化提示词注册表。默认只加载基线提示词；`PROMPT_CALIBRATION_ENABLED=false` 时不会启用校准变体。可用 `PYTHONPATH=src .venv/bin/python scripts/evaluate_prompt_registry.py` 校验 30 条离线校准样本覆盖，再按意图小范围开启灰度。
 
 稠密向量使用阿里云百炼 `text-embedding-v4`，运行时通过 USEARCH ANN 索引检索，不再逐条解析 SQLite 中的 JSON 向量。v1.0.6 默认使用 `ANN_EXPANSION_SEARCH=64`；embedding 请求按 `EMBEDDING_BATCH_SIZE` 分批并复用连接。完成或更新 `chunk_embeddings` 后重建私有索引：
 

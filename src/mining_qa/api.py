@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+from dataclasses import replace
 from pathlib import Path
 from time import perf_counter
 from typing import Annotated
@@ -44,7 +45,7 @@ from .lexicon_governance import (
     LexiconReviewError,
     get_lexicon_governance_store,
 )
-from .query_understanding import contextualize_follow_up
+from .query_understanding import contextualize_follow_up, query_plan_from_payload
 from .question_resolution import (
     QuestionResolution,
     QuestionResolver,
@@ -140,6 +141,8 @@ async def resolve_question(
     *,
     mode: str,
     conversation_context: tuple[str, ...] = (),
+    inherited_plan=None,
+    resolved_slots: dict[str, str] | None = None,
 ) -> QuestionResolution:
     resolver = QuestionResolver(settings)
     try:
@@ -147,6 +150,8 @@ async def resolve_question(
             question,
             mode=mode,
             conversation_context=conversation_context,
+            inherited_plan=inherited_plan,
+            resolved_slots=resolved_slots,
         )
     finally:
         await resolver.aclose()
@@ -179,11 +184,77 @@ def clarification_response(
         mode="deep" if mode == "deep" else "basic",
         quota_cost=0,
         clarification=clarification,
+        query_classification=(
+            resolution.plan.classification.to_payload()
+            if resolution.plan.classification
+            else None
+        ),
         limitations={
             "has_clause_level_evidence": False,
             "notes": ["问题尚未确认，本次未执行知识库检索，也未使用问答次数。"],
         },
     )
+
+
+def clarification_owner(principal: Principal) -> str:
+    return principal.user_id or principal.rate_limit_key
+
+
+def persist_clarification(
+    store,
+    principal: Principal,
+    resolution: QuestionResolution,
+    *,
+    conversation_id: str | None,
+    parent_request_id: str,
+    mode: str,
+    original_question: str,
+) -> QuestionResolution:
+    clarification = resolution.clarification
+    if clarification is None:
+        return resolution
+    clarification_id = "clarify_" + uuid4().hex
+    persisted = clarification.model_copy(
+        update={
+            "clarification_id": clarification_id,
+            "parent_request_id": parent_request_id,
+            "resolved_slots": (
+                resolution.plan.classification.resolved_slots
+                if resolution.plan.classification
+                else clarification.resolved_slots
+            ),
+        }
+    )
+    store.create_clarification_state(
+        clarification_id=clarification_id,
+        owner_id=clarification_owner(principal),
+        user_id=principal.user_id,
+        conversation_id=conversation_id,
+        parent_request_id=parent_request_id,
+        mode=mode,
+        original_question=original_question,
+        canonical_question=resolution.canonical_question,
+        query_plan=resolution.plan.to_payload(),
+        pending_slot=persisted.pending_slot,
+        resolved_slots=persisted.resolved_slots,
+        options=[item.model_dump(mode="json") for item in persisted.options],
+    )
+    return replace(resolution, clarification=persisted)
+
+
+def clarification_selection(
+    store,
+    principal: Principal,
+    clarification_id: str,
+    option_id: str,
+    *,
+    expected_mode: str,
+) -> tuple[dict[str, object], dict[str, object]]:
+    owner_id = clarification_owner(principal)
+    state = store.get_clarification_state(owner_id, clarification_id)
+    if state.get("mode") != expected_mode:
+        raise PermissionDeniedError("clarification mode mismatch")
+    return store.select_clarification_option(owner_id, clarification_id, option_id)
 
 
 @app.on_event("startup")
@@ -594,8 +665,44 @@ async def ask(
     unreserved_quota: dict[str, object] | None = None
     resolution: QuestionResolution | None = None
     conversation_context: tuple[str, ...] = ()
+    inherited_plan = None
+    resolved_slots: dict[str, str] = {}
+    clarification_parent_request_id = request_id
+    root_question = payload.question
 
     await enforce_rate_limit(principal.rate_limit_key)
+    if payload.clarification_id and payload.option_id:
+        try:
+            state, option = clarification_selection(
+                store,
+                principal,
+                payload.clarification_id,
+                payload.option_id,
+                expected_mode="basic",
+            )
+        except AccountStoreError as error:
+            raise account_error(error) from error
+        inherited_plan = query_plan_from_payload(
+            str(state.get("canonical_question") or state.get("original_question") or ""),
+            state.get("query_plan") if isinstance(state.get("query_plan"), dict) else None,
+        )
+        resolved_slots = {
+            str(key): str(value)
+            for key, value in (state.get("resolved_slots") or {}).items()
+            if str(key).strip() and str(value).strip()
+        }
+        resolved_slots.update(
+            {
+                str(key): str(value)
+                for key, value in (option.get("slot_updates") or {}).items()
+                if str(key).strip() and str(value).strip()
+            }
+        )
+        payload.question = str(option.get("question") or payload.question).strip()
+        payload.session_id = str(state.get("conversation_id") or payload.session_id or "") or None
+        clarification_parent_request_id = str(state.get("parent_request_id") or request_id)
+        root_question = str(state.get("original_question") or payload.question)
+
     retrieval_question = payload.question
     if principal.user_id:
         try:
@@ -617,8 +724,19 @@ async def ask(
             payload.retrieval_question,
             mode="basic",
             conversation_context=conversation_context,
+            inherited_plan=inherited_plan,
+            resolved_slots=resolved_slots,
         )
         if resolution.requires_clarification:
+            resolution = persist_clarification(
+                store,
+                principal,
+                resolution,
+                conversation_id=conversation_id,
+                parent_request_id=clarification_parent_request_id,
+                mode="basic",
+                original_question=root_question,
+            )
             quota_snapshot = None
             if principal.user_id and principal.quota_managed:
                 quota_snapshot = store.quota_snapshot(
@@ -652,6 +770,7 @@ async def ask(
                                 "canonical_question": resolution.canonical_question,
                                 "error": resolution.error,
                             },
+                            "query_classification": result.query_classification,
                             "quota": result.quota.model_dump(mode="json") if result.quota else None,
                         },
                     )
@@ -673,11 +792,13 @@ async def ask(
                     "quota_remaining": result.quota.remaining if result.quota else None,
                     "question_resolution_used": resolution.model_used,
                     "question_resolution_error": resolution.error,
+                    "query_classification": result.query_classification,
                     "duration_ms": round((perf_counter() - started) * 1000, 2),
                 }
             )
             return result
         payload._retrieval_question = resolution.canonical_question
+        payload._query_plan = resolution.plan
 
     if principal.user_id and principal.quota_managed:
         try:
@@ -710,6 +831,8 @@ async def ask(
         result.request_id = request_id
         result.mode = "basic"
         result.quota_cost = 1
+        if result.query_classification is None and resolution and resolution.plan.classification:
+            result.query_classification = resolution.plan.classification.to_payload()
         if quota_reserved:
             settlement = store.settle_qa_quota(
                 request_id,
@@ -754,6 +877,7 @@ async def ask(
                     }
                     if resolution
                     else None,
+                    "query_classification": result.query_classification,
                     "mode": "basic",
                     "mode_recommendation": result.mode_recommendation,
                 },
@@ -782,6 +906,7 @@ async def ask(
             "quota_remaining": result.quota.remaining if result.quota else None,
             "question_resolution_used": resolution.model_used if resolution else False,
             "question_resolution_error": resolution.error if resolution else None,
+            "query_classification": result.query_classification,
             "duration_ms": round((perf_counter() - started) * 1000, 2),
         }
     )
@@ -821,7 +946,39 @@ async def create_research_task(
     request_id = "req_" + uuid4().hex
     task_id = "research_" + uuid4().hex
     quota_reserved = False
+    inherited_plan = None
+    resolved_slots: dict[str, str] = {}
+    clarification_parent_request_id = request_id
+    root_question = payload.question
     try:
+        if payload.clarification_id and payload.option_id:
+            state, option = clarification_selection(
+                store,
+                principal,
+                payload.clarification_id,
+                payload.option_id,
+                expected_mode="deep",
+            )
+            inherited_plan = query_plan_from_payload(
+                str(state.get("canonical_question") or state.get("original_question") or ""),
+                state.get("query_plan") if isinstance(state.get("query_plan"), dict) else None,
+            )
+            resolved_slots = {
+                str(key): str(value)
+                for key, value in (state.get("resolved_slots") or {}).items()
+                if str(key).strip() and str(value).strip()
+            }
+            resolved_slots.update(
+                {
+                    str(key): str(value)
+                    for key, value in (option.get("slot_updates") or {}).items()
+                    if str(key).strip() and str(value).strip()
+                }
+            )
+            payload.question = str(option.get("question") or payload.question).strip()
+            payload.session_id = str(state.get("conversation_id") or payload.session_id or "") or None
+            clarification_parent_request_id = str(state.get("parent_request_id") or request_id)
+            root_question = str(state.get("original_question") or payload.question)
         conversation_id = store.ensure_conversation(
             principal.user_id,
             payload.session_id,
@@ -845,8 +1002,19 @@ async def create_research_task(
             retrieval_question,
             mode="deep",
             conversation_context=conversation_context,
+            inherited_plan=inherited_plan,
+            resolved_slots=resolved_slots,
         )
         if resolution.requires_clarification:
+            resolution = persist_clarification(
+                store,
+                principal,
+                resolution,
+                conversation_id=conversation_id,
+                parent_request_id=clarification_parent_request_id,
+                mode="deep",
+                original_question=root_question,
+            )
             response.status_code = status.HTTP_200_OK
             quota_snapshot = store.quota_snapshot(
                 principal.user_id,
@@ -877,6 +1045,7 @@ async def create_research_task(
                         "canonical_question": resolution.canonical_question,
                         "error": resolution.error,
                     },
+                    "query_classification": result.query_classification,
                     "quota": result.quota.model_dump(mode="json") if result.quota else None,
                 },
             )
@@ -895,6 +1064,7 @@ async def create_research_task(
                     "quota_remaining": result.quota.remaining if result.quota else None,
                     "question_resolution_used": resolution.model_used,
                     "question_resolution_error": resolution.error,
+                    "query_classification": result.query_classification,
                 }
             )
             return result
@@ -929,6 +1099,7 @@ async def create_research_task(
             retrieval_question=retrieval_question,
             filters=payload.filters.model_dump(exclude_none=True),
             reserved_quota_units=reserved_units,
+            query_plan=resolution.plan.to_payload(),
         )
     except HTTPException:
         raise
@@ -954,6 +1125,11 @@ async def create_research_task(
             "quota_remaining": quota["remaining"],
             "question_resolution_used": resolution.model_used,
             "question_resolution_error": resolution.error,
+            "query_classification": (
+                resolution.plan.classification.to_payload()
+                if resolution.plan.classification
+                else None
+            ),
         }
     )
     return research_task_response(task, quota)

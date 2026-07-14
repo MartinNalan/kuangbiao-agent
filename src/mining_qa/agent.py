@@ -12,6 +12,7 @@ from .evidence_reranker import EvidenceReranker, RerankResult
 from .gap_tasks import KnowledgeGapTaskStore
 from .knowledge_client import KnowledgeClient
 from .llm_client import LLMClient
+from .prompt_registry import prompt_text
 from .query_understanding import (
     PROJECTION_REFERENCE_STANDARD_NUMBERS,
     QueryPlan,
@@ -32,6 +33,13 @@ ANSWER_CACHE_ENABLED = False
 ANSWER_CACHE: dict[str, AskResponse] = {}
 CACHEABLE_COMPARISON_TERMS = ("不一致", "差异", "不同", "比较", "列举", "哪些标准", "哪些规范")
 PROJECTION_DISTANCE_TERMS = ("外推所依据的距离", "外推依据", "外推距离", "依据的距离")
+SERVICE_CHANGE_SECTIONS = {
+    "expand_area": "扩大矿区范围",
+    "shrink_area": "缩小矿区范围",
+    "mineral_or_mining_method": "开采主矿种、开采方式",
+    "holder_name": "采矿权人名称",
+    "transfer": "转让",
+}
 DETERMINISTIC_FAST_INTENTS = {
     "engineering_distance_lookup",
     "projection_numeric_rule",
@@ -62,6 +70,10 @@ SYSTEM_PROMPT = """你是矿产资源标准知识问答 agent。
 9. 必须区分勘查程度、报告名称和行政许可条件；不得把“达到详查程度”改写成任何名为“详查报告”的文件都满足转采条件。
 10. 回答通常控制在600个汉字以内；比较类问题只保留代表性差异和直接相关短引文。
 """
+
+UNRESOLVED_CONFIRMATION_LINE = re.compile(
+    r"(?:请先确认办理类型|变更申请还需进一步说明具体变更事项|请选择更接近你实际需求的方向)"
+)
 
 
 class MiningQAAgent:
@@ -112,7 +124,7 @@ class MiningQAAgent:
             return response
 
         filters = request.filters.model_dump(exclude_none=True)
-        base_plan = understand_query(question)
+        base_plan = request.query_plan or understand_query(question)
         planner_result = await self.planner.plan(question, base_plan)
         plan = planner_result.plan
         rounds = max(1, min(2, int(self.settings.max_retrieval_rounds)))
@@ -289,6 +301,9 @@ class MiningQAAgent:
                     if self._should_recommend_deep(plan, question)
                     else None
                 ),
+                query_classification=(
+                    plan.classification.to_payload() if plan.classification else None
+                ),
             )
             response.retrieval.total_ms = round((perf_counter() - started) * 1000, 3)
             self._write_trace(
@@ -351,6 +366,7 @@ class MiningQAAgent:
                 limitations.notes.append("回答模型调用超时或不可用，已按审查通过的证据生成确定性降级答案。")
                 generation_details = {"used": False, "error": "answer_model_unavailable"}
         retrieval.synthesis_ms = round((perf_counter() - synthesis_started) * 1000, 3)
+        answer = self._remove_stale_confirmation(answer, plan)
         answer = self._append_source_links(answer, sources)
         response = AskResponse(
             answer=answer,
@@ -368,6 +384,9 @@ class MiningQAAgent:
                 if self._should_recommend_deep(plan, question)
                 else None
             ),
+            query_classification=(
+                plan.classification.to_payload() if plan.classification else None
+            ),
         )
         response.retrieval.total_ms = round((perf_counter() - started) * 1000, 3)
         if ANSWER_CACHE_ENABLED and self._is_cacheable_question(question):
@@ -380,6 +399,18 @@ class MiningQAAgent:
             self._trace_details(planner_result, kb_results, rerank_result, generation_details),
         )
         return response
+
+    @staticmethod
+    def _remove_stale_confirmation(answer: str, plan: QueryPlan) -> str:
+        classification = plan.classification
+        if not classification or classification.missing_slots:
+            return answer
+        lines = [
+            line
+            for line in answer.splitlines()
+            if not UNRESOLVED_CONFIRMATION_LINE.search(line)
+        ]
+        return "\n".join(lines).strip()
 
     def _merge_hits(self, existing: list[dict], incoming: list[dict]) -> list[dict]:
         merged: dict[tuple[str, str, str], dict] = {}
@@ -697,7 +728,25 @@ class MiningQAAgent:
             ]
         )
         return [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {
+                "role": "system",
+                "content": "\n\n".join(
+                    part
+                    for part in (
+                        SYSTEM_PROMPT,
+                        prompt_text(
+                            self.settings,
+                            "answer",
+                            primary_intent=(
+                                plan.classification.primary_intent
+                                if plan and plan.classification
+                                else None
+                            ),
+                        ),
+                    )
+                    if part
+                ),
+            },
             {"role": "user", "content": user_content},
         ]
 
@@ -1529,60 +1578,55 @@ class MiningQAAgent:
             ]
             if attachment_sources:
                 application_label = None
+                change_section = None
+                classification = effective_plan.classification
+                if classification:
+                    application_label = {
+                        "new": "新立",
+                        "renewal": "延续",
+                        "change": "变更",
+                        "cancellation": "注销",
+                    }.get(classification.application_type or "")
+                    change_section = SERVICE_CHANGE_SECTIONS.get(
+                        classification.change_subtype or ""
+                    )
                 if any(term in effective_plan.normalized_query for term in ("延续", "续期")):
-                    application_label = "延续"
+                    application_label = application_label or "延续"
                 elif "注销" in effective_plan.normalized_query:
-                    application_label = "注销"
+                    application_label = application_label or "注销"
                 elif any(term in effective_plan.normalized_query for term in ("首次", "新立")):
-                    application_label = "新立"
+                    application_label = application_label or "新立"
                 elif "变更" in effective_plan.normalized_query or any(
                     term in effective_plan.normalized_query for term in ("转让", "转移")
                 ):
-                    application_label = "变更"
+                    application_label = application_label or "变更"
 
                 if application_label is None:
-                    overview = next(
-                        (item for item in attachment_sources if "适用类型" in (item.chapter or "")),
-                        None,
-                    )
-                    section_sources = {
-                        label: next(
-                            (
-                                item
-                                for item in attachment_sources
-                                if (item.chapter or "") == f"附件4 > {label}"
-                            ),
-                            None,
-                        )
-                        for label in ("新立", "延续", "变更", "注销")
-                    }
-                    lines = [
-                        "**附件4已经完整、结构化入库；但采矿权申请不是一套统一要件。**",
-                        "",
-                    ]
-                    if overview and overview.quote:
-                        lines.append(f"- **申请类型**：{overview.quote}")
-                    for label, source in section_sources.items():
-                        if not source or not source.quote:
-                            continue
-                        summary = re.split(r"\s*注[:：]", source.quote, maxsplit=1)[0].strip()
-                        if summary:
-                            lines.append(f"- **{label}**：{summary}")
-                    lines.extend(
-                        [
-                            "- **前置条件**：应结合对应申请类型的自然资源部办事指南判断，不能把新立、延续、变更和注销的条件合并为一套通用条件。",
-                            "- **需要补充**：请说明办理类型；变更申请还应说明扩大或缩小矿区范围、变更矿种/开采方式、采矿权人名称或转让。明确后即可列出附件4中的逐项材料。",
-                        ]
-                    )
-                    return "\n".join(lines)
+                    return None
 
                 def material_sequence(item: Source) -> int:
                     match = re.search(r"材料\s*(\d+)", item.chapter or "")
                     return int(match.group(1)) if match else 999
 
+                if application_label:
+                    prefix = f"附件4 > {application_label}"
+                    if application_label == "变更" and change_section:
+                        prefix = f"附件4 > 变更 > {change_section}"
+                    attachment_sources = [
+                        item
+                        for item in attachment_sources
+                        if (item.chapter or "").startswith(prefix)
+                    ]
+                if not attachment_sources:
+                    return None
                 attachment_sources.sort(key=material_sequence)
+                application_name = (
+                    f"变更（{change_section}）"
+                    if application_label == "变更" and change_section
+                    else application_label
+                )
                 lines = [
-                    f"采矿权{application_label}申请应按 **自然资规〔2023〕4号附件4《采矿权申请资料清单及要求》** 提交以下材料：",
+                    f"采矿权{application_name}申请应按 **自然资规〔2023〕4号附件4《采矿权申请资料清单及要求》** 提交以下材料：",
                     "",
                 ]
                 lines.extend(f"- {item.quote}" for item in attachment_sources)

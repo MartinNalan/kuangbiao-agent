@@ -67,13 +67,15 @@ Important response fields:
 - `request_id`: exact request identifier for quota accounting and feedback.
 - `quota`: whether this request consumed a use and the remaining daily count.
 
-When `status=clarification_required`, the request has not consumed quota and has not searched the private KB. Present `clarification.options` to the user, then submit the selected option's complete `question` as a new request:
+When `status=clarification_required`, the request has not consumed quota and has not searched the private KB. Present `clarification.options` to the user. Each response includes a persistent `clarification_id`; submit it with the selected `option_id` so the original question and resolved slots are retained:
 
 ```json
 {
   "status": "clarification_required",
   "quota_cost": 0,
   "clarification": {
+    "clarification_id": "clarify_xxx",
+    "pending_slot": "application_type",
     "interpreted_question": "采空区怎么处理？",
     "reason": "不同处理目标会对应不同标准和条款范围。",
     "allow_free_text": true,
@@ -96,6 +98,15 @@ When `status=clarification_required`, the request has not consumed quota and has
   }
 }
 ```
+
+```bash
+curl -sS -X POST http://127.0.0.1:18080/api/ask \
+  -H 'Content-Type: application/json' \
+  -H 'X-API-Key: kb_live_xxx' \
+  -d '{"clarification_id":"clarify_xxx","option_id":"option_1"}'
+```
+
+Free-text correction remains supported by sending a new complete `question`. The same structured selection fields may be sent to `POST /api/research/tasks` for deep mode.
 
 ## Deep Research
 

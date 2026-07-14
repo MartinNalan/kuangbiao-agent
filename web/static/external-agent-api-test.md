@@ -9,7 +9,7 @@ http://172.168.206.253:18080
 API key:
 
 ```text
-agent-client-test-20260710
+<your-api-key>
 ```
 
 Use only:
@@ -33,17 +33,26 @@ curl -sS http://172.168.206.253:18080/health
 ```bash
 curl -sS -X POST http://172.168.206.253:18080/api/ask \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: agent-client-test-20260710" \
+  -H "X-API-Key: <your-api-key>" \
   -d '{"question":"我是一个大型的金矿，我的储量报告评审应该去哪个机构？"}'
 ```
 
 Save the returned `session_id`.
 
+If the response has `status="clarification_required"`, submit the returned structured selection without rebuilding the question locally:
+
+```bash
+curl -sS -X POST http://172.168.206.253:18080/api/ask \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: <your-api-key>" \
+  -d '{"clarification_id":"clarify_xxx","option_id":"option_1"}'
+```
+
 ## Catalog
 
 ```bash
 curl -sS "http://172.168.206.253:18080/api/standards?standard_no=DZ/T%200205-2020&page_size=5" \
-  -H "X-API-Key: agent-client-test-20260710"
+  -H "X-API-Key: <your-api-key>"
 ```
 
 ## Feedback
@@ -53,7 +62,7 @@ Replace `SESSION_ID_FROM_ASK`.
 ```bash
 curl -sS -X POST http://172.168.206.253:18080/api/feedback \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: agent-client-test-20260710" \
+  -H "X-API-Key: <your-api-key>" \
   -d '{
     "session_id":"SESSION_ID_FROM_ASK",
     "rating":"satisfied",
@@ -71,7 +80,7 @@ curl -sS -X POST http://172.168.206.253:18080/api/feedback \
 
 ```bash
 curl -sS http://172.168.206.253:18080/api/usage \
-  -H "X-API-Key: agent-client-test-20260710"
+  -H "X-API-Key: <your-api-key>"
 ```
 
 ## Python
@@ -80,7 +89,7 @@ curl -sS http://172.168.206.253:18080/api/usage \
 import requests
 
 base_url = "http://172.168.206.253:18080"
-headers = {"X-API-Key": "agent-client-test-20260710"}
+headers = {"X-API-Key": "<your-api-key>"}
 
 response = requests.post(
     f"{base_url}/api/ask",

@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     evidence_reranker_enabled: bool = Field(default=True, alias="EVIDENCE_RERANKER_ENABLED")
     question_resolution_enabled: bool = Field(default=True, alias="QUESTION_RESOLUTION_ENABLED")
     question_resolution_max_tokens: int = Field(
-        default=500,
+        default=900,
         ge=100,
         le=1000,
         alias="QUESTION_RESOLUTION_MAX_TOKENS",
@@ -46,6 +46,10 @@ class Settings(BaseSettings):
         le=1.0,
         alias="QUESTION_RESOLUTION_MIN_CONFIDENCE",
     )
+    prompt_registry_enabled: bool = Field(default=True, alias="PROMPT_REGISTRY_ENABLED")
+    prompt_calibration_enabled: bool = Field(default=False, alias="PROMPT_CALIBRATION_ENABLED")
+    prompt_calibration_variant: str = Field(default="baseline", alias="PROMPT_CALIBRATION_VARIANT")
+    prompt_calibration_intents: str = Field(default="", alias="PROMPT_CALIBRATION_INTENTS")
     query_planner_max_tokens: int = Field(default=600, alias="QUERY_PLANNER_MAX_TOKENS")
     evidence_reranker_max_tokens: int = Field(default=800, alias="EVIDENCE_RERANKER_MAX_TOKENS")
     answer_max_tokens: int = Field(default=1000, alias="ANSWER_MAX_TOKENS")

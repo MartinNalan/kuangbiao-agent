@@ -58,8 +58,9 @@ Request
        -> If irrelevant: fixed refusal, no KB/LLM/OCR/web supplement, no quota consumption
   -> Current question + up to 4 recent user questions
   -> First LLM semantic stage: domain typo correction, intent, negation, correction and ambiguity
-  -> Protected business Schema validation
-       -> If clarification is required: return structured options, no KB retrieval and no quota consumption
+  -> Immutable QueryClassification + protected business Schema validation
+       -> If clarification is required: persist clarification_id, pending slot and resolved slots; return structured options, no KB retrieval and no quota consumption
+       -> Option selection resubmits clarification_id + option_id and preserves the original question across multi-level confirmation
   -> Reserve one basic-mode quota unit for the current Asia/Shanghai day
   -> Local KB retrieval
        -> If clause evidence exists: answer with citations
@@ -74,7 +75,7 @@ Request
 ```text
 Create research task
   -> Domain gate before quota reservation
-  -> Shared ambiguity resolution
+  -> Shared QueryClassification and ambiguity resolution
        -> If clarification is required: HTTP 200 structured options, no task and no reservation
   -> Atomically reserve 3 units, or 2 additional units for a validated basic-answer upgrade
   -> Persist queued task

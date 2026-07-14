@@ -1,6 +1,6 @@
 from typing import Any, Literal
 
-from pydantic import BaseModel, EmailStr, Field, PrivateAttr
+from pydantic import BaseModel, EmailStr, Field, PrivateAttr, model_validator
 
 
 SourceType = Literal[
@@ -28,14 +28,30 @@ class AskFilters(BaseModel):
 
 
 class AskRequest(BaseModel):
-    question: str
+    question: str = ""
     session_id: str | None = None
+    clarification_id: str | None = None
+    option_id: str | None = None
     filters: AskFilters = Field(default_factory=AskFilters)
     _retrieval_question: str | None = PrivateAttr(default=None)
+    _query_plan: Any = PrivateAttr(default=None)
+
+    @model_validator(mode="after")
+    def validate_question_or_clarification(self) -> "AskRequest":
+        has_selection = bool(self.clarification_id and self.option_id)
+        if bool(self.clarification_id) != bool(self.option_id):
+            raise ValueError("clarification_id and option_id must be supplied together")
+        if not self.question.strip() and not has_selection:
+            raise ValueError("question is required")
+        return self
 
     @property
     def retrieval_question(self) -> str:
         return self._retrieval_question or self.question
+
+    @property
+    def query_plan(self) -> Any:
+        return self._query_plan
 
 
 class QuotaInfo(BaseModel):
@@ -104,9 +120,14 @@ class ClarificationOption(BaseModel):
     label: str
     question: str
     description: str | None = None
+    slot_updates: dict[str, str] = Field(default_factory=dict)
 
 
 class Clarification(BaseModel):
+    clarification_id: str | None = None
+    parent_request_id: str | None = None
+    pending_slot: str | None = None
+    resolved_slots: dict[str, str] = Field(default_factory=dict)
     interpreted_question: str
     reason: str
     options: list[ClarificationOption] = Field(default_factory=list)
@@ -135,6 +156,7 @@ class AskResponse(BaseModel):
     mode_recommendation: Literal["deep"] | None = None
     mode_recommendation_reason: str | None = None
     clarification: Clarification | None = None
+    query_classification: dict[str, Any] | None = None
 
 
 ResearchTaskStatus = Literal[
@@ -151,10 +173,21 @@ ResearchTaskStatus = Literal[
 
 
 class ResearchTaskCreateRequest(BaseModel):
-    question: str = Field(min_length=1, max_length=4000)
+    question: str = Field(default="", max_length=4000)
     session_id: str | None = None
+    clarification_id: str | None = None
+    option_id: str | None = None
     filters: AskFilters = Field(default_factory=AskFilters)
     source_request_id: str | None = None
+
+    @model_validator(mode="after")
+    def validate_question_or_clarification(self) -> "ResearchTaskCreateRequest":
+        has_selection = bool(self.clarification_id and self.option_id)
+        if bool(self.clarification_id) != bool(self.option_id):
+            raise ValueError("clarification_id and option_id must be supplied together")
+        if not self.question.strip() and not has_selection:
+            raise ValueError("question is required")
+        return self
 
 
 class ResearchProgress(BaseModel):
@@ -187,6 +220,7 @@ class ResearchTaskResponse(BaseModel):
     progress: ResearchProgress = Field(default_factory=ResearchProgress)
     result_available: bool = False
     quota: QuotaInfo | None = None
+    query_classification: dict[str, Any] | None = None
     created_at: str
     started_at: str | None = None
     finished_at: str | None = None
@@ -207,6 +241,7 @@ class ResearchResult(BaseModel):
     coverage: ResearchCoverage = Field(default_factory=ResearchCoverage)
     confidence: Literal["low", "medium", "high"] = "low"
     quota: QuotaInfo | None = None
+    query_classification: dict[str, Any] | None = None
 
 
 class FeedbackRequest(BaseModel):

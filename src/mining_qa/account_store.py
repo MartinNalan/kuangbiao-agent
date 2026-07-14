@@ -324,6 +324,7 @@ class AccountStore:
                     evidence_documents INTEGER NOT NULL DEFAULT 0,
                     quota_cost INTEGER NOT NULL DEFAULT 3,
                     reserved_quota_units INTEGER NOT NULL DEFAULT 3,
+                    query_plan_json TEXT NOT NULL DEFAULT '{}',
                     plan_json TEXT NOT NULL DEFAULT '{}',
                     result_json TEXT,
                     error_code TEXT,
@@ -334,6 +335,28 @@ class AccountStore:
                     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
                     FOREIGN KEY (api_key_id) REFERENCES user_api_keys(api_key_id),
                     FOREIGN KEY (conversation_id) REFERENCES conversations(conversation_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS clarification_states (
+                    clarification_id TEXT PRIMARY KEY,
+                    owner_id TEXT NOT NULL,
+                    user_id TEXT,
+                    conversation_id TEXT,
+                    parent_request_id TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    original_question TEXT NOT NULL,
+                    canonical_question TEXT NOT NULL,
+                    query_plan_json TEXT NOT NULL DEFAULT '{}',
+                    pending_slot TEXT,
+                    resolved_slots_json TEXT NOT NULL DEFAULT '{}',
+                    options_json TEXT NOT NULL DEFAULT '[]',
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    selected_option_id TEXT,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    resolved_at TEXT,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+                    FOREIGN KEY (conversation_id) REFERENCES conversations(conversation_id) ON DELETE CASCADE
                 );
 
                 CREATE TABLE IF NOT EXISTS answer_feedback (
@@ -367,6 +390,8 @@ class AccountStore:
                 CREATE INDEX IF NOT EXISTS idx_requests_user_created ON qa_requests(user_id, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_research_user_created
                     ON research_tasks(user_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_clarification_owner_status
+                    ON clarification_states(owner_id, status, created_at DESC);
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_research_one_active_user
                     ON research_tasks(user_id)
                     WHERE status IN ('queued', 'planning', 'retrieving', 'analyzing');
@@ -395,6 +420,12 @@ class AccountStore:
                 "research_tasks",
                 "reserved_quota_units",
                 "INTEGER NOT NULL DEFAULT 3",
+            )
+            self._ensure_column(
+                connection,
+                "research_tasks",
+                "query_plan_json",
+                "TEXT NOT NULL DEFAULT '{}'",
             )
             connection.execute(
                 """
@@ -1169,6 +1200,151 @@ class AccountStore:
         if cursor.rowcount == 0:
             raise ResourceNotFoundError(conversation_id)
 
+    def create_clarification_state(
+        self,
+        *,
+        clarification_id: str,
+        owner_id: str,
+        user_id: str | None,
+        conversation_id: str | None,
+        parent_request_id: str,
+        mode: str,
+        original_question: str,
+        canonical_question: str,
+        query_plan: dict[str, Any],
+        pending_slot: str | None,
+        resolved_slots: dict[str, str],
+        options: list[dict[str, Any]],
+        ttl_minutes: int = 60,
+    ) -> dict[str, Any]:
+        now_dt = datetime.now(timezone.utc).replace(microsecond=0)
+        now = now_dt.isoformat()
+        expires_at = (now_dt + timedelta(minutes=max(5, ttl_minutes))).isoformat()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO clarification_states(
+                    clarification_id, owner_id, user_id, conversation_id, parent_request_id,
+                    mode, original_question, canonical_question, query_plan_json, pending_slot,
+                    resolved_slots_json, options_json, status, created_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                """,
+                (
+                    clarification_id,
+                    owner_id,
+                    user_id,
+                    conversation_id,
+                    parent_request_id,
+                    mode,
+                    original_question,
+                    canonical_question,
+                    json.dumps(query_plan, ensure_ascii=False),
+                    pending_slot,
+                    json.dumps(resolved_slots, ensure_ascii=False),
+                    json.dumps(options, ensure_ascii=False),
+                    now,
+                    expires_at,
+                ),
+            )
+            connection.commit()
+        return self.get_clarification_state(owner_id, clarification_id)
+
+    def get_clarification_state(
+        self,
+        owner_id: str,
+        clarification_id: str,
+    ) -> dict[str, Any]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM clarification_states WHERE clarification_id = ?",
+                (clarification_id,),
+            ).fetchone()
+            if row and row["status"] == "pending" and _is_expired(row["expires_at"]):
+                connection.execute(
+                    "UPDATE clarification_states SET status = 'expired' WHERE clarification_id = ?",
+                    (clarification_id,),
+                )
+                connection.commit()
+                row = connection.execute(
+                    "SELECT * FROM clarification_states WHERE clarification_id = ?",
+                    (clarification_id,),
+                ).fetchone()
+        if not row:
+            raise ResourceNotFoundError(clarification_id)
+        if row["owner_id"] != owner_id:
+            raise PermissionDeniedError(clarification_id)
+        return self._clarification_payload(row)
+
+    def select_clarification_option(
+        self,
+        owner_id: str,
+        clarification_id: str,
+        option_id: str,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM clarification_states WHERE clarification_id = ?",
+                (clarification_id,),
+            ).fetchone()
+            if not row:
+                connection.commit()
+                raise ResourceNotFoundError(clarification_id)
+            if row["owner_id"] != owner_id:
+                connection.commit()
+                raise PermissionDeniedError(clarification_id)
+            if row["status"] != "pending" or _is_expired(row["expires_at"]):
+                if row["status"] == "pending":
+                    connection.execute(
+                        "UPDATE clarification_states SET status = 'expired' WHERE clarification_id = ?",
+                        (clarification_id,),
+                    )
+                connection.commit()
+                raise PermissionDeniedError("clarification is no longer pending")
+            try:
+                options = json.loads(row["options_json"] or "[]")
+            except json.JSONDecodeError:
+                options = []
+            selected = next(
+                (
+                    item
+                    for item in options
+                    if isinstance(item, dict) and str(item.get("option_id") or "") == option_id
+                ),
+                None,
+            )
+            if selected is None:
+                connection.commit()
+                raise ResourceNotFoundError(option_id)
+            connection.execute(
+                """
+                UPDATE clarification_states
+                SET status = 'resolved', selected_option_id = ?, resolved_at = ?
+                WHERE clarification_id = ?
+                """,
+                (option_id, now, clarification_id),
+            )
+            connection.commit()
+        state = self.get_clarification_state(owner_id, clarification_id)
+        return state, selected
+
+    @staticmethod
+    def _clarification_payload(row: sqlite3.Row) -> dict[str, Any]:
+        payload = dict(row)
+        for field, fallback in (
+            ("query_plan_json", {}),
+            ("resolved_slots_json", {}),
+            ("options_json", []),
+        ):
+            raw = payload.pop(field, None)
+            key = field.removesuffix("_json")
+            try:
+                payload[key] = json.loads(raw) if raw else fallback
+            except json.JSONDecodeError:
+                payload[key] = fallback
+        return payload
+
     def research_upgrade_quota_cost(
         self,
         user_id: str,
@@ -1218,6 +1394,7 @@ class AccountStore:
         retrieval_question: str,
         filters: dict[str, Any],
         reserved_quota_units: int,
+        query_plan: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         now = utc_now()
         with self._connect() as connection:
@@ -1239,8 +1416,9 @@ class AccountStore:
                     INSERT INTO research_tasks(
                         task_id, request_id, user_id, api_key_id, conversation_id, channel,
                         question, retrieval_question, filters_json, status, stage,
-                        progress_percent, status_message, quota_cost, reserved_quota_units, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'queued', 0, ?, 3, ?, ?)
+                        progress_percent, status_message, quota_cost, reserved_quota_units,
+                        query_plan_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'queued', 0, ?, 3, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -1254,6 +1432,7 @@ class AccountStore:
                         json.dumps(filters, ensure_ascii=False),
                         "任务已进入队列。",
                         reserved_quota_units,
+                        json.dumps(query_plan or {}, ensure_ascii=False),
                         now,
                     ),
                 )
@@ -1433,7 +1612,7 @@ class AccountStore:
     @staticmethod
     def _research_task_payload(row: sqlite3.Row) -> dict[str, Any]:
         payload = dict(row)
-        for field in ("filters_json", "plan_json", "result_json"):
+        for field in ("filters_json", "query_plan_json", "plan_json", "result_json"):
             raw = payload.pop(field, None)
             key = field.removesuffix("_json")
             try:

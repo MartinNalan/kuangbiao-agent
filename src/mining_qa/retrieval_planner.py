@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from time import perf_counter
 from typing import Literal, get_args
 
 from .config import Settings
 from .llm_client import LLMClient
+from .prompt_registry import prompt_text
 from .query_understanding import (
     PROTECTED_QUERY_INTENTS,
     QueryPlan,
@@ -144,6 +145,8 @@ class RetrievalPlanner:
                     "policy_attachment、law、regulation、department_rule、guidance、service_guide、"
                     "administrative_service_guide、amendment 中选择。"
                     "只返回符合给定结构的 JSON。"
+                    "\n"
+                    f"{prompt_text(self.settings, 'retrieval_planner', primary_intent=(base_plan.classification.primary_intent if base_plan.classification else None))}"
                 ),
             },
             {
@@ -218,6 +221,11 @@ class RetrievalPlanner:
                     role_value if role_value in {"unknown", "ministry", "province"} else "unknown"
                 )
             plan = apply_semantic_plan(base_plan, payload)
+            plan = replace(
+                plan,
+                intent=base_plan.intent,
+                classification=base_plan.classification,
+            )
             return PlannerResult(
                 plan=plan,
                 used=True,

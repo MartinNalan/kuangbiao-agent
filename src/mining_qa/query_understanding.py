@@ -6,6 +6,12 @@ from dataclasses import asdict, dataclass, replace
 from typing import Any
 
 from .domain_lexicon import matched_lexicon_entries
+from .query_classification import (
+    QueryClassification,
+    build_classification,
+    classification_from_payload,
+    legacy_intent_for_primary,
+)
 
 
 EXPLORATION_TYPE_LABELS = {
@@ -22,10 +28,18 @@ EXPLORATION_TYPE_LABELS = {
 }
 
 COMPARISON_TERMS = ("不一致", "差异", "不同", "比较", "列举", "哪些标准", "哪些规范", "哪些规程")
-ENGINEERING_DISTANCE_TERMS = ("工程间距", "基本工程间距", "勘查工程间距", "工程距离", "工程网度")
+ENGINEERING_DISTANCE_TERMS = (
+    "工程间距",
+    "基本工程间距",
+    "勘查工程间距",
+    "工程距离",
+    "工程网度",
+    "走向间距",
+    "倾向间距",
+)
 PROJECTION_TERMS = ("矿体外推", "有限外推", "无限外推", "外推距离", "尖推", "平推")
 PROJECTION_RATIO_TERMS = ("1/2", "1/4", "二分之一", "四分之一", "一半")
-LICENSE_TERMS = ("采矿证", "采矿许可证", "采矿权")
+LICENSE_TERMS = ("采矿证", "采矿许可证", "采矿权", "矿证")
 SERVICE_MATERIAL_TERMS = (
     "提交什么材料",
     "提交哪些材料",
@@ -35,21 +49,29 @@ SERVICE_MATERIAL_TERMS = (
     "申请资料",
     "资料清单",
     "材料清单",
+    "资料",
     "要件",
     "必备材料",
     "必备资料",
     "所需材料",
     "所需资料",
+    "要交什么",
+    "要交哪些",
+    "交什么材料",
+    "交哪些材料",
 )
 SERVICE_PROCEDURE_TERMS = (
     "怎么办理",
     "如何办理",
     "办理流程",
+    "流程",
     "办理程序",
     "办理依据",
     "依据哪个文件",
     "依据什么文件",
     "按哪个文件",
+    "步骤",
+    "手续",
 )
 SERVICE_TIME_LIMIT_TERMS = ("办结时限", "办理时限", "需要多久", "多久办结", "多少个工作日", "时限是多久")
 POST_FILING_LICENSE_ACTION_TERMS = (
@@ -75,8 +97,11 @@ AUTHORITY_INTENT_TERMS = (
     "申请机关",
     "受理机关",
     "受理部门",
+    "找谁",
+    "找哪个部门",
     "去哪里备案",
     "在哪里备案",
+    "备案机关",
     "哪一级申请",
     "哪一级备案",
     "省里申请",
@@ -205,7 +230,7 @@ _POLICY_NO_PATTERN = re.compile(
 )
 
 AUTHORITY_LEVELS = {"unknown", "ministry", "province"}
-_LICENSE_NAMES = r"(?:采矿许可证|采矿证|勘查许可证|探矿证)"
+_LICENSE_NAMES = r"(?:采矿许可证|采矿证|矿证|勘查许可证|探矿证)"
 _MINISTRY_ACTORS = r"(?:自然资源部|国土资源部|原国土资源部|部里|部级)"
 _PROVINCE_ACTORS = r"(?:省级自然资源主管部门|省自然资源厅|省国土资源厅|省厅|省里|省级)"
 _ISSUE_ACTIONS = r"(?:颁发|核发|发放|发证|签发|发给|发的|所发)"
@@ -243,6 +268,7 @@ class QueryPlan:
     definition_mode: str = "none"
     definition_slots: tuple[str, ...] = ()
     preferred_definition_sources: tuple[str, ...] = ()
+    classification: QueryClassification | None = None
 
     @property
     def has_candidate_scope(self) -> bool:
@@ -280,6 +306,7 @@ class QueryPlan:
             "definition_mode": self.definition_mode,
             "definition_slots": self.definition_slots,
             "preferred_definition_sources": self.preferred_definition_sources,
+            "classification": self.classification.to_payload() if self.classification else None,
         }
 
 
@@ -680,10 +707,24 @@ def query_plan_from_payload(query: str, payload: dict[str, Any] | None) -> Query
     plan = apply_semantic_plan(base, allowed)
     target_type = canonical_exploration_type(payload.get("target_exploration_type"))
     focus_terms = _clean_terms(payload.get("focus_terms"))
+    classification = classification_from_payload(
+        payload.get("classification"),
+        plan.classification
+        or build_classification(
+            plan.normalized_query,
+            plan.intent,
+            document_types=plan.document_types,
+            license_issuer_level=plan.license_issuer_level,
+            confidence=plan.planner_confidence or 0.72,
+        ),
+    )
     return replace(
         plan,
+        intent=legacy_intent_for_primary(classification.primary_intent, plan.intent),
         target_exploration_type=target_type or plan.target_exploration_type,
         focus_terms=focus_terms or plan.focus_terms,
+        document_types=classification.document_types or plan.document_types,
+        classification=classification,
         planner_used=bool(payload.get("planner_used", plan.planner_used)),
         exhaustive_search=(
             plan.exhaustive_search
@@ -768,8 +809,9 @@ def is_post_filing_license_steps_query(query: str) -> bool:
             "拿采矿证",
             "取得采矿证",
             "领取采矿许可证",
-            "取得采矿许可证",
-            "采矿权登记",
+    "取得采矿许可证",
+    "采矿权登记",
+    "领证",
         )
     )
     return bool(
@@ -882,8 +924,6 @@ def extract_definition_request(
 def understand_query(query: str) -> QueryPlan:
     original = (query or "").strip()
     normalized = normalize_user_query(original)
-    governed_intent_matches = matched_lexicon_entries(normalized, purpose="intent")
-    governed_retrieval_matches = matched_lexicon_entries(normalized, purpose="retrieval")
     target_type_match = re.search(r"([ⅠⅡⅢ])类型", normalized)
     target_type = target_type_match.group(1) if target_type_match else None
 
@@ -894,11 +934,19 @@ def understand_query(query: str) -> QueryPlan:
     has_license = any(term in normalized for term in LICENSE_TERMS)
     guide_titles = service_guide_title_terms(normalized)
     post_filing_license_steps = is_post_filing_license_steps_query(normalized)
-    has_service_materials = post_filing_license_steps or (
+    has_mining_right_change_materials = any(
+        term in normalized
+        for term in ("扩大范围", "缩小范围", "矿区范围", "开采方式", "开采主矿种", "采矿权人名称", "转让")
+    ) and any(term in normalized for term in SERVICE_MATERIAL_TERMS)
+    has_service_materials = post_filing_license_steps or has_mining_right_change_materials or (
         (bool(guide_titles) or has_license)
         and any(term in normalized for term in SERVICE_MATERIAL_TERMS)
     )
-    has_service_procedure = (bool(guide_titles) or has_license) and any(
+    post_filing_workflow = any(
+        term in normalized
+        for term in ("资源储量评审备案", "储量评审备案", "储量备案", "评审备案")
+    ) and "备案后" in normalized and any(term in normalized for term in ("登记", "流程", "步骤", "手续"))
+    has_service_procedure = (bool(guide_titles) or has_license or post_filing_workflow) and any(
         term in normalized for term in SERVICE_PROCEDURE_TERMS
     )
     has_service_time_limit = bool(guide_titles) and any(term in normalized for term in SERVICE_TIME_LIMIT_TERMS)
@@ -1095,7 +1143,7 @@ def understand_query(query: str) -> QueryPlan:
             candidate_titles.append("铁、锰、铬")
             standards.append("DZ/T 0200-2020")
         retrieval_terms.extend([normalized, "基本分析项目", "化学分析项目"])
-    elif has_engineering_distance:
+    elif has_engineering_distance and not (has_projection and has_comparison):
         intent = "engineering_distance_lookup"
         if any(term in normalized for term in ("金矿", "岩金")):
             candidate_titles.append("岩金")
@@ -1141,6 +1189,22 @@ def understand_query(query: str) -> QueryPlan:
     elif has_projection:
         intent = "projection_rule"
 
+    if intent == "general" and has_comparison and any(
+        term in normalized
+        for term in ("各矿种", "分矿种", "单矿种", "各类规范", "各规范", "各标准", "各文件")
+    ):
+        intent = "cross_document_audit"
+        search_mode = "comparison"
+        retrieval_terms.extend(["比较主题", "适用条件", "具体差异", normalized])
+
+    if intent == "general" and any(
+        term in normalized
+        for term in ("还有效", "是否有效", "现行", "废止", "替代", "最新版", "新版本")
+    ):
+        intent = "standard_selection"
+        search_mode = "catalog"
+        retrieval_terms.extend(["标准状态", "现行", "废止", "替代", normalized])
+
     if has_authority and intent == "general":
         intent = "authority_responsibility"
         candidate_titles.append("深化矿产资源管理改革若干事项")
@@ -1160,6 +1224,14 @@ def understand_query(query: str) -> QueryPlan:
         retrieval_terms.append(topic or normalized)
         focus_terms.extend(term for term in FOLLOW_UP_FOCUS_TERMS if term in topic)
 
+    if intent == "general" and any(
+        term in normalized
+        for term in ("全套资料", "全套文件", "全套执行文件", "全套标准", "项目需要哪些标准", "各阶段分别用什么规范", "项目资料体系")
+    ):
+        intent = "related_documents"
+        search_mode = "exhaustive"
+        retrieval_terms.extend(["项目阶段", "专业", "文件清单", normalized])
+
     if any(term in normalized for term in ("沙金", "砂金")) and any(
         term in normalized for term in ("哪个标准", "哪个规范", "使用", "适用", "采用")
     ):
@@ -1167,10 +1239,15 @@ def understand_query(query: str) -> QueryPlan:
         candidate_titles.append("金属砂矿类")
         retrieval_terms.extend(["金属砂矿类", "砂金", "DZ/T 0208-2020"])
 
-    if intent == "general" and governed_intent_matches:
-        primary_match = governed_intent_matches[0]
-        intent = primary_match["intent_label"]
-
+    # The lexicon expands retrieval only after deterministic/LLM intent selection.
+    # Background and retrieval-only entries may enrich any in-scope plan, but never
+    # replace the selected primary intent or inject their negative constraints.
+    governed_retrieval_matches = [
+        match
+        for match in matched_lexicon_entries(normalized, purpose="retrieval")
+        if match.get("intent_label") in {intent, "background_context"}
+        or not match.get("intent_trigger_enabled", True)
+    ]
     for match in governed_retrieval_matches:
         retrieval_terms.append(match["canonical_term"])
         retrieval_terms.extend(match.get("positive_expansions") or [])
@@ -1223,6 +1300,13 @@ def understand_query(query: str) -> QueryPlan:
     scope_origin = "user" if explicit_standards else (
         "deterministic" if candidate_titles or standards else "none"
     )
+    document_types = default_document_types(intent)
+    classification = build_classification(
+        normalized,
+        intent,
+        document_types=document_types,
+        license_issuer_level=license_issuer,
+    )
     return QueryPlan(
         original_query=original,
         normalized_query=normalized,
@@ -1245,6 +1329,8 @@ def understand_query(query: str) -> QueryPlan:
         definition_mode=definition_mode,
         definition_slots=definition_slots,
         preferred_definition_sources=preferred_definition_sources,
+        document_types=document_types,
+        classification=classification,
         exhaustive_search=(
             (
                 broad_comparison

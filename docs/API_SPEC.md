@@ -129,6 +129,11 @@ Authorization: Bearer your-api-key
   },
   "knowledge_gap_task": null,
   "confidence": "medium",
+  "query_classification": {
+    "version": "1.0",
+    "primary_intent": "numeric_table_lookup",
+    "output_shape": "structured_table"
+  },
   "quota": {
     "date": "2026-07-11",
     "daily_limit": 10,
@@ -156,6 +161,10 @@ If the question has materially different professional interpretations, the servi
   "mode": "basic",
   "quota_cost": 0,
   "clarification": {
+    "clarification_id": "clarify_xxx",
+    "parent_request_id": "req_xxx",
+    "pending_slot": "application_type",
+    "resolved_slots": {},
     "interpreted_question": "采空区怎么处理？",
     "reason": "不同处理目标会对应不同标准和条款范围。",
     "allow_free_text": true,
@@ -188,7 +197,16 @@ If the question has materially different professional interpretations, the servi
 }
 ```
 
-Clients should present `clarification.options`, let the user choose or provide free text, and submit the selected option's complete `question` as a new request. The confirmation response does not call KB retrieval, enqueue enrichment, create a deep-research task, or consume quota. `POST /api/research/tasks` may likewise return HTTP 200 with this response instead of HTTP 202; only a confirmed question creates a task and reserves three units.
+Clients should present `clarification.options`, let the user choose or provide free text, then submit the structured selection. Preferred request contract:
+
+```json
+{
+  "clarification_id": "clarify_xxx",
+  "option_id": "option_1"
+}
+```
+
+The service persists the original question and previously resolved slots, so multi-level clarification such as `办理类型 -> 变更子类型` does not lose context. Free-text clarification remains backward compatible: submit a new complete `question`. The confirmation response does not call KB retrieval, enqueue enrichment, create a deep-research task, or consume quota. `POST /api/research/tasks` accepts the same `clarification_id` and `option_id` fields and may return HTTP 200 with another clarification response instead of HTTP 202.
 
 `status` suggested values:
 

@@ -386,6 +386,139 @@ class ResearchAnalyzerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("无限外推", scoped)
         self.assertNotIn("有限外推", scoped)
 
+    def test_finite_projection_facts_exclude_infinite_rules_and_split_partial_mineralization(self) -> None:
+        sources = [
+            (
+                1,
+                Source(
+                    title="几何法",
+                    standard_no="DZ/T 0338.2-2020",
+                    chapter="5.4.2",
+                    quote=(
+                        "相邻的两个工程一个见矿，另一个不见矿时，采用有限外推法，"
+                        "若实际工程间距大于推断资源量工程间距，则按推断资源量工程间距的1/2尖推。"
+                    ),
+                    source_type="local_kb",
+                    text_access="ocr_text",
+                ),
+                "geometry",
+            ),
+            (
+                2,
+                Source(
+                    title="测试规范",
+                    standard_no="GB/T 13908-2020",
+                    chapter="6.2",
+                    quote=(
+                        "相邻工程一个见矿，另一个未见矿时，按实际工程间距的1/2尖推；"
+                        "部分见矿时按2/3尖推、1/3平推。"
+                    ),
+                    source_type="local_kb",
+                    text_access="ocr_text",
+                ),
+                "standard",
+            ),
+            (
+                3,
+                Source(
+                    title="通则",
+                    standard_no="DZ/T 0338.1-2020",
+                    chapter="6.2.2.1",
+                    quote="见矿工程向外再没有工程控制时，采用无限外推，按经验工程间距的1/2尖推。",
+                    source_type="local_kb",
+                    text_access="ocr_text",
+                ),
+                "general",
+            ),
+        ]
+
+        facts = ResearchTaskRunner._projection_facts(
+            sources,
+            "矿体有限外推所依据的距离，在不同标准中有哪些具体差异？",
+        )
+
+        self.assertTrue(facts)
+        self.assertEqual({fact["projection_type"] for fact in facts}, {"有限外推"})
+        self.assertTrue(
+            any(
+                fact["distance_relationship"]
+                == "实际工程间距大于推断资源量工程间距时改用推断资源量工程间距"
+                for fact in facts
+            )
+        )
+        self.assertTrue(
+            any(
+                fact["pointed_ratio"] == "2/3" and fact["flat_ratio"] == "1/3"
+                for fact in facts
+            )
+        )
+
+    def test_complete_comparison_allows_irrelevant_candidates(self) -> None:
+        status, missing = ResearchTaskRunner._research_final_status(
+            ResearchPlan(canonical_question="比较外推", strategy="cross_document_comparison"),
+            [
+                {"document_id": "a", "classification": "special_provision"},
+                {"document_id": "b", "classification": "special_provision"},
+            ],
+            candidate_truncated=False,
+            failed_documents=0,
+        )
+
+        self.assertEqual(status, "completed")
+        self.assertFalse(missing)
+
+    async def test_projection_rendering_has_explicit_difference_summary(self) -> None:
+        sources = [
+            Source(
+                title="几何法",
+                standard_no="DZ/T 0338.2-2020",
+                chapter="5.4.2",
+                quote="x",
+                source_type="local_kb",
+                text_access="ocr_text",
+            ),
+            Source(
+                title="测试规范",
+                standard_no="GB/T 13908-2020",
+                chapter="6.2",
+                quote="x",
+                source_type="local_kb",
+                text_access="ocr_text",
+            ),
+        ]
+        facts = [
+            {
+                "document_id": "a",
+                "classification": "special_provision",
+                "projection_type": "有限外推",
+                "trigger_condition": "相邻工程一个见矿、另一个未见矿",
+                "distance_basis": "实际工程间距大于推断资源量工程间距时改用推断资源量工程间距",
+                "distance_relationship": "实际工程间距大于推断资源量工程间距时改用推断资源量工程间距",
+                "pointed_ratio": "1/2",
+                "flat_ratio": "1/4",
+                "adjacent_engineering_condition": "相邻工程一个见矿、另一个未见矿",
+                "source_indices": [1],
+            },
+            {
+                "document_id": "b",
+                "classification": "special_provision",
+                "projection_type": "有限外推",
+                "trigger_condition": "相邻工程部分见矿",
+                "distance_basis": "实际工程间距",
+                "distance_relationship": None,
+                "pointed_ratio": "2/3",
+                "flat_ratio": "1/3",
+                "adjacent_engineering_condition": "相邻工程部分见矿",
+                "source_indices": [2],
+            },
+        ]
+
+        answer = ResearchTaskRunner._render_projection_comparison("有限外推差异", facts, sources)
+
+        self.assertIn("改按推断资源量工程间距计算外推距离", answer)
+        self.assertIn("2/3 尖推、1/3 平推", answer)
+        self.assertIn("| 外推类型 |", answer)
+
     async def test_answer_keeps_table_without_repeating_direct_evidence_list(self) -> None:
         source = Source(
             title="测试规范",

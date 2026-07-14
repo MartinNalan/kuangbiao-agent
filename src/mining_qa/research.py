@@ -11,6 +11,7 @@ from .auth import get_account_store
 from .config import Settings, get_settings
 from .knowledge_client import KnowledgeClient
 from .llm_client import LLMClient
+from .prompt_registry import prompt_text
 from .query_understanding import (
     PROJECTION_REFERENCE_STANDARD_NUMBERS,
     QueryPlan,
@@ -21,6 +22,7 @@ from .query_understanding import (
     default_evidence_groups,
     is_post_filing_license_steps_query,
     normalize_user_query,
+    query_plan_from_payload,
     understand_query,
 )
 from .schemas import (
@@ -78,6 +80,14 @@ TRANSFER_OBJECT_TERMS = (
     *TRANSFER_REPORT_OBJECT_TERMS,
 )
 
+SERVICE_CHANGE_SECTIONS = {
+    "expand_area": "扩大矿区范围",
+    "shrink_area": "缩小矿区范围",
+    "mineral_or_mining_method": "开采主矿种、开采方式",
+    "holder_name": "采矿权人名称",
+    "transfer": "转让",
+}
+
 
 @dataclass(frozen=True)
 class ResearchPlan:
@@ -103,6 +113,7 @@ class ResearchPlan:
     required_evidence_groups: tuple[tuple[str, ...], ...] = ()
     scope_note: str = ""
     planner_used: bool = False
+    query_classification: dict[str, Any] | None = None
 
     def to_payload(self) -> dict[str, Any]:
         return asdict(self)
@@ -167,8 +178,12 @@ class ResearchPlanner:
         self.settings = settings
         self.llm = llm
 
-    async def plan(self, question: str) -> ResearchPlan:
-        fallback = self._fallback(question)
+    async def plan(
+        self,
+        question: str,
+        base_plan: QueryPlan | None = None,
+    ) -> ResearchPlan:
+        fallback = self._fallback(question, base_plan)
         if not self.llm.enabled:
             return fallback
         messages = [
@@ -180,7 +195,8 @@ class ResearchPlanner:
                     "文件类型、比较维度和最多3条证据查询。候选集合必须能够从标准目录枚举，"
                     "例如‘各分矿种规范’应使用‘矿产地质勘查规范’作为 corpus_title_terms，"
                     "不能只列出你记得的几个标准号。required_evidence_groups 组间为 AND、组内为 OR，"
-                    "用于排除只共享普通关键词但没有目标关系的条款。明确区分基准文件和待审查文件。只返回 JSON。"
+                    "用于排除只共享普通关键词但没有目标关系的条款。明确区分基准文件和待审查文件。只返回 JSON。\n"
+                    f"{prompt_text(self.settings, 'retrieval_planner', primary_intent=(fallback.query_classification or {}).get('primary_intent'))}"
                 ),
             },
             {
@@ -255,14 +271,19 @@ class ResearchPlanner:
             or fallback.required_evidence_groups,
             scope_note=normalize_user_query(str(payload.get("scope_note") or fallback.scope_note))[:400],
             planner_used=True,
+            query_classification=fallback.query_classification,
         )
-        return self._enforce_protected_scope(question, plan)
+        return self._enforce_protected_scope(question, plan, base_plan)
 
     @staticmethod
-    def _enforce_protected_scope(question: str, plan: ResearchPlan) -> ResearchPlan:
-        base = understand_query(question)
+    def _enforce_protected_scope(
+        question: str,
+        plan: ResearchPlan,
+        base_plan: QueryPlan | None = None,
+    ) -> ResearchPlan:
+        base = base_plan or understand_query(question)
         if base.intent == "service_materials":
-            fallback = ResearchPlanner._fallback(question)
+            fallback = ResearchPlanner._fallback(question, base)
             if is_post_filing_license_steps_query(question):
                 return replace(
                     plan,
@@ -300,7 +321,7 @@ class ResearchPlanner:
                 scope_note="只检索采矿权申请资料清单及要求、对应政策附件和办事指南，不按发证机关分叉。",
             )
         if base.intent == "exploration_to_mining_eligibility":
-            fallback = ResearchPlanner._fallback(question)
+            fallback = ResearchPlanner._fallback(question, base)
             return replace(
                 plan,
                 intent=fallback.intent,
@@ -325,7 +346,7 @@ class ResearchPlanner:
         focus = _projection_focus(question)
         if not focus:
             return plan
-        fallback = ResearchPlanner._fallback(question)
+        fallback = ResearchPlanner._fallback(question, base)
         focus_query, focus_group = focus
         groups = list(plan.required_evidence_groups)
         if focus_group not in groups:
@@ -356,8 +377,11 @@ class ResearchPlanner:
         )
 
     @staticmethod
-    def _fallback(question: str) -> ResearchPlan:
-        base = understand_query(question)
+    def _fallback(
+        question: str,
+        base_plan: QueryPlan | None = None,
+    ) -> ResearchPlan:
+        base = base_plan or understand_query(question)
         post_filing_steps = is_post_filing_license_steps_query(question)
         title_terms: list[str] = []
         document_types = list(base.document_types or default_document_types(base.intent))
@@ -527,6 +551,9 @@ class ResearchPlanner:
                 else "按知识库目录中的受控文件范围逐份检索。"
             ),
             planner_used=False,
+            query_classification=(
+                base.classification.to_payload() if base.classification else None
+            ),
         )
 
 
@@ -820,7 +847,14 @@ class ResearchTaskRunner:
                 percent=5,
                 message="正在识别基准文件、候选范围和比较维度。",
             )
-            plan = await ResearchPlanner(settings, llm).plan(task["retrieval_question"])
+            saved_query_plan = query_plan_from_payload(
+                task["retrieval_question"],
+                task.get("query_plan") if isinstance(task.get("query_plan"), dict) else None,
+            )
+            plan = await ResearchPlanner(settings, llm).plan(
+                task["retrieval_question"],
+                saved_query_plan,
+            )
             store.update_research_task(
                 task_id,
                 status="retrieving",
@@ -925,7 +959,7 @@ class ResearchTaskRunner:
             elif plan.intent == "exploration_to_mining_eligibility":
                 facts = self._transfer_facts(indexed_sources)
             elif plan.intent == "projection_comparison":
-                facts = self._projection_facts(indexed_sources)
+                facts = self._projection_facts(indexed_sources, task["retrieval_question"])
             else:
                 batch_size = settings.research_analysis_batch_size
                 for start in range(0, len(indexed_sources), batch_size):
@@ -958,11 +992,14 @@ class ResearchTaskRunner:
                 notes.append(f"{no_evidence_documents} 份候选文件未命中可比较的直接条款。")
             if failed_documents:
                 notes.append(f"{failed_documents} 份候选文件检索失败。")
-            final_status = (
-                "partial"
-                if candidate_truncated or no_evidence_documents or failed_documents
-                else "completed"
+            final_status, missing_comparison_coverage = self._research_final_status(
+                plan,
+                facts,
+                candidate_truncated=candidate_truncated,
+                failed_documents=failed_documents,
             )
+            if missing_comparison_coverage:
+                notes.append("可比直接条款不足两份文件，无法形成跨文件差异结论。")
             quota = store.settle_qa_quota(
                 task["request_id"],
                 "answered",
@@ -991,8 +1028,15 @@ class ResearchTaskRunner:
                     knowledge_snapshot=snapshot,
                     notes=notes,
                 ),
-                confidence="high" if final_status == "completed" else "medium",
+                confidence=(
+                    "high"
+                    if final_status == "completed"
+                    else "low"
+                    if final_status == "insufficient_evidence"
+                    else "medium"
+                ),
                 quota=QuotaInfo(**quota),
+                query_classification=plan.query_classification,
             )
             store.complete_research_task(task_id, final_status, result.model_dump(mode="json"))
             self._save_exchange(store, task, result)
@@ -1013,6 +1057,30 @@ class ResearchTaskRunner:
         finally:
             await knowledge.aclose()
             await llm.aclose()
+
+    @staticmethod
+    def _research_final_status(
+        plan: ResearchPlan,
+        facts: list[dict[str, Any]],
+        *,
+        candidate_truncated: bool,
+        failed_documents: int,
+    ) -> tuple[str, bool]:
+        comparison_documents = {
+            str(fact.get("document_id") or "")
+            for fact in facts
+            if fact.get("document_id")
+            and fact.get("classification") not in {"insufficient_evidence", "not_covered"}
+        }
+        missing_comparison_coverage = bool(
+            plan.strategy == "cross_document_comparison"
+            and len(comparison_documents) < 2
+        )
+        if missing_comparison_coverage:
+            return "insufficient_evidence", True
+        if candidate_truncated or failed_documents:
+            return "partial", False
+        return "completed", False
 
     async def _retrieve_documents(
         self,
@@ -1191,45 +1259,239 @@ class ResearchTaskRunner:
             )
         return facts
 
-    @staticmethod
+    @classmethod
     def _projection_facts(
+        cls,
         indexed_sources: list[tuple[int, Source, str]],
+        question: str,
     ) -> list[dict[str, Any]]:
         facts: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str, str, str, str]] = set()
+        finite_focus = "有限外推" in question
+        infinite_focus = "无限外推" in question
         for index, source, document_id in indexed_sources:
-            quote = normalize_user_query(source.quote or "")[:700]
+            quote = normalize_user_query(source.quote or "")[:1200]
             if not quote:
                 continue
-            has_infinite = any(
-                term in quote
-                for term in (
-                    "无限外推",
-                    "见矿工程向外再没有工程控制",
-                    "见矿工程外无控制工程",
-                    "边缘见矿工程外",
+            for segment in cls._projection_segments(quote):
+                fact = cls._projection_fact(segment)
+                if fact is None:
+                    continue
+                projection_type = str(fact["projection_type"])
+                if finite_focus and projection_type != "有限外推":
+                    continue
+                evidence_role = "primary"
+                if infinite_focus and projection_type != "无限外推":
+                    normalized_standard = re.sub(r"\s+", "", source.standard_no or "").upper()
+                    if normalized_standard != "DZ/T0338.2-2020":
+                        continue
+                    evidence_role = "finite_contrast"
+                key = (
+                    document_id,
+                    projection_type,
+                    str(fact["trigger_condition"]),
+                    str(fact["distance_basis"]),
+                    str(fact["pointed_ratio"]),
+                    str(fact["flat_ratio"]),
                 )
-            )
-            has_finite = "有限外推" in quote or (
-                "相邻工程" in quote and "实际工程间距" in quote
-            ) or "相邻的两个工程一个见矿" in quote
-            if has_infinite and has_finite:
-                dimension = "有限与无限外推综合条款"
-            elif has_infinite:
-                dimension = "无限外推规则"
-            elif has_finite:
-                dimension = "有限外推规则"
-            else:
-                dimension = "外推规则"
-            facts.append(
-                {
-                    "document_id": document_id,
-                    "classification": "special_provision",
-                    "dimension": dimension,
-                    "finding": quote,
-                    "source_indices": [index],
-                }
-            )
+                if key in seen:
+                    continue
+                seen.add(key)
+                facts.append(
+                    {
+                        "document_id": document_id,
+                        "classification": "special_provision",
+                        "dimension": f"{projection_type}规则",
+                        "evidence_role": evidence_role,
+                        **fact,
+                        "source_indices": [index],
+                    }
+                )
         return facts
+
+    @staticmethod
+    def _projection_segments(quote: str) -> list[str]:
+        clean = re.sub(r"\s+", " ", quote).strip()
+        sentences = [
+            value.strip()
+            for value in re.split(r"(?<=[。；;])\s*", clean)
+            if value.strip()
+        ]
+        markers = (
+            "有限外推",
+            "无限外推",
+            "外推",
+            "尖推",
+            "平推",
+            "尖灭",
+            "一个见矿",
+            "未见矿",
+            "不见矿",
+            "边缘见矿工程",
+        )
+        segments: list[str] = []
+        for position, sentence in enumerate(sentences):
+            if not any(marker in sentence for marker in markers):
+                continue
+            context = sentence
+            for offset in (1, 2):
+                if position + offset >= len(sentences):
+                    break
+                following = sentences[position + offset]
+                if not any(
+                    term in following
+                    for term in (
+                        "工程间距",
+                        "尖推",
+                        "平推",
+                        "尖灭",
+                        "部分见矿",
+                        "实际工程间距",
+                        "推断资源量工程间距",
+                    )
+                ):
+                    break
+                context = f"{context}{following}"
+            if not any(term in context for term in ("有限外推", "无限外推", "一个见矿", "边缘见矿工程")) and position:
+                previous = sentences[position - 1]
+                if any(term in previous for term in ("有限外推", "无限外推", "一个见矿", "边缘见矿工程")):
+                    context = f"{previous}{context}"
+            if "部分见矿时" in context:
+                before, _, after = context.partition("部分见矿时")
+                split_parts = [before.strip(), f"相邻工程部分见矿时{after}".strip()]
+            elif "有限外推" in context and "无限外推" in context:
+                split_parts = [
+                    part.strip()
+                    for part in re.split(r"(?=(?:有限外推|无限外推))", context)
+                    if part.strip()
+                ]
+            else:
+                split_parts = [context]
+            segments.extend(split_parts or [context])
+        if not segments and any(marker in clean for marker in markers):
+            segments.append(clean)
+        return list(dict.fromkeys(segment[:520] for segment in segments))
+
+    @staticmethod
+    def _projection_fact(segment: str) -> dict[str, Any] | None:
+        compact = re.sub(r"\s+", "", segment)
+        has_infinite = any(
+            term in compact
+            for term in (
+                "无限外推",
+                "见矿工程向外再没有工程控制",
+                "见矿工程向外无工程控制",
+                "见矿工程外无控制工程",
+                "边缘见矿工程外",
+                "边缘见矿工程向外",
+            )
+        )
+        has_finite = any(
+            term in compact
+            for term in (
+                "有限外推",
+                "相邻的两个工程一个见矿",
+                "相邻工程一个见矿",
+                "一个见矿另一个不见矿",
+                "一个见矿一个未见矿",
+                "相邻工程部分见矿",
+            )
+        )
+        if not has_infinite and not has_finite:
+            return None
+        projection_type = "无限外推" if has_infinite and not has_finite else "有限外推"
+
+        trigger = ""
+        trigger_patterns = (
+            r"(相邻的两个工程一个见矿[，,]?另一个不见矿时)",
+            r"(相邻工程一个见矿[，,]?另一个(?:不见矿|未见矿)时)",
+            r"(相邻工程中一个工程(?:见矿|部分见矿)[，,]?另一个工程(?:不见矿|未见矿)时)",
+            r"(相邻工程部分见矿时)",
+            r"(见矿工程向外再没有工程控制时)",
+            r"(见矿工程向外无工程控制时)",
+            r"(边缘见矿工程向外(?:无|没有)工程控制时)",
+        )
+        for pattern in trigger_patterns:
+            match = re.search(pattern, segment)
+            if match:
+                trigger = match.group(1)
+                break
+        if not trigger:
+            trigger = "相邻工程见矿情况" if projection_type == "有限外推" else "边缘见矿工程外无工程控制"
+
+        relationship = ""
+        if re.search(r"实际工程间距大于推断资源量工程间距", compact):
+            relationship = "实际工程间距大于推断资源量工程间距时改用推断资源量工程间距"
+        elif re.search(r"实际工程间距(?:小于|不大于|≤)推断资源量工程间距", compact):
+            relationship = "实际工程间距不大于推断资源量工程间距时采用实际工程间距"
+
+        bases: list[str] = []
+        for term in (
+            "推断资源量工程间距",
+            "经验工程间距",
+            "基本勘查工程间距",
+            "基本工程间距",
+            "实际工程间距",
+            "相应工程间距",
+            "工程间距",
+        ):
+            if term in compact and not any(term in current or current in term for current in bases):
+                bases.append(term)
+        if relationship:
+            distance_basis = relationship
+        elif bases:
+            distance_basis = "、".join(bases[:3])
+        else:
+            distance_basis = "条款未明确命名距离基准"
+
+        def ratios(action: str) -> str:
+            values: list[str] = []
+            for action_match in re.finditer(rf"(?:{action})", compact):
+                prefix = compact[max(0, action_match.start() - 14) : action_match.start()]
+                matches = list(
+                    re.finditer(r"1/2|1/4|2/3|1/3|二分之一|四分之一", prefix)
+                )
+                if matches:
+                    values.append(matches[-1].group(0))
+            normalized = [
+                {"二分之一": "1/2", "四分之一": "1/4"}.get(value, value)
+                for value in values
+            ]
+            return "、".join(dict.fromkeys(normalized))
+
+        pointed_ratio = ratios("尖推|尖灭")
+        flat_ratio = ratios("平推")
+        if (
+            not pointed_ratio
+            and not flat_ratio
+            and distance_basis == "条款未明确命名距离基准"
+        ):
+            return None
+        adjacent_condition = ""
+        if "部分见矿" in compact:
+            adjacent_condition = "相邻工程部分见矿"
+        elif any(term in compact for term in ("一个见矿另一个不见矿", "一个见矿一个未见矿", "一个见矿，另一个不见矿")):
+            adjacent_condition = "相邻工程一个见矿、另一个未见矿"
+
+        finding_parts = [trigger, f"距离基准：{distance_basis}"]
+        if pointed_ratio:
+            finding_parts.append(f"尖推/尖灭：{pointed_ratio}")
+        if flat_ratio:
+            finding_parts.append(f"平推：{flat_ratio}")
+        if adjacent_condition:
+            finding_parts.append(adjacent_condition)
+        return {
+            "projection_type": projection_type,
+            "trigger_condition": trigger,
+            "distance_basis": distance_basis,
+            "distance_relationship": relationship or None,
+            "adjacent_engineering_condition": adjacent_condition or None,
+            "pointed_ratio": pointed_ratio or None,
+            "flat_ratio": flat_ratio or None,
+            "exceptions": None,
+            "finding": "；".join(finding_parts),
+            "source_clause": segment[:420].strip(),
+        }
 
     @staticmethod
     def _compact_fact_sources(
@@ -1364,6 +1626,8 @@ class ResearchTaskRunner:
             return self._render_service_material_answer(plan, sources)
         if plan.intent == "exploration_to_mining_eligibility":
             return self._render_transfer_answer(sources)
+        if plan.intent == "projection_comparison":
+            return self._render_projection_comparison(question, facts, sources)
         summary = "本次研究已按知识库候选范围逐份检索，并仅使用命中的直接条款形成下列比较结果。"
         document_count = len({fact.get("document_id") for fact in facts if fact.get("document_id")})
         if document_count:
@@ -1415,6 +1679,8 @@ class ResearchTaskRunner:
                                 "新数值或模型常识。用2至4句中文说明主要一致点、差异和不确定性。"
                                 "必须保持用户问题限定的外推类型，严禁把有限外推当作无限外推，或反向替换。"
                                 "只有至少两份文件在同一比较维度上有直接事实时，才能概括为一致。"
+                                "\n"
+                                f"{prompt_text(settings, 'research_summary', primary_intent=(plan.query_classification or {}).get('primary_intent'))}"
                             ),
                         },
                         {
@@ -1483,6 +1749,125 @@ class ResearchTaskRunner:
         return "\n".join(lines).strip()
 
     @classmethod
+    def _render_projection_comparison(
+        cls,
+        question: str,
+        facts: list[dict[str, Any]],
+        sources: list[Source],
+    ) -> str:
+        source_by_index = {index: source for index, source in enumerate(sources, start=1)}
+
+        def source_for(fact: dict[str, Any]) -> Source | None:
+            return next(
+                (
+                    source_by_index[index]
+                    for index in fact.get("source_indices", [])
+                    if index in source_by_index
+                ),
+                None,
+            )
+
+        primary = [fact for fact in facts if fact.get("evidence_role") != "finite_contrast"]
+        contrasts = [fact for fact in facts if fact.get("evidence_role") == "finite_contrast"]
+        signatures = {
+            (
+                fact.get("projection_type"),
+                fact.get("trigger_condition"),
+                fact.get("distance_basis"),
+                fact.get("pointed_ratio"),
+                fact.get("flat_ratio"),
+            )
+            for fact in primary
+        }
+        labels = [
+            source.standard_no or f"《{source.title}》"
+            for fact in primary
+            if (source := source_for(fact)) is not None
+        ]
+        labels = list(dict.fromkeys(labels))
+
+        summary_parts: list[str] = []
+        if primary:
+            focus = "有限外推" if "有限外推" in question else "无限外推" if "无限外推" in question else "矿体外推"
+            summary_parts.append(
+                f"本次在 {len(set(labels))} 份文件中提取到 {len(signatures)} 类可比的{focus}规则。"
+            )
+        switch_facts = [
+            fact
+            for fact in primary
+            if fact.get("distance_relationship")
+            and "实际工程间距大于推断资源量工程间距" in str(fact.get("distance_relationship"))
+        ]
+        if switch_facts:
+            switch_labels = list(
+                dict.fromkeys(
+                    source.standard_no or source.title
+                    for fact in switch_facts
+                    if (source := source_for(fact)) is not None
+                )
+            )
+            summary_parts.append(
+                f"{('、'.join(switch_labels))}明确比较实际工程间距与推断资源量工程间距："
+                "实际间距较大时，改按推断资源量工程间距计算外推距离。"
+            )
+        partial_facts = [
+            fact
+            for fact in primary
+            if fact.get("pointed_ratio") == "2/3" or fact.get("flat_ratio") == "1/3"
+        ]
+        if partial_facts:
+            partial_labels = list(
+                dict.fromkeys(
+                    source.standard_no or source.title
+                    for fact in partial_facts
+                    if (source := source_for(fact)) is not None
+                )
+            )
+            summary_parts.append(
+                f"{('、'.join(partial_labels))}对相邻工程部分见矿的情形另设 2/3 尖推、1/3 平推，"
+                "不能与普通的 1/2 尖推规则合并。"
+            )
+        if len(signatures) > 1 and not switch_facts and not partial_facts:
+            summary_parts.append("具体差异集中在距离基准、外推比例和相邻工程见矿条件，见下表逐项对照。")
+        if contrasts:
+            summary_parts.append("表末的有限外推条款仅作距离基准对照，不作为无限外推结论。")
+        if not summary_parts:
+            summary_parts.append("本次没有形成可比较的结构化外推事实。")
+
+        lines = ["**研究结论**", "", "".join(summary_parts), "", "**具体差异**", ""]
+        lines.extend(
+            [
+                "| 文件 | 外推类型 | 触发条件 | 距离基准 | 尖推/尖灭 | 平推 | 适用说明 | 依据条款 |",
+                "| --- | --- | --- | --- | --- | --- | --- | --- |",
+            ]
+        )
+        for fact in [*primary, *contrasts][:40]:
+            source = source_for(fact)
+            file_label = (
+                f"{source.standard_no or ''}《{source.title}》" if source else str(fact.get("document_id") or "未知文件")
+            )
+            applicability = str(fact.get("adjacent_engineering_condition") or "按该条款触发条件适用")
+            if fact.get("evidence_role") == "finite_contrast":
+                applicability = f"有限外推对照；{applicability}"
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        _markdown_cell(file_label),
+                        _markdown_cell(fact.get("projection_type") or "未标注"),
+                        _markdown_cell(fact.get("trigger_condition") or "未标注"),
+                        _markdown_cell(fact.get("distance_basis") or "未标注"),
+                        _markdown_cell(fact.get("pointed_ratio") or "未规定"),
+                        _markdown_cell(fact.get("flat_ratio") or "未规定"),
+                        _markdown_cell(applicability),
+                        _markdown_cell(source.chapter if source else "相关条款"),
+                    ]
+                )
+                + " |"
+            )
+        return "\n".join(lines).strip()
+
+    @classmethod
     def _render_service_material_answer(
         cls,
         plan: ResearchPlan,
@@ -1492,12 +1877,15 @@ class ResearchTaskRunner:
             transition_answer = cls._render_post_filing_license_steps(sources)
             if transition_answer:
                 return transition_answer
-        application = cls._service_application_label(plan.canonical_question)
+        application, change_section = cls._service_application_scope(plan)
+        section_prefix = f"附件4 > {application}" if application else None
+        if application == "变更" and change_section:
+            section_prefix = f"附件4 > 变更 > {change_section}"
         relevant = [
             source
             for source in sources
             if source.title == "采矿权申请资料清单及要求"
-            and (not application or f"附件4 > {application}" in (source.chapter or ""))
+            and (not section_prefix or (source.chapter or "").startswith(section_prefix))
         ]
         material_sources = [
             source for source in relevant if re.search(r">\s*材料\s*\d+", source.chapter or "")
@@ -1509,10 +1897,13 @@ class ResearchTaskRunner:
 
         material_sources.sort(key=material_sequence)
         if application and material_sources:
+            application_name = (
+                f"变更（{change_section}）" if application == "变更" and change_section else application
+            )
             lines = [
                 "**研究结论**",
                 "",
-                f"采矿权{application}申请应按 **自然资规〔2023〕4号附件4《采矿权申请资料清单及要求》** 核对材料。",
+                f"采矿权{application_name}申请应按 **自然资规〔2023〕4号附件4《采矿权申请资料清单及要求》** 核对材料。",
                 "",
                 "**直接材料依据**",
                 "",
@@ -1533,8 +1924,6 @@ class ResearchTaskRunner:
                     "采矿权申请资料分为新立、延续、变更和注销四类，不能合并为一套统一要件。",
                     "",
                     *[f"- {source.quote}" for source in relevant[:8]],
-                    "",
-                    "请先确认办理类型；变更申请还需进一步说明具体变更事项。",
                 ]
             ).strip()
         return (
@@ -1585,6 +1974,23 @@ class ResearchTaskRunner:
         if any(term in question for term in ("变更", "转让", "转移")):
             return "变更"
         return None
+
+    @classmethod
+    def _service_application_scope(
+        cls,
+        plan: ResearchPlan,
+    ) -> tuple[str | None, str | None]:
+        classification = plan.query_classification or {}
+        application = {
+            "new": "新立",
+            "renewal": "延续",
+            "change": "变更",
+            "cancellation": "注销",
+        }.get(str(classification.get("application_type") or ""))
+        change_section = SERVICE_CHANGE_SECTIONS.get(
+            str(classification.get("change_subtype") or "")
+        )
+        return application or cls._service_application_label(plan.canonical_question), change_section
 
     @classmethod
     def _render_transfer_answer(cls, sources: list[Source]) -> str:
@@ -1742,6 +2148,7 @@ class ResearchTaskRunner:
             ),
             confidence="low",
             quota=QuotaInfo(**quota),
+            query_classification=plan.query_classification,
         )
         store.complete_research_task(
             task["task_id"],
@@ -1815,6 +2222,12 @@ def research_task_response(task: dict[str, Any], quota: dict[str, Any] | None = 
         ),
         result_available=task.get("result") is not None,
         quota=QuotaInfo(**effective_quota) if effective_quota else None,
+        query_classification=(
+            (task.get("result") or {}).get("query_classification")
+            if isinstance(task.get("result"), dict)
+            else (task.get("query_plan") or {}).get("classification")
+        )
+        or (task.get("query_plan") or {}).get("classification"),
         created_at=task["created_at"],
         started_at=task.get("started_at"),
         finished_at=task.get("finished_at"),

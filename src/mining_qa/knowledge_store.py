@@ -1158,6 +1158,24 @@ def row_matches_candidate_title(row: sqlite3.Row, plan: QueryPlan) -> bool:
 
 def service_application_section_terms(plan: QueryPlan) -> tuple[str, ...]:
     query = plan.normalized_query
+    classification = plan.classification
+    if classification:
+        if classification.application_type == "renewal":
+            return ("附件4 > 延续 >",)
+        if classification.application_type == "cancellation":
+            return ("附件4 > 注销 >",)
+        if classification.application_type == "new":
+            return ("附件4 > 新立 >",)
+        if classification.application_type == "change":
+            section = {
+                "expand_area": "扩大矿区范围",
+                "shrink_area": "缩小矿区范围",
+                "mineral_or_mining_method": "开采主矿种、开采方式",
+                "holder_name": "采矿权人名称",
+                "transfer": "转让",
+            }.get(classification.change_subtype or "")
+            if section:
+                return (f"附件4 > 变更 > {section} >",)
     if any(term in query for term in ("延续", "续期")):
         return ("附件4 > 延续 >",)
     if "注销" in query:
