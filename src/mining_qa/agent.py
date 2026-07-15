@@ -26,6 +26,13 @@ from .query_understanding import (
 from .retrieval_planner import QueryVariant, RetrievalPlanner
 from .retrieval_trace import RetrievalTraceLogger
 from .schemas import AskRequest, AskResponse, Limitations, RetrievalStats, Source
+from .technical_test_hierarchy import (
+    MINERAL_PROCESSING_TEST_LEVELS,
+    actual_level_from_sufficiency_question,
+    level_covers,
+    levels_in_text,
+    required_level_from_sufficiency_question,
+)
 from .web_supplement import WebSupplement
 
 
@@ -55,6 +62,7 @@ DETERMINISTIC_FAST_INTENTS = {
     "basic_analysis_items",
     "projection_comparison",
     "definition_explanation",
+    "technical_requirement_sufficiency",
 }
 SYSTEM_PROMPT = """你是矿产资源标准知识问答 agent。
 
@@ -647,15 +655,36 @@ class MiningQAAgent:
             return found, found
 
         if effective_plan.intent == "technical_requirement_sufficiency":
-            stage_evidence = any(
-                self._is_technical_stage_requirement_text(source.quote or "", question)
+            actual_level = actual_level_from_sufficiency_question(question)
+            explicit_required_level = required_level_from_sufficiency_question(question)
+            stage_sources = [
+                source
                 for source in sources
+                if self._is_technical_stage_requirement_text(source.quote or "", question)
+            ]
+            required_level = explicit_required_level or max(
+                (
+                    level
+                    for source in stage_sources
+                    for level in levels_in_text(source.quote or "")
+                ),
+                key=lambda item: item.rank,
+                default=None,
             )
-            hierarchy_evidence = any(
-                self._is_technical_study_hierarchy_text(source.quote or "")
-                for source in sources
+            actual_level_source = next(
+                (
+                    source
+                    for source in sources
+                    if actual_level and self._is_technical_test_level_source(source, actual_level)
+                ),
+                None,
             )
-            found = stage_evidence and hierarchy_evidence
+            found = bool(
+                actual_level
+                and required_level
+                and actual_level_source
+                and (stage_sources or explicit_required_level)
+            )
             return found, found
 
         validators = {
@@ -813,6 +842,24 @@ class MiningQAAgent:
             and sum(term in compact for term in study_terms) >= 2
         )
 
+    @staticmethod
+    def _is_technical_test_level_source(source: Source, level: object) -> bool:
+        clause = str(source.chapter or "")
+        standard_no = re.sub(r"\s+", "", source.standard_no or "").upper()
+        source_clause = str(getattr(level, "source_clause", ""))
+        source_standard_no = re.sub(
+            r"\s+", "", str(getattr(level, "source_standard_no", ""))
+        ).upper()
+        return bool(
+            source_clause
+            and (
+                clause == source_clause
+                or clause.startswith(f"{source_clause} ")
+                or source_clause in clause
+            )
+            and (not source_standard_no or standard_no == source_standard_no)
+        )
+
     def _select_evidence_hits(
         self,
         hits: list[dict],
@@ -844,17 +891,28 @@ class MiningQAAgent:
             if selected:
                 return selected
         if effective_plan.intent == "technical_requirement_sufficiency":
-            stage_hits = [
-                hit
-                for hit in hits
-                if self._is_technical_stage_requirement_text(
-                    self._hit_evidence_text(hit), question
-                )
-            ]
+            actual_level = actual_level_from_sufficiency_question(question)
+            explicit_required_level = required_level_from_sufficiency_question(question)
+            # When the user explicitly names the target level, the level relation
+            # is answerable from the controlled hierarchy alone. Do not attach an
+            # arbitrary stage clause from an unrelated mineral standard merely
+            # because it also contains that level name.
+            stage_hits = (
+                []
+                if explicit_required_level
+                else [
+                    hit
+                    for hit in hits
+                    if self._is_technical_stage_requirement_text(
+                        self._hit_evidence_text(hit), question
+                    )
+                ]
+            )
             hierarchy_hits = [
                 hit
                 for hit in hits
-                if self._is_technical_study_hierarchy_text(self._hit_evidence_text(hit))
+                if actual_level
+                and self._is_technical_test_level_source(self._source_from_hit(hit), actual_level)
             ]
             selected = []
             if stage_hits:
@@ -871,7 +929,8 @@ class MiningQAAgent:
                 hierarchy = max(
                     hierarchy_hits,
                     key=lambda hit: (
-                        "在可选性试验的基础上" in self._hit_evidence_text(hit),
+                        str(hit.get("clause_no") or hit.get("section_path") or "")
+                        == actual_level.source_clause,
                         float(hit.get("score") or 0.0),
                         len(self._hit_evidence_text(hit)),
                     ),
@@ -1638,6 +1697,69 @@ class MiningQAAgent:
         engineering_answer = self._engineering_distance_answer(effective_plan, sources)
         if engineering_answer:
             return engineering_answer
+
+        if effective_plan.intent == "technical_requirement_sufficiency":
+            actual_level = actual_level_from_sufficiency_question(question)
+            explicit_required_level = required_level_from_sufficiency_question(question)
+            stage_source = next(
+                (
+                    source
+                    for source in sources
+                    if self._is_technical_stage_requirement_text(source.quote or "", question)
+                ),
+                None,
+            )
+            stage_required_level = max(
+                (
+                    level
+                    for level in levels_in_text(stage_source.quote if stage_source else "")
+                ),
+                key=lambda item: item.rank,
+                default=None,
+            )
+            required_level = explicit_required_level or stage_required_level
+            actual_source = next(
+                (
+                    source
+                    for source in sources
+                    if actual_level and self._is_technical_test_level_source(source, actual_level)
+                ),
+                None,
+            )
+            if (
+                actual_level
+                and required_level
+                and actual_source
+                and (stage_source or explicit_required_level)
+            ):
+                satisfies = level_covers(actual_level, required_level)
+                relation = "高于" if actual_level.rank > required_level.rank else "等同于"
+                chain = " -> ".join(
+                    item.label
+                    for item in MINERAL_PROCESSING_TEST_LEVELS
+                    if item.rank <= actual_level.rank
+                )
+                lines = [
+                    f"**结论：{'满足' if satisfies else '不满足'}（仅作试验等级满足判断）。**",
+                    "",
+                    f"- **用户所述试验等级**：{actual_level.label}。",
+                    f"- **对应要求等级**：{required_level.label}。",
+                    f"- **等级比较**：{actual_level.label}{relation}{required_level.label}；"
+                    + ("因此可以覆盖该要求。" if satisfies else f"因此仍需达到{required_level.label}或更高等级。"),
+                    f"- **等级依据**：{actual_source.standard_no or actual_level.source_standard_no}《{actual_source.title}》"
+                    f"（{actual_source.chapter or actual_level.source_clause}，{actual_level.label}等级条款）。",
+                ]
+                if stage_source:
+                    lines.append(
+                        f"- **阶段依据**：{stage_source.standard_no or '未知标准号'}《{stage_source.title}》"
+                        f"（{stage_source.chapter or '相关条款'}）：{stage_source.quote}"
+                    )
+                if chain:
+                    lines.append(f"- **本次比较的等级链**：{chain}。")
+                lines.append(
+                    "- **判断范围**：本结论只比较标准中的试验等级；试验是否满足该等级的具体技术条件，属于单独的试验符合性核验。"
+                )
+                return "\n".join(lines)
 
         if effective_plan.intent == "projection_numeric_rule":
             source = next((item for item in sources if self._is_projection_numeric_source(item)), None)

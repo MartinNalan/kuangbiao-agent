@@ -532,6 +532,7 @@ class QuestionResolver:
             "related_documents",
             "regulation_lookup",
             "technical_requirement_sufficiency",
+            "technical_test_conformity_verification",
         }
 
     def _apply_model_intent(
@@ -627,7 +628,10 @@ class QuestionResolver:
         )
         legacy_intent = legacy_intent_for_primary(classification.primary_intent, plan.intent)
         if (
-            plan.intent == "technical_requirement_sufficiency"
+            plan.intent in {
+                "technical_requirement_sufficiency",
+                "technical_test_conformity_verification",
+            }
             and classification.primary_intent == "technical_method"
         ):
             legacy_intent = plan.intent

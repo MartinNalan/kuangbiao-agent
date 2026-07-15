@@ -26,6 +26,11 @@ from mining_qa.query_understanding import (
 )
 from mining_qa.schemas import Source
 from mining_qa.retrieval_planner import QueryVariant, RetrievalPlanner
+from mining_qa.technical_test_hierarchy import (
+    actual_level_from_sufficiency_question,
+    level_covers,
+    required_level_from_sufficiency_question,
+)
 
 
 QUESTIONS = (
@@ -1159,6 +1164,10 @@ class TechnicalRequirementEvidenceTests(unittest.TestCase):
         "5.2.2 实验室流程试验 在可选性试验的基础上，结合工艺矿物学研究，"
         "进行工艺条件和流程结构及开路、闭路流程试验。"
     )
+    SEMI_INDUSTRIAL_TEXT = (
+        "5.2.4 半工业试验 在实验室扩大连续试验推荐的工艺流程基础上，"
+        "模拟工业生产流程进行半工业试验。"
+    )
 
     def test_requirement_evidence_rejects_heading_only_and_accepts_two_evidence_roles(self) -> None:
         heading = {"text": "6.4 详查阶段"}
@@ -1233,7 +1242,66 @@ class TechnicalRequirementEvidenceTests(unittest.TestCase):
         selected = agent._select_evidence_hits(hits, self.QUESTION, plan)
 
         self.assertEqual([item["document_id"] for item in selected], ["stage", "hierarchy"])
-        self.assertTrue(EvidenceReranker.needs_model(plan))
+        self.assertFalse(EvidenceReranker.needs_model(plan))
+
+    def test_higher_level_covers_explicit_lower_level_without_conformance_caveat(self) -> None:
+        question = "半工业试验能否满足详查阶段的实验室流程试验要求？"
+        plan = understand_query(question)
+        agent = object.__new__(MiningQAAgent)
+        stage = Source(
+            title="矿产地质勘查规范 岩金",
+            standard_no="DZ/T 0205-2020",
+            chapter="4.3.3",
+            quote=self.STAGE_TEXT,
+            source_type="local_kb",
+            text_access="ocr_text",
+        )
+        semi_industrial = Source(
+            title="矿产勘查矿石加工选冶技术性能试验研究程度要求",
+            standard_no="DZ/T 0340-2020",
+            chapter="5.2.4",
+            quote=self.SEMI_INDUSTRIAL_TEXT,
+            source_type="local_kb",
+            text_access="ocr_text",
+        )
+
+        actual = actual_level_from_sufficiency_question(question)
+        required = required_level_from_sufficiency_question(question)
+        self.assertEqual(plan.intent, "technical_requirement_sufficiency")
+        self.assertEqual(actual.label if actual else None, "半工业试验")
+        self.assertEqual(required.label if required else None, "实验室流程试验")
+        self.assertTrue(level_covers(actual, required))
+        self.assertEqual(
+            agent._evaluate_evidence(question, {"has_clause_level_evidence": True}, [stage, semi_industrial], plan),
+            (True, True),
+        )
+
+        answer = agent._fast_answer(question, [stage, semi_industrial], plan) or ""
+        self.assertIn("**结论：满足（仅作试验等级满足判断）。**", answer)
+        self.assertIn("半工业试验高于实验室流程试验", answer)
+        self.assertNotIn("还需证明", answer)
+        self.assertNotIn("样品、设备、时长", answer)
+
+    def test_lower_level_does_not_cover_explicit_higher_level(self) -> None:
+        question = "可选性试验能否覆盖实验室流程试验？"
+        actual = actual_level_from_sufficiency_question(question)
+        required = required_level_from_sufficiency_question(question)
+
+        self.assertEqual(understand_query(question).intent, "technical_requirement_sufficiency")
+        self.assertFalse(level_covers(actual, required))
+
+    def test_conformance_question_uses_separate_intent(self) -> None:
+        plan = understand_query("我的试验样品重量和运行时长是否符合半工业试验要求？")
+
+        self.assertEqual(plan.intent, "technical_test_conformity_verification")
+        self.assertIn(plan.intent, PROTECTED_QUERY_INTENTS)
+        self.assertIsNone(
+            object.__new__(MiningQAAgent)._fast_answer(
+                "我的试验样品重量和运行时长是否符合半工业试验要求？",
+                [],
+                plan,
+            )
+        )
 
 
 if __name__ == "__main__":

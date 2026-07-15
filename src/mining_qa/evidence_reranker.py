@@ -17,7 +17,6 @@ COMPLEX_INTENTS = {
     "clause_comparison",
     "regulation_lookup",
     "related_documents",
-    "technical_requirement_sufficiency",
 }
 
 DETERMINISTIC_EVIDENCE_INTENTS = {
@@ -25,6 +24,7 @@ DETERMINISTIC_EVIDENCE_INTENTS = {
     "companion_resource_type",
     "exploration_type_factors",
     "basic_analysis_items",
+    "technical_requirement_sufficiency",
 }
 
 STRUCTURAL_GUARD_INTENTS = {

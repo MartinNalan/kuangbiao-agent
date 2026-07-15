@@ -36,6 +36,13 @@ from .query_understanding import (
     query_plan_from_payload,
     understand_query,
 )
+from .technical_test_hierarchy import (
+    MINERAL_PROCESSING_TEST_LEVELS,
+    actual_level_from_sufficiency_question,
+    hierarchy_clauses_through,
+    highest_level_in_text,
+    required_level_from_sufficiency_question,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -788,17 +795,36 @@ def query_terms(query: str, plan: QueryPlan | None = None) -> list[str]:
     normalized_query = effective_plan.normalized_query
     terms: list[str] = []
     if effective_plan.intent == "technical_requirement_sufficiency":
-        # A sufficiency question needs both the stage rule and the definition
-        # of how the relevant study levels relate to one another.
+        actual_level = actual_level_from_sufficiency_question(normalized_query)
+        target_level = required_level_from_sufficiency_question(normalized_query)
+        hierarchy_terms = [
+            item.label
+            for item in MINERAL_PROCESSING_TEST_LEVELS
+            if actual_level is not None and item.rank <= actual_level.rank
+        ]
+        # A sufficiency question needs the stage rule plus the evidence-backed
+        # test hierarchy up to the level asserted by the user.
         terms.extend(
             [
                 "矿石加工选冶技术性能试验研究程度",
                 "详查阶段",
-                "可选性试验",
-                "实验室流程试验",
                 "试验研究程度分类",
-                "在可选性试验的基础上",
-                "必要时",
+                target_level.label if target_level else "",
+                actual_level.label if actual_level else "",
+                *hierarchy_terms,
+                *hierarchy_clauses_through(actual_level),
+            ]
+        )
+    elif effective_plan.intent == "technical_test_conformity_verification":
+        target_level = highest_level_in_text(normalized_query)
+        terms.extend(
+            [
+                "矿石加工选冶技术性能试验研究程度",
+                target_level.label if target_level else "",
+                target_level.source_clause if target_level else "",
+                "样品代表性",
+                "试验设备",
+                "试验记录",
             ]
         )
     raw_terms = re.findall(
@@ -1132,6 +1158,7 @@ STRICT_EVIDENCE_INTENTS = {
     "basic_analysis_items",
     "definition_explanation",
     "technical_requirement_sufficiency",
+    "technical_test_conformity_verification",
 }
 
 
@@ -1392,6 +1419,23 @@ def row_has_technical_requirement_sufficiency_evidence(row: sqlite3.Row) -> bool
     return has_stage_requirement or has_hierarchy_relation
 
 
+def row_has_technical_test_conformity_evidence(row: sqlite3.Row) -> bool:
+    text = re.sub(r"\s+", "", row["text"] or "")
+    return any(term in text for term in TECHNICAL_STUDY_EVIDENCE_TERMS) and any(
+        term in text
+        for term in (
+            "样品",
+            "试验设备",
+            "处理能力",
+            "运行时间",
+            "连续",
+            "记录",
+            "工艺参数",
+            "试验规模",
+        )
+    )
+
+
 def row_matches_query_plan_evidence(row: sqlite3.Row, plan: QueryPlan) -> bool:
     if plan.intent == "engineering_distance_lookup":
         return row_has_engineering_distance_evidence(row, plan)
@@ -1419,6 +1463,8 @@ def row_matches_query_plan_evidence(row: sqlite3.Row, plan: QueryPlan) -> bool:
         return row_has_definition_evidence(row, plan)
     if plan.intent == "technical_requirement_sufficiency":
         return row_has_technical_requirement_sufficiency_evidence(row)
+    if plan.intent == "technical_test_conformity_verification":
+        return row_has_technical_test_conformity_evidence(row)
     return row_matches_required_evidence_groups(row, plan)
 
 

@@ -131,6 +131,24 @@ TECHNICAL_REQUIREMENT_SATISFACTION_TERMS = (
     "是否必须",
     "还必须做",
 )
+TECHNICAL_TEST_CONFORMITY_TERMS = (
+    "是否算",
+    "算不算",
+    "是否属于",
+    "是否构成",
+    "如何认定",
+    "样品重量",
+    "样品质量",
+    "样品量",
+    "处理量",
+    "运行时长",
+    "连续时长",
+    "设备",
+    "采样",
+    "记录",
+    "符合半工业试验要求",
+    "符合实验室扩大连续试验要求",
+)
 TECHNICAL_STUDY_TERMS = (
     "类比研究",
     "工艺矿物学研究",
@@ -438,6 +456,7 @@ DEFAULT_DOCUMENT_TYPES: dict[str, tuple[str, ...]] = {
     "basic_analysis_items": ("standard", "national_standard", "industry_standard"),
     "definition_explanation": ("standard", "national_standard", "industry_standard"),
     "technical_requirement_sufficiency": ("standard", "national_standard", "industry_standard", "guidance"),
+    "technical_test_conformity_verification": ("standard", "national_standard", "industry_standard", "guidance"),
 }
 
 
@@ -457,6 +476,7 @@ PROTECTED_QUERY_INTENTS = {
     "projection_comparison",
     "definition_explanation",
     "technical_requirement_sufficiency",
+    "technical_test_conformity_verification",
 }
 
 
@@ -746,7 +766,10 @@ def query_plan_from_payload(query: str, payload: dict[str, Any] | None) -> Query
     )
     resolved_intent = legacy_intent_for_primary(classification.primary_intent, plan.intent)
     if (
-        plan.intent == "technical_requirement_sufficiency"
+        plan.intent in {
+            "technical_requirement_sufficiency",
+            "technical_test_conformity_verification",
+        }
         and classification.primary_intent == "technical_method"
     ):
         resolved_intent = plan.intent
@@ -1014,7 +1037,12 @@ def understand_query(query: str) -> QueryPlan:
             any(term in normalized for term in EXPLORATION_STAGE_TERMS)
             or "要求" in normalized
             or "研究程度" in normalized
+            or sum(term in normalized for term in TECHNICAL_STUDY_TERMS) >= 2
         )
+    )
+    has_technical_test_conformity = (
+        any(term in normalized for term in TECHNICAL_STUDY_TERMS)
+        and any(term in normalized for term in TECHNICAL_TEST_CONFORMITY_TERMS)
     )
     has_authority = any(term in normalized for term in AUTHORITY_INTENT_TERMS) and any(
         term in normalized for term in AUTHORITY_TOPIC_TERMS
@@ -1188,6 +1216,19 @@ def understand_query(query: str) -> QueryPlan:
             candidate_titles.append("铁、锰、铬")
             standards.append("DZ/T 0200-2020")
         retrieval_terms.extend([normalized, "基本分析项目", "化学分析项目"])
+    elif has_technical_test_conformity:
+        intent = "technical_test_conformity_verification"
+        retrieval_terms.extend(
+            [
+                normalized,
+                "矿石加工选冶技术性能试验研究程度要求",
+                "样品代表性",
+                "试验规模",
+                "设备",
+                "运行时间",
+                "试验记录",
+            ]
+        )
     elif has_technical_requirement_sufficiency:
         intent = "technical_requirement_sufficiency"
         retrieval_terms.extend(
@@ -1311,7 +1352,12 @@ def understand_query(query: str) -> QueryPlan:
     for match in governed_retrieval_matches:
         retrieval_terms.append(match["canonical_term"])
         retrieval_terms.extend(match.get("positive_expansions") or [])
-        retrieval_terms.extend(match.get("evidence_required_patterns") or [])
+        # Background context may add terminology for recall, but its evidence
+        # constraints belong to the business intent it was authored for. Carrying
+        # them into every query pollutes unrelated retrieval (for example, an
+        # authority pattern in a mineral-processing question).
+        if match.get("intent_label") == intent:
+            retrieval_terms.extend(match.get("evidence_required_patterns") or [])
 
     governed_constraint_matches = [
         match
