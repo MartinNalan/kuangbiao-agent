@@ -7,7 +7,7 @@ if TYPE_CHECKING:
     from .config import Settings
 
 
-PROMPT_REGISTRY_VERSION = "v3.0.0"
+PROMPT_REGISTRY_VERSION = "v3.0.1"
 
 
 @dataclass(frozen=True)
@@ -42,6 +42,10 @@ _INTENT_RULES = {
     ),
     "definition_lookup": (
         "定义类优先输出正式定义原文；复合术语没有独立定义时，应明确区分行业统称与组成概念定义。"
+    ),
+    "technical_method": (
+        "技术要求的满足、替代或覆盖问题必须同时核对阶段最低要求与研究层级关系。"
+        "不得假设用户未完成某项工作；原文仅称‘必要时’时，不能机械推导固定先后顺序。"
     ),
 }
 

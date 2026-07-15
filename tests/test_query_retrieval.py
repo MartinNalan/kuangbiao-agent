@@ -12,6 +12,7 @@ from mining_qa.knowledge_store import (
     VectorCandidateResult,
     authority_evidence_quote,
     connect,
+    row_has_technical_requirement_sufficiency_evidence,
     table_quote,
     table_references,
     transfer_evidence_quote,
@@ -162,6 +163,17 @@ class QueryUnderstandingTests(unittest.TestCase):
                 self.assertIn(standard_no, plan.standard_numbers)
                 self.assertEqual(plan.scope_origin, "deterministic")
                 self.assertEqual(plan.output_mode, output_mode)
+
+    def test_technical_requirement_sufficiency_preserves_relation_intent(self) -> None:
+        plan = understand_query(
+            "对于金矿的易选矿石，在详查阶段做实验室流程实验是否满足详查的要求？"
+        )
+
+        self.assertEqual(plan.intent, "technical_requirement_sufficiency")
+        self.assertIn(plan.intent, PROTECTED_QUERY_INTENTS)
+        self.assertEqual(plan.classification.primary_intent, "technical_method")
+        self.assertIn("实验室流程试验", plan.retrieval_query)
+        self.assertFalse(plan.has_hard_candidate_scope)
 
     def test_model_suggested_title_is_a_soft_hint(self) -> None:
         base = understand_query("某固体矿产资源分类问题")
@@ -1134,6 +1146,94 @@ class ControlledRetrievalEnhancementTests(unittest.TestCase):
         selected = agent._select_evidence_hits(hits, question, plan)
 
         self.assertEqual(selected, [])
+
+
+class TechnicalRequirementEvidenceTests(unittest.TestCase):
+    QUESTION = "对于金矿的易选矿石，在详查阶段做实验室流程实验是否满足详查的要求？"
+
+    STAGE_TEXT = (
+        "4.3.3 详查阶段 在矿石工艺矿物学研究基础上，基本查明其选冶技术性能。"
+        "对易选、较易选矿石应进行可选性试验，必要时进行实验室流程试验。"
+    )
+    HIERARCHY_TEXT = (
+        "5.2.2 实验室流程试验 在可选性试验的基础上，结合工艺矿物学研究，"
+        "进行工艺条件和流程结构及开路、闭路流程试验。"
+    )
+
+    def test_requirement_evidence_rejects_heading_only_and_accepts_two_evidence_roles(self) -> None:
+        heading = {"text": "6.4 详查阶段"}
+        stage = {"text": self.STAGE_TEXT}
+        hierarchy = {"text": self.HIERARCHY_TEXT}
+
+        self.assertFalse(row_has_technical_requirement_sufficiency_evidence(heading))
+        self.assertTrue(row_has_technical_requirement_sufficiency_evidence(stage))
+        self.assertTrue(row_has_technical_requirement_sufficiency_evidence(hierarchy))
+
+    def test_agent_requires_stage_and_hierarchy_before_answering(self) -> None:
+        agent = object.__new__(MiningQAAgent)
+        plan = understand_query(self.QUESTION)
+        stage = Source(
+            title="矿产地质勘查规范 岩金",
+            standard_no="DZ/T 0205-2020",
+            chapter="4.3.3",
+            quote=self.STAGE_TEXT,
+            source_type="local_kb",
+            text_access="ocr_text",
+        )
+        hierarchy = Source(
+            title="矿产勘查矿石加工选冶技术性能试验研究程度要求",
+            standard_no="DZ/T 0340-2020",
+            chapter="5.2.2",
+            quote=self.HIERARCHY_TEXT,
+            source_type="local_kb",
+            text_access="ocr_text",
+        )
+
+        self.assertEqual(
+            agent._evaluate_evidence(self.QUESTION, {"has_clause_level_evidence": True}, [stage], plan),
+            (False, False),
+        )
+        self.assertEqual(
+            agent._evaluate_evidence(
+                self.QUESTION,
+                {"has_clause_level_evidence": True},
+                [stage, hierarchy],
+                plan,
+            ),
+            (True, True),
+        )
+
+    def test_agent_selects_stage_and_hierarchy_sources(self) -> None:
+        agent = object.__new__(MiningQAAgent)
+        plan = understand_query(self.QUESTION)
+        hits = [
+            {
+                "document_id": "heading",
+                "standard_no": "DZ/T 0205-2020",
+                "clause_no": "4.3.3",
+                "quote": "4.3.3 详查阶段",
+                "score": 0.99,
+            },
+            {
+                "document_id": "stage",
+                "standard_no": "DZ/T 0205-2020",
+                "clause_no": "4.3.3",
+                "quote": self.STAGE_TEXT,
+                "score": 0.70,
+            },
+            {
+                "document_id": "hierarchy",
+                "standard_no": "DZ/T 0340-2020",
+                "clause_no": "5.2.2",
+                "quote": self.HIERARCHY_TEXT,
+                "score": 0.65,
+            },
+        ]
+
+        selected = agent._select_evidence_hits(hits, self.QUESTION, plan)
+
+        self.assertEqual([item["document_id"] for item in selected], ["stage", "hierarchy"])
+        self.assertTrue(EvidenceReranker.needs_model(plan))
 
 
 if __name__ == "__main__":

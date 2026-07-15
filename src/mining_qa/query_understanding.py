@@ -119,6 +119,30 @@ AUTHORITY_TOPIC_TERMS = (
 AUTHENTICITY_TERMS = ("真实性", "真实准确", "弄虚作假", "真实性负责")
 RESERVE_REPORT_TERMS = ("资源储量报告", "矿产资源储量报告", "储量报告")
 EXPLORATION_STAGE_TERMS = ("详查", "勘探", "普查", "勘查程度", "勘查阶段")
+TECHNICAL_REQUIREMENT_SATISFACTION_TERMS = (
+    "是否满足",
+    "能否满足",
+    "是否符合",
+    "能否符合",
+    "能否替代",
+    "是否可以替代",
+    "能否覆盖",
+    "是否还需要",
+    "是否必须",
+    "还必须做",
+)
+TECHNICAL_STUDY_TERMS = (
+    "类比研究",
+    "工艺矿物学研究",
+    "可选性试验",
+    "实验室流程试验",
+    "实验室扩大连续试验",
+    "半工业试验",
+    "工业试验",
+    "初步测试研究",
+    "基本测试研究",
+    "详细测试研究",
+)
 MINING_CONVERSION_TERMS = (
     "转采",
     "探转采",
@@ -413,6 +437,7 @@ DEFAULT_DOCUMENT_TYPES: dict[str, tuple[str, ...]] = {
     "exploration_type_factors": ("standard", "national_standard", "industry_standard"),
     "basic_analysis_items": ("standard", "national_standard", "industry_standard"),
     "definition_explanation": ("standard", "national_standard", "industry_standard"),
+    "technical_requirement_sufficiency": ("standard", "national_standard", "industry_standard", "guidance"),
 }
 
 
@@ -431,6 +456,7 @@ PROTECTED_QUERY_INTENTS = {
     "basic_analysis_items",
     "projection_comparison",
     "definition_explanation",
+    "technical_requirement_sufficiency",
 }
 
 
@@ -718,9 +744,15 @@ def query_plan_from_payload(query: str, payload: dict[str, Any] | None) -> Query
             confidence=plan.planner_confidence or 0.72,
         ),
     )
+    resolved_intent = legacy_intent_for_primary(classification.primary_intent, plan.intent)
+    if (
+        plan.intent == "technical_requirement_sufficiency"
+        and classification.primary_intent == "technical_method"
+    ):
+        resolved_intent = plan.intent
     return replace(
         plan,
-        intent=legacy_intent_for_primary(classification.primary_intent, plan.intent),
+        intent=resolved_intent,
         target_exploration_type=target_type or plan.target_exploration_type,
         focus_terms=focus_terms or plan.focus_terms,
         document_types=classification.document_types or plan.document_types,
@@ -743,7 +775,11 @@ def canonical_exploration_type(value: object) -> str | None:
 
 def normalize_user_query(query: str) -> str:
     normalized = unicodedata.normalize("NFKC", query or "")
-    normalized = normalized.replace("勘察", "勘查").replace("工程距离", "工程间距")
+    normalized = (
+        normalized.replace("勘察", "勘查")
+        .replace("工程距离", "工程间距")
+        .replace("实验室流程实验", "实验室流程试验")
+    )
     normalized = re.sub(r"\s+", " ", normalized).strip()
 
     def replace_type(match: re.Match[str]) -> str:
@@ -971,6 +1007,15 @@ def understand_query(query: str) -> QueryPlan:
     has_basic_analysis_items = any(term in normalized for term in BASIC_ANALYSIS_TERMS) and any(
         term in normalized for term in ("项目", "哪些", "什么", "包括", "内容", "需要测", "测哪些", "测定")
     )
+    has_technical_requirement_sufficiency = (
+        any(term in normalized for term in TECHNICAL_REQUIREMENT_SATISFACTION_TERMS)
+        and any(term in normalized for term in TECHNICAL_STUDY_TERMS)
+        and (
+            any(term in normalized for term in EXPLORATION_STAGE_TERMS)
+            or "要求" in normalized
+            or "研究程度" in normalized
+        )
+    )
     has_authority = any(term in normalized for term in AUTHORITY_INTENT_TERMS) and any(
         term in normalized for term in AUTHORITY_TOPIC_TERMS
     )
@@ -1143,6 +1188,21 @@ def understand_query(query: str) -> QueryPlan:
             candidate_titles.append("铁、锰、铬")
             standards.append("DZ/T 0200-2020")
         retrieval_terms.extend([normalized, "基本分析项目", "化学分析项目"])
+    elif has_technical_requirement_sufficiency:
+        intent = "technical_requirement_sufficiency"
+        retrieval_terms.extend(
+            [
+                normalized,
+                "矿石加工选冶技术性能试验研究程度要求",
+                "详查阶段",
+                "试验研究程度分类",
+                "可选性试验",
+                "实验室流程试验",
+                "在可选性试验的基础上",
+                "必要时",
+                "满足要求 替代 覆盖",
+            ]
+        )
     elif has_engineering_distance and not (has_projection and has_comparison):
         intent = "engineering_distance_lookup"
         if any(term in normalized for term in ("金矿", "岩金")):

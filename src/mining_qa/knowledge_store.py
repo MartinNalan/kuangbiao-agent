@@ -787,6 +787,20 @@ def query_terms(query: str, plan: QueryPlan | None = None) -> list[str]:
     effective_plan = plan or understand_query(query)
     normalized_query = effective_plan.normalized_query
     terms: list[str] = []
+    if effective_plan.intent == "technical_requirement_sufficiency":
+        # A sufficiency question needs both the stage rule and the definition
+        # of how the relevant study levels relate to one another.
+        terms.extend(
+            [
+                "矿石加工选冶技术性能试验研究程度",
+                "详查阶段",
+                "可选性试验",
+                "实验室流程试验",
+                "试验研究程度分类",
+                "在可选性试验的基础上",
+                "必要时",
+            ]
+        )
     raw_terms = re.findall(
         r"[A-Za-z0-9]+(?:/[A-Za-z0-9]+)?(?:[-.][A-Za-z0-9]+)*|[\u4e00-\u9fff]{2,}",
         normalized_query,
@@ -1117,6 +1131,7 @@ STRICT_EVIDENCE_INTENTS = {
     "exploration_type_factors",
     "basic_analysis_items",
     "definition_explanation",
+    "technical_requirement_sufficiency",
 }
 
 
@@ -1349,6 +1364,34 @@ def row_has_definition_evidence(row: sqlite3.Row, plan: QueryPlan) -> bool:
     return definition_slot_for_text(row["text"] or "", plan) is not None
 
 
+TECHNICAL_STUDY_EVIDENCE_TERMS = (
+    "类比研究",
+    "工艺矿物学研究",
+    "可选性试验",
+    "实验室流程试验",
+    "实验室扩大连续试验",
+    "半工业试验",
+    "工业试验",
+    "初步测试研究",
+    "基本测试研究",
+    "详细测试研究",
+)
+
+
+def row_has_technical_requirement_sufficiency_evidence(row: sqlite3.Row) -> bool:
+    text = re.sub(r"\s+", "", row["text"] or "")
+    has_stage_requirement = (
+        any(stage in text for stage in ("普查阶段", "详查阶段", "勘探阶段"))
+        and "应" in text
+        and any(term in text for term in TECHNICAL_STUDY_EVIDENCE_TERMS)
+    )
+    has_hierarchy_relation = bool(
+        re.search(r"在[^。；]{0,40}(?:试验|测试)[^。；]{0,16}基础上", text)
+        and sum(term in text for term in TECHNICAL_STUDY_EVIDENCE_TERMS) >= 2
+    )
+    return has_stage_requirement or has_hierarchy_relation
+
+
 def row_matches_query_plan_evidence(row: sqlite3.Row, plan: QueryPlan) -> bool:
     if plan.intent == "engineering_distance_lookup":
         return row_has_engineering_distance_evidence(row, plan)
@@ -1374,6 +1417,8 @@ def row_matches_query_plan_evidence(row: sqlite3.Row, plan: QueryPlan) -> bool:
         return row_has_basic_analysis_evidence(row, plan)
     if plan.intent == "definition_explanation":
         return row_has_definition_evidence(row, plan)
+    if plan.intent == "technical_requirement_sufficiency":
+        return row_has_technical_requirement_sufficiency_evidence(row)
     return row_matches_required_evidence_groups(row, plan)
 
 

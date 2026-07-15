@@ -531,6 +531,7 @@ class QuestionResolver:
             "projection_rule",
             "related_documents",
             "regulation_lookup",
+            "technical_requirement_sufficiency",
         }
 
     def _apply_model_intent(
@@ -625,6 +626,11 @@ class QuestionResolver:
             )
         )
         legacy_intent = legacy_intent_for_primary(classification.primary_intent, plan.intent)
+        if (
+            plan.intent == "technical_requirement_sufficiency"
+            and classification.primary_intent == "technical_method"
+        ):
+            legacy_intent = plan.intent
         if (
             plan.intent == "service_materials"
             and classification.primary_intent == "service_workflow"

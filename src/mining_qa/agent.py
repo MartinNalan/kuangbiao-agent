@@ -190,7 +190,7 @@ class MiningQAAgent:
                 rerank_result = await self.reranker.judge(question, plan, merged_hits)
                 reranker_ms += rerank_result.elapsed_ms
             evidence_hits = list(rerank_result.hits)
-            if plan.intent == "projection_comparison":
+            if plan.intent in {"projection_comparison", "technical_requirement_sufficiency"}:
                 concrete_hits = self._select_evidence_hits(merged_hits, question, plan)
                 if concrete_hits:
                     evidence_hits = concrete_hits
@@ -206,11 +206,15 @@ class MiningQAAgent:
                 plan,
             )
             has_usable_evidence = rerank_result.sufficient or (
-                plan.intent == "projection_comparison" and deterministic_usable
+                plan.intent in {"projection_comparison", "technical_requirement_sufficiency"}
+                and deterministic_usable
             )
             has_clause_evidence = bool(sources) and (
                 rerank_result.sufficient
-                or (plan.intent == "projection_comparison" and deterministic_clause)
+                or (
+                    plan.intent in {"projection_comparison", "technical_requirement_sufficiency"}
+                    and deterministic_clause
+                )
             )
         else:
             has_usable_evidence, has_clause_evidence = self._evaluate_evidence(
@@ -642,6 +646,18 @@ class MiningQAAgent:
             found = tables == {"1", "2", "3", "4", "5"}
             return found, found
 
+        if effective_plan.intent == "technical_requirement_sufficiency":
+            stage_evidence = any(
+                self._is_technical_stage_requirement_text(source.quote or "", question)
+                for source in sources
+            )
+            hierarchy_evidence = any(
+                self._is_technical_study_hierarchy_text(source.quote or "")
+                for source in sources
+            )
+            found = stage_evidence and hierarchy_evidence
+            return found, found
+
         validators = {
             "engineering_distance_lookup": self._is_engineering_distance_source,
             "authority_responsibility": self._is_policy_authority_source,
@@ -750,6 +766,53 @@ class MiningQAAgent:
             {"role": "user", "content": user_content},
         ]
 
+    @staticmethod
+    def _is_technical_stage_requirement_text(text: str, question: str) -> bool:
+        compact = re.sub(r"\s+", "", text or "")
+        requested_stages = [
+            stage
+            for stage in ("普查阶段", "详查阶段", "勘探阶段")
+            if stage in re.sub(r"\s+", "", question or "")
+        ]
+        stages = requested_stages or ["普查阶段", "详查阶段", "勘探阶段"]
+        study_terms = (
+            "类比研究",
+            "工艺矿物学研究",
+            "可选性试验",
+            "实验室流程试验",
+            "实验室扩大连续试验",
+            "半工业试验",
+            "工业试验",
+            "初步测试研究",
+            "基本测试研究",
+            "详细测试研究",
+        )
+        return (
+            any(stage in compact for stage in stages)
+            and "应" in compact
+            and any(term in compact for term in study_terms)
+        )
+
+    @staticmethod
+    def _is_technical_study_hierarchy_text(text: str) -> bool:
+        compact = re.sub(r"\s+", "", text or "")
+        study_terms = (
+            "类比研究",
+            "工艺矿物学研究",
+            "可选性试验",
+            "实验室流程试验",
+            "实验室扩大连续试验",
+            "半工业试验",
+            "工业试验",
+            "初步测试研究",
+            "基本测试研究",
+            "详细测试研究",
+        )
+        return bool(
+            re.search(r"在[^。；]{0,40}(?:试验|测试)[^。；]{0,16}基础上", compact)
+            and sum(term in compact for term in study_terms) >= 2
+        )
+
     def _select_evidence_hits(
         self,
         hits: list[dict],
@@ -778,6 +841,43 @@ class MiningQAAgent:
                             ),
                         )
                     )
+            if selected:
+                return selected
+        if effective_plan.intent == "technical_requirement_sufficiency":
+            stage_hits = [
+                hit
+                for hit in hits
+                if self._is_technical_stage_requirement_text(
+                    self._hit_evidence_text(hit), question
+                )
+            ]
+            hierarchy_hits = [
+                hit
+                for hit in hits
+                if self._is_technical_study_hierarchy_text(self._hit_evidence_text(hit))
+            ]
+            selected = []
+            if stage_hits:
+                selected.append(
+                    max(
+                        stage_hits,
+                        key=lambda hit: (
+                            float(hit.get("score") or 0.0),
+                            len(self._hit_evidence_text(hit)),
+                        ),
+                    )
+                )
+            if hierarchy_hits:
+                hierarchy = max(
+                    hierarchy_hits,
+                    key=lambda hit: (
+                        "在可选性试验的基础上" in self._hit_evidence_text(hit),
+                        float(hit.get("score") or 0.0),
+                        len(self._hit_evidence_text(hit)),
+                    ),
+                )
+                if hierarchy not in selected:
+                    selected.append(hierarchy)
             if selected:
                 return selected
         if effective_plan.intent == "engineering_distance_lookup" and effective_plan.target_exploration_type:
