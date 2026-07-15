@@ -1,0 +1,192 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1320" viewBox="0 0 1800 1320" role="img" aria-labelledby="title desc">
+  <title id="title">geowiki v3.0.0 系统架构与用户问答处理流程</title>
+  <desc id="desc">展示用户从网页或 API 提问后，经认证、问题理解、分类确认、混合检索、证据校验和回答生成的流程，以及私有知识库、模型服务、补库和运营反馈路径。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 z" fill="#3f5568"/>
+    </marker>
+    <marker id="arrowBlue" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 z" fill="#136f8a"/>
+    </marker>
+    <marker id="arrowOrange" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 z" fill="#b65a17"/>
+    </marker>
+    <style>
+      .canvas { fill: #f7fafc; }
+      .title { font: 700 31px "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; fill: #17324a; }
+      .subtitle { font: 400 15px "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; fill: #52697c; }
+      .section { font: 700 16px "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; fill: #365369; letter-spacing: 0; }
+      .label { font: 700 17px "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; fill: #17324a; }
+      .small { font: 400 13px "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; fill: #37546a; }
+      .tiny { font: 400 12px "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; fill: #466175; }
+      .mono { font: 600 12px "SFMono-Regular", Consolas, monospace; fill: #24526a; }
+      .box { stroke-width: 1.5; rx: 8; ry: 8; }
+      .public { fill: #e8f5f8; stroke: #2d879d; }
+      .api { fill: #eaf6ef; stroke: #32805c; }
+      .private { fill: #fff5e9; stroke: #bd702c; }
+      .model { fill: #f2f0fb; stroke: #7563a8; }
+      .async { fill: #fff0f1; stroke: #b95e68; }
+      .neutral { fill: #ffffff; stroke: #7890a1; }
+      .boundary { fill: #ffffff; fill-opacity: .55; stroke: #b0c1cd; stroke-width: 1.5; stroke-dasharray: 8 6; rx: 14; ry: 14; }
+      .flow { fill: none; stroke: #3f5568; stroke-width: 2.2; marker-end: url(#arrow); }
+      .flow-blue { fill: none; stroke: #136f8a; stroke-width: 2.4; marker-end: url(#arrowBlue); }
+      .flow-orange { fill: none; stroke: #b65a17; stroke-width: 2.2; marker-end: url(#arrowOrange); }
+      .dashed { stroke-dasharray: 6 5; }
+      .line-label { font: 400 12px "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; fill: #52697c; }
+    </style>
+  </defs>
+
+  <rect class="canvas" width="1800" height="1320"/>
+  <text class="title" x="70" y="62">geowiki v3.0.0 系统架构与用户问答处理流程</text>
+  <text class="subtitle" x="70" y="92">一款专注地质领域的百科全搜 · 私有知识库受控检索，不将标准正文暴露给公网</text>
+
+  <rect class="boundary" x="45" y="122" width="1710" height="1030"/>
+  <text class="section" x="70" y="152">公网访问层</text>
+  <rect class="public box" x="75" y="180" width="250" height="112"/>
+  <text class="label" x="102" y="217">用户 / 外部系统</text>
+  <text class="small" x="102" y="244">网页问答、登录、管理后台</text>
+  <text class="small" x="102" y="268">或客户 API 调用</text>
+  <text class="mono" x="102" y="286">Browser · curl · SDK</text>
+
+  <rect class="public box" x="385" y="180" width="250" height="112"/>
+  <text class="label" x="412" y="217">反向代理与静态前端</text>
+  <text class="small" x="412" y="244">SPA、Markdown 渲染、表格</text>
+  <text class="small" x="412" y="268">Nginx 路由 / 限制公网面</text>
+  <text class="mono" x="412" y="286">Nginx · HTML/CSS/JS</text>
+
+  <rect class="boundary" x="695" y="160" width="1010" height="930"/>
+  <text class="section" x="720" y="190">云端应用私有网络</text>
+
+  <rect class="api box" x="730" y="220" width="330" height="122"/>
+  <text class="label" x="757" y="258">geowiki API</text>
+  <text class="small" x="757" y="285">请求编排、会话、回答、来源链接</text>
+  <text class="small" x="757" y="308">基本模式 1 次 / 深度模式 3 次</text>
+  <text class="mono" x="757" y="328">Python · FastAPI · Uvicorn</text>
+
+  <rect class="neutral box" x="1125" y="220" width="245" height="122"/>
+  <text class="label" x="1152" y="258">身份与配额</text>
+  <text class="small" x="1152" y="285">账号、会话、API Key</text>
+  <text class="small" x="1152" y="308">每日额度、审计、反馈</text>
+  <text class="mono" x="1152" y="328">SQLite WAL · scrypt</text>
+
+  <rect class="neutral box" x="1425" y="220" width="245" height="122"/>
+  <text class="label" x="1452" y="258">流量控制</text>
+  <text class="small" x="1452" y="285">API / IP 限流</text>
+  <text class="small" x="1452" y="308">Redis 不可用时降级</text>
+  <text class="mono" x="1452" y="328">Redis · in-memory</text>
+
+  <text class="section" x="730" y="388">用户提问的同步处理主链路</text>
+
+  <rect class="api box" x="730" y="415" width="210" height="126"/>
+  <text class="label" x="752" y="450">1. 访问门控</text>
+  <text class="small" x="752" y="478">认证、限流、领域初筛</text>
+  <text class="small" x="752" y="501">领域外直接拒答</text>
+  <text class="tiny" x="752" y="524">不检索 / 不扣次数</text>
+
+  <rect class="model box" x="980" y="415" width="225" height="126"/>
+  <text class="label" x="1002" y="450">2. 第一语义阶段</text>
+  <text class="small" x="1002" y="478">错别字、口语、否定纠正</text>
+  <text class="small" x="1002" y="501">意图、阶段关系、歧义</text>
+  <text class="mono" x="1002" y="524">DeepSeek Chat API</text>
+
+  <rect class="api box" x="1245" y="415" width="220" height="126"/>
+  <text class="label" x="1267" y="450">3. 分类与确认</text>
+  <text class="small" x="1267" y="478">QueryClassification</text>
+  <text class="small" x="1267" y="501">业务 Schema / 槽位校验</text>
+  <text class="tiny" x="1267" y="524">clarification_id + option_id</text>
+
+  <rect class="async box" x="1510" y="415" width="160" height="126"/>
+  <text class="label" x="1532" y="450">需确认？</text>
+  <text class="small" x="1532" y="478">持久化状态</text>
+  <text class="small" x="1532" y="501">返回候选项</text>
+  <text class="tiny" x="1532" y="524">不检索、不扣次</text>
+
+  <rect class="api box" x="730" y="615" width="235" height="136"/>
+  <text class="label" x="752" y="651">4. 策略化检索规划</text>
+  <text class="small" x="752" y="680">按问题分类锁定文档范围</text>
+  <text class="small" x="752" y="703">领域词典仅做分类内扩展</text>
+  <text class="tiny" x="752" y="728">标准号、文号、数值为保护条件</text>
+
+  <rect class="private box" x="1010" y="590" width="430" height="190"/>
+  <text class="label" x="1035" y="628">5. 私有知识库混合检索</text>
+  <text class="small" x="1035" y="657">Schema 文档过滤 + FTS 条款检索 + KG 关系扩展</text>
+  <text class="small" x="1035" y="683">ANN 语义召回 + RRF 融合排序 + 受控 MMR 去重</text>
+  <text class="small" x="1035" y="709">仅返回少量条款级证据、页码与官方来源链接</text>
+  <text class="mono" x="1035" y="742">FastAPI · SQLite/FTS5 · SQLite KG · USEARCH HNSW</text>
+  <text class="mono" x="1035" y="762">DashScope text-embedding-v4 · private SQLite / ANN index</text>
+
+  <rect class="model box" x="1490" y="615" width="180" height="136"/>
+  <text class="label" x="1512" y="651">6. 证据校验</text>
+  <text class="small" x="1512" y="680">直接性、完整性</text>
+  <text class="small" x="1512" y="703">必要时补充检索</text>
+  <text class="mono" x="1512" y="728">DeepSeek + 规则</text>
+
+  <rect class="api box" x="730" y="840" width="280" height="146"/>
+  <text class="label" x="752" y="877">7. 受证据约束的回答</text>
+  <text class="small" x="752" y="905">短引文、明确结论、官方链接</text>
+  <text class="small" x="752" y="928">定义 / 表格 / 材料 / 权限 / 对比</text>
+  <text class="tiny" x="752" y="956">无证据则如实说明，不用模型常识替代</text>
+
+  <rect class="api box" x="1070" y="840" width="300" height="146"/>
+  <text class="label" x="1092" y="877">深度模式：异步跨文件研究</text>
+  <text class="small" x="1092" y="905">候选语料枚举、逐文件限定检索</text>
+  <text class="small" x="1092" y="928">事实抽取、对比矩阵、覆盖说明</text>
+  <text class="mono" x="1092" y="956">research_tasks · concurrency control</text>
+
+  <rect class="async box" x="1430" y="840" width="240" height="146"/>
+  <text class="label" x="1452" y="877">知识缺口与运营闭环</text>
+  <text class="small" x="1452" y="905">反馈、检索轨迹、补库候选</text>
+  <text class="small" x="1452" y="928">管理员审核后才正式入库</text>
+  <text class="tiny" x="1452" y="956">不在用户请求中直接 OCR</text>
+
+  <rect class="boundary" x="45" y="1180" width="1710" height="105"/>
+  <text class="section" x="70" y="1212">异步知识建设与外部依赖</text>
+  <rect class="private box" x="290" y="1200" width="335" height="58"/>
+  <text class="small" x="312" y="1231">官方平台 / 原始 PDF / 扫描件</text>
+  <text class="mono" x="312" y="1251">std.samr.gov.cn · nrsis.org.cn</text>
+  <rect class="private box" x="700" y="1200" width="335" height="58"/>
+  <text class="small" x="722" y="1231">文档解析与表格识别（后台任务）</text>
+  <text class="mono" x="722" y="1251">PaddleOCR · PP-StructureV3</text>
+  <rect class="async box" x="1110" y="1200" width="335" height="58"/>
+  <text class="small" x="1132" y="1231">候选暂存、人工审核、重建索引</text>
+  <text class="mono" x="1132" y="1251">staging · admin review · ANN rebuild</text>
+  <rect class="neutral box" x="1520" y="1200" width="205" height="58"/>
+  <text class="small" x="1542" y="1231">邮件验证</text>
+  <text class="mono" x="1542" y="1251">AgentMail</text>
+
+  <path class="flow-blue" d="M325 236 H385"/>
+  <path class="flow-blue" d="M635 236 H730"/>
+  <path class="flow" d="M1060 281 H1125"/>
+  <path class="flow" d="M1370 281 H1425"/>
+  <path class="flow" d="M895 342 V415"/>
+  <path class="flow" d="M940 478 H980"/>
+  <path class="flow" d="M1205 478 H1245"/>
+  <path class="flow" d="M1465 478 H1510"/>
+  <path class="flow dashed" d="M1590 541 V570 H1370 V478"/>
+  <text class="line-label" x="1475" y="574">用户选择后继续</text>
+  <path class="flow" d="M835 541 V615"/>
+  <path class="flow-orange" d="M965 683 H1010"/>
+  <path class="flow-orange" d="M1440 683 H1490"/>
+  <path class="flow" d="M1580 751 V790 H870 V840"/>
+  <path class="flow" d="M1580 751 V810 H1220 V840"/>
+  <path class="flow" d="M1490 683 V800 H1550 V840"/>
+  <path class="flow-blue" d="M870 986 V1050 H200 V292"/>
+  <text class="line-label" x="385" y="1038">答案、引用来源、配额与反馈入口</text>
+  <path class="flow-orange dashed" d="M1550 986 V1170 H1278 V1200"/>
+  <path class="flow-orange dashed" d="M625 1229 H700"/>
+  <path class="flow-orange dashed" d="M1035 1229 H1110"/>
+  <path class="flow-orange dashed" d="M1278 1200 V1110 H1225 V780"/>
+  <text class="line-label" x="1140" y="1130">审核后写入私有知识库并重建索引</text>
+  <path class="flow dashed" d="M1615 1200 H1690 V360 H1370 V342"/>
+
+  <rect class="neutral box" x="70" y="112" width="118" height="28"/>
+  <circle cx="87" cy="126" r="5" fill="#2d879d"/><text class="tiny" x="98" y="130">公网</text>
+  <rect class="neutral box" x="198" y="112" width="118" height="28"/>
+  <circle cx="215" cy="126" r="5" fill="#32805c"/><text class="tiny" x="226" y="130">应用逻辑</text>
+  <rect class="neutral box" x="326" y="112" width="118" height="28"/>
+  <circle cx="343" cy="126" r="5" fill="#bd702c"/><text class="tiny" x="354" y="130">私有数据</text>
+  <rect class="neutral box" x="454" y="112" width="118" height="28"/>
+  <circle cx="471" cy="126" r="5" fill="#7563a8"/><text class="tiny" x="482" y="130">模型服务</text>
+  <rect class="neutral box" x="582" y="112" width="128" height="28"/>
+  <circle cx="599" cy="126" r="5" fill="#b95e68"/><text class="tiny" x="610" y="130">异步/审核</text>
+</svg>
