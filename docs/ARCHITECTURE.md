@@ -2,9 +2,9 @@
 
 ## 架构示意图
 
-![geowiki v3.0.3 系统架构与用户问答处理流程](SYSTEM_ARCHITECTURE_DIAGRAM.svg)
+![geowiki v3.0.4 系统架构与用户问答处理流程](SYSTEM_ARCHITECTURE_DIAGRAM.svg)
 
-该图对应当前 v3.0.3 的实际部署和数据边界：公网只访问 Nginx 与应用 API；私有知识库、标准正文、向量索引与知识图谱不对公网开放。SVG 可直接在浏览器、GitHub 或支持图片预览的文件管理器中打开。
+该图对应当前 v3.0.4 的实际部署和数据边界：公网只访问 Nginx 与应用 API；私有知识库、标准正文、向量索引与知识图谱不对公网开放。SVG 可直接在浏览器、GitHub 或支持图片预览的文件管理器中打开。
 
 ## 1. 目标架构
 

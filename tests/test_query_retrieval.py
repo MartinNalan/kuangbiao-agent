@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +14,8 @@ from mining_qa.knowledge_store import (
     authority_evidence_quote,
     connect,
     row_has_technical_requirement_sufficiency_evidence,
+    is_policy_condition_query,
+    policy_condition_row_priority,
     table_quote,
     table_references,
     transfer_evidence_quote,
@@ -1340,6 +1343,34 @@ class TechnicalStageRequirementTests(unittest.TestCase):
         self.assertIn("6.4.4", answer)
         self.assertIn("上表已覆盖本题应比较的全部详查情形", answer)
         self.assertNotIn("请先确认", answer)
+
+
+class PolicyConditionRankingTests(unittest.TestCase):
+    QUESTION = "采矿期间累计查明矿产资源量发生重大变化,是否需要评审备案"
+
+    def test_direct_policy_clause_outranks_generic_license_clause(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        direct = conn.execute(
+            "select ? as text, ? as standard_no",
+            (
+                "其他矿产在采矿期间累计查明矿产资源量发生重大变化的，应当编制报告，申请评审备案。",
+                "自然资规〔2023〕6号",
+            ),
+        ).fetchone()
+        generic = conn.execute(
+            "select ? as text, ? as standard_no",
+            (
+                "矿业权人应当按照经批准的开采方案进行开采作业，开采方式发生重大变化时应当调整方案。",
+                "国令第839号",
+            ),
+        ).fetchone()
+
+        self.assertTrue(is_policy_condition_query(self.QUESTION))
+        self.assertLess(
+            policy_condition_row_priority(direct, self.QUESTION),
+            policy_condition_row_priority(generic, self.QUESTION),
+        )
 
 
 if __name__ == "__main__":

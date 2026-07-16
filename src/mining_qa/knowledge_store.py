@@ -787,6 +787,86 @@ def is_policy_management_query(query: str) -> bool:
     )
 
 
+def is_policy_condition_query(query: str) -> bool:
+    return (
+        any(
+            term in query
+            for term in (
+                "是否需要",
+                "是否应当",
+                "是否必须",
+                "需不需要",
+                "要不要",
+                "应否",
+            )
+        )
+        and any(
+            term in query
+            for term in (
+                "评审备案",
+                "备案",
+                "审批",
+                "登记",
+                "许可",
+                "申请",
+                "出让",
+                "转让",
+                "延续",
+            )
+        )
+    )
+
+
+def policy_condition_action_terms(query: str) -> tuple[str, ...]:
+    return tuple(
+        term
+        for term in (
+            "评审备案",
+            "备案",
+            "审批",
+            "登记",
+            "许可",
+            "申请",
+            "出让",
+            "转让",
+            "延续",
+        )
+        if term in query
+    )
+
+
+def policy_condition_context_terms(query: str) -> tuple[str, ...]:
+    return tuple(
+        term
+        for term in (
+            "累计查明",
+            "重大变化",
+            "变化量",
+            "采矿期间",
+            "许可证",
+            "发证",
+            "变更",
+        )
+        if term in query
+    )
+
+
+def policy_condition_row_priority(row: sqlite3.Row, query: str) -> tuple[int, int, int, str]:
+    text = str(row["text"] or "")
+    action_terms = policy_condition_action_terms(query)
+    primary_action = action_terms[0] if action_terms else ""
+    context_matches = sum(
+        term in text for term in policy_condition_context_terms(query)
+    )
+    has_normative_verb = any(term in text for term in ("应当", "不得", "可以", "应", "需"))
+    return (
+        0 if primary_action and primary_action in text else 1,
+        -context_matches,
+        0 if has_normative_verb else 1,
+        str(row["standard_no"] or ""),
+    )
+
+
 def is_policy_authority_query(query: str) -> bool:
     return understand_query(query).intent == "authority_responsibility"
 
@@ -1507,8 +1587,15 @@ def query_plan_score(row: sqlite3.Row, plan: QueryPlan) -> float:
     section = row["section_path"] or ""
     text = row["text"] or ""
     context = f"{title} {section} {text}"
+    policy_condition_document = (
+        is_policy_condition_query(plan.normalized_query)
+        and row["document_type"] in {"law", "regulation", "department_rule", "policy_document"}
+    )
     if plan.document_types:
-        score += 3.0 if row["document_type"] in plan.document_types else -10.0
+        if row["document_type"] in plan.document_types:
+            score += 3.0
+        elif not policy_condition_document:
+            score -= 10.0
     score += sum(2.0 for term in plan.subject_terms if term and term in context)
     score += sum(2.5 for term in plan.required_terms if term and term in context)
     score += sum(1.0 for term in plan.alternative_terms if term and term in context)
@@ -1685,6 +1772,38 @@ def intent_score(row: sqlite3.Row, query: str, plan: QueryPlan | None = None) ->
             score += 1.5
         if document_type in {"standard", "national_standard", "industry_standard", "guidance"}:
             score += 1.0
+    if is_policy_condition_query(query):
+        text = row["text"] or ""
+        title = row["title"] or ""
+        action_terms = policy_condition_action_terms(query)
+        primary_action = action_terms[0] if action_terms else ""
+        context_match_count = sum(
+            term in text for term in policy_condition_context_terms(query)
+        )
+        policy_document = document_type in {
+            "law",
+            "regulation",
+            "department_rule",
+            "policy_document",
+        }
+        direct_normative_clause = (
+            any(term in text for term in ("应当", "不得", "可以", "应", "需"))
+            and bool(primary_action)
+            and primary_action in text
+        )
+        if policy_document:
+            score += 5.0
+            if direct_normative_clause:
+                score += 7.0
+            score += min(10.0, context_match_count * 2.5)
+        elif document_type in {
+            "policy_attachment",
+            "service_guide",
+            "administrative_service_guide",
+        }:
+            score += 2.5
+        if any(term in title for term in ("解读", "问答", "释义")):
+            score -= 4.0
     if (plan and plan.intent == "authority_responsibility") or is_policy_authority_query(query):
         text = row["text"] or ""
         title = row["title"] or ""
@@ -1863,6 +1982,8 @@ class KnowledgeStore:
             placeholders = ",".join("?" for _ in statuses)
             base_where.append(f"d.status in ({placeholders})")
             base_params.extend(statuses)
+        policy_base_where = list(base_where)
+        policy_base_params = list(base_params)
         requested_doc_types = filters.get("document_types") or []
         if isinstance(requested_doc_types, str):
             requested_doc_types = [requested_doc_types]
@@ -1932,6 +2053,13 @@ class KnowledgeStore:
                 plan,
                 base_where,
                 base_params,
+            )
+            self._add_policy_condition_candidates(
+                conn,
+                candidate_rows,
+                plan,
+                policy_base_where,
+                policy_base_params,
             )
 
             if not self._evidence_sufficient_without_vectors(candidate_rows, plan, scope_applied):
@@ -2454,6 +2582,44 @@ class KnowledgeStore:
         ).fetchall()
         for rank, row in enumerate(rows, start=1):
             self._add_candidate(candidate_rows, row, "reference", rank, 1.0)
+
+    def _add_policy_condition_candidates(
+        self,
+        conn: sqlite3.Connection,
+        candidate_rows: dict[str, dict[str, Any]],
+        plan: QueryPlan,
+        base_where: list[str],
+        base_params: list[Any],
+    ) -> None:
+        query = plan.normalized_query
+        action_terms = policy_condition_action_terms(query)
+        if not is_policy_condition_query(query) or not action_terms:
+            return
+        context_terms = policy_condition_context_terms(query)
+        action_where = " or ".join("c.text like ?" for _ in action_terms)
+        params: list[Any] = [*base_params, *(f"%{term}%" for term in action_terms)]
+        context_where = ""
+        if context_terms:
+            context_where = " and (" + " or ".join("c.text like ?" for _ in context_terms) + ")"
+            params.extend(f"%{term}%" for term in context_terms)
+        rows = conn.execute(
+            f"""
+            select c.*, d.document_type, d.status, d.official_url, d.source_platform, 0.0 as rank
+            from chunks c
+            join documents d on d.document_id = c.document_id
+            where {' and '.join(base_where)}
+              and d.document_type in ('law', 'regulation', 'department_rule', 'policy_document')
+              and ({action_where})
+              {context_where}
+            order by case when c.text like '%应当%' then 0 else 1 end,
+                     coalesce(d.standard_no, ''), c.clause_no
+            limit 20
+            """,
+            params,
+        ).fetchall()
+        rows = sorted(rows, key=lambda row: policy_condition_row_priority(row, query))
+        for rank, row in enumerate(rows, start=1):
+            self._add_candidate(candidate_rows, row, "policy_reference", rank, 1.0)
 
     def _candidate_fusion_score(self, candidate: dict[str, Any], plan: QueryPlan) -> float:
         row = candidate["row"]
