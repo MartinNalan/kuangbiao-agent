@@ -533,6 +533,7 @@ class QuestionResolver:
             "regulation_lookup",
             "technical_requirement_sufficiency",
             "technical_test_conformity_verification",
+            "technical_stage_requirement",
         }
 
     def _apply_model_intent(
@@ -631,6 +632,7 @@ class QuestionResolver:
             plan.intent in {
                 "technical_requirement_sufficiency",
                 "technical_test_conformity_verification",
+                "technical_stage_requirement",
             }
             and classification.primary_intent == "technical_method"
         ):

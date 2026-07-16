@@ -12,6 +12,12 @@ from .query_classification import (
     classification_from_payload,
     legacy_intent_for_primary,
 )
+from .technical_stage_requirements import (
+    TECHNICAL_REQUIREMENT_STANDARD_NO,
+    TECHNICAL_REQUIREMENT_STANDARD_TITLE,
+    stage_requirement_clauses,
+    stage_section_from_text,
+)
 
 
 EXPLORATION_TYPE_LABELS = {
@@ -148,6 +154,17 @@ TECHNICAL_TEST_CONFORMITY_TERMS = (
     "记录",
     "符合半工业试验要求",
     "符合实验室扩大连续试验要求",
+)
+TECHNICAL_STAGE_REQUIREMENT_TERMS = (
+    "矿石加工选冶技术性能",
+    "矿石选冶技术性能",
+    "加工选冶技术性能",
+    "矿石加工选冶试验",
+    "矿石选冶试验",
+    "选冶试验",
+    "选冶要求",
+    "加工选冶要求",
+    "试验研究程度",
 )
 TECHNICAL_STUDY_TERMS = (
     "类比研究",
@@ -457,6 +474,7 @@ DEFAULT_DOCUMENT_TYPES: dict[str, tuple[str, ...]] = {
     "definition_explanation": ("standard", "national_standard", "industry_standard"),
     "technical_requirement_sufficiency": ("standard", "national_standard", "industry_standard", "guidance"),
     "technical_test_conformity_verification": ("standard", "national_standard", "industry_standard", "guidance"),
+    "technical_stage_requirement": ("standard", "national_standard", "industry_standard", "guidance"),
 }
 
 
@@ -477,6 +495,7 @@ PROTECTED_QUERY_INTENTS = {
     "definition_explanation",
     "technical_requirement_sufficiency",
     "technical_test_conformity_verification",
+    "technical_stage_requirement",
 }
 
 
@@ -769,6 +788,7 @@ def query_plan_from_payload(query: str, payload: dict[str, Any] | None) -> Query
         plan.intent in {
             "technical_requirement_sufficiency",
             "technical_test_conformity_verification",
+            "technical_stage_requirement",
         }
         and classification.primary_intent == "technical_method"
     ):
@@ -1044,6 +1064,12 @@ def understand_query(query: str) -> QueryPlan:
         any(term in normalized for term in TECHNICAL_STUDY_TERMS)
         and any(term in normalized for term in TECHNICAL_TEST_CONFORMITY_TERMS)
     )
+    has_technical_stage_requirement = (
+        any(term in normalized for term in EXPLORATION_STAGE_TERMS)
+        and any(term in normalized for term in TECHNICAL_STAGE_REQUIREMENT_TERMS)
+        and not has_technical_requirement_sufficiency
+        and not has_technical_test_conformity
+    )
     has_authority = any(term in normalized for term in AUTHORITY_INTENT_TERMS) and any(
         term in normalized for term in AUTHORITY_TOPIC_TERMS
     )
@@ -1216,6 +1242,20 @@ def understand_query(query: str) -> QueryPlan:
             candidate_titles.append("铁、锰、铬")
             standards.append("DZ/T 0200-2020")
         retrieval_terms.extend([normalized, "基本分析项目", "化学分析项目"])
+    elif has_technical_stage_requirement:
+        intent = "technical_stage_requirement"
+        stage_section = stage_section_from_text(normalized)
+        retrieval_terms.extend(
+            [
+                normalized,
+                TECHNICAL_REQUIREMENT_STANDARD_TITLE,
+                TECHNICAL_REQUIREMENT_STANDARD_NO,
+                stage_section or "",
+                *stage_requirement_clauses(normalized),
+                "资源量规模",
+                "矿石加工选冶难易程度",
+            ]
+        )
     elif has_technical_test_conformity:
         intent = "technical_test_conformity_verification"
         retrieval_terms.extend(

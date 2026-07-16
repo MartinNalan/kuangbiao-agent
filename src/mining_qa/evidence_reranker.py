@@ -25,6 +25,7 @@ DETERMINISTIC_EVIDENCE_INTENTS = {
     "exploration_type_factors",
     "basic_analysis_items",
     "technical_requirement_sufficiency",
+    "technical_stage_requirement",
 }
 
 STRUCTURAL_GUARD_INTENTS = {

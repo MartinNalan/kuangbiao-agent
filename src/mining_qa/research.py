@@ -25,6 +25,12 @@ from .query_understanding import (
     query_plan_from_payload,
     understand_query,
 )
+from .technical_stage_requirements import (
+    TECHNICAL_REQUIREMENT_STANDARD_NO,
+    TECHNICAL_REQUIREMENT_STANDARD_TITLE,
+    stage_requirement_clauses,
+    stage_requirement_label,
+)
 from .schemas import (
     Limitations,
     QuotaInfo,
@@ -255,6 +261,8 @@ class ResearchPlanner:
             canonical_question=normalize_user_query(
                 str(payload.get("canonical_question") or fallback.canonical_question)
             )[:600],
+            intent=fallback.intent,
+            strategy=fallback.strategy,
             anchor_titles=_clean_list(payload.get("anchor_titles"), limit=8) or fallback.anchor_titles,
             anchor_standard_numbers=_clean_list(payload.get("anchor_standard_numbers"), limit=8)
             or fallback.anchor_standard_numbers,
@@ -343,6 +351,22 @@ class ResearchPlanner:
                     "围绕探矿权转采矿权及其正向等价表述检索一般政策、分矿种特殊规定和报告类型限制。"
                 ),
             )
+        if base.intent == "technical_stage_requirement":
+            fallback = ResearchPlanner._fallback(question, base)
+            return replace(
+                plan,
+                intent=fallback.intent,
+                strategy=fallback.strategy,
+                anchor_titles=fallback.anchor_titles,
+                anchor_standard_numbers=fallback.anchor_standard_numbers,
+                corpus_title_terms=fallback.corpus_title_terms,
+                corpus_standard_numbers=fallback.corpus_standard_numbers,
+                document_types=fallback.document_types,
+                comparison_dimensions=fallback.comparison_dimensions,
+                evidence_queries=fallback.evidence_queries,
+                required_evidence_groups=fallback.required_evidence_groups,
+                scope_note=fallback.scope_note,
+            )
         focus = _projection_focus(question)
         if not focus:
             return plan
@@ -404,6 +428,9 @@ class ResearchPlanner:
                 "national_standard",
                 "industry_standard",
             ]
+        elif base.intent == "technical_stage_requirement":
+            title_terms.append(TECHNICAL_REQUIREMENT_STANDARD_TITLE)
+            document_types = ["standard", "national_standard", "industry_standard"]
         elif any(term in question for term in ("分矿种规范", "单矿种规范", "各矿种规范", "矿种勘查规范")):
             title_terms.append("矿产地质勘查规范")
             document_types = ["standard", "national_standard", "industry_standard"]
@@ -464,6 +491,26 @@ class ResearchPlanner:
                 "不能替代探矿权转采矿权 地质勘查报告",
             )
             required_evidence_groups = ()
+        elif base.intent == "technical_stage_requirement":
+            stage_label = stage_requirement_label(base.normalized_query)
+            clauses = stage_requirement_clauses(base.normalized_query)
+            dimensions = (
+                "资源量规模",
+                "矿石加工选冶难易程度",
+                "工艺矿物学研究程度",
+                "矿石加工选冶试验或物化性能测试要求",
+            )
+            evidence_queries = (
+                " ".join(
+                    (
+                        TECHNICAL_REQUIREMENT_STANDARD_NO,
+                        stage_label,
+                        *clauses,
+                        "资源量规模 矿石加工选冶难易程度",
+                    )
+                ),
+            )
+            required_evidence_groups = ()
         elif "选冶" in question or "加工技术性能试验" in question:
             dimensions = (
                 "勘查阶段对应的试验研究程度",
@@ -504,6 +551,8 @@ class ResearchPlanner:
                 if base.intent == "service_materials"
                 else "relation_discovery"
                 if base.intent == "exploration_to_mining_eligibility"
+                else "requirements_matrix"
+                if base.intent == "technical_stage_requirement"
                 else "cross_document_comparison"
             ),
             anchor_titles=tuple(
@@ -527,6 +576,8 @@ class ResearchPlanner:
                         *base.standard_numbers,
                     )
                     if base.intent == "exploration_to_mining_eligibility"
+                    else (TECHNICAL_REQUIREMENT_STANDARD_NO,)
+                    if base.intent == "technical_stage_requirement"
                     else (
                         *PROJECTION_REFERENCE_STANDARD_NUMBERS,
                         *(number for number in base.standard_numbers if number in question),
@@ -960,6 +1011,8 @@ class ResearchTaskRunner:
                 facts = self._transfer_facts(indexed_sources)
             elif plan.intent == "projection_comparison":
                 facts = self._projection_facts(indexed_sources, task["retrieval_question"])
+            elif plan.intent == "technical_stage_requirement":
+                facts = self._technical_stage_requirement_facts(indexed_sources)
             else:
                 batch_size = settings.research_analysis_batch_size
                 for start in range(0, len(indexed_sources), batch_size):
@@ -1125,6 +1178,7 @@ class ResearchTaskRunner:
                         if plan.intent in {
                             "service_materials",
                             "exploration_to_mining_eligibility",
+                            "technical_stage_requirement",
                         }
                         else "cross_document_audit"
                     ),
@@ -1141,7 +1195,13 @@ class ResearchTaskRunner:
                 filters = dict(task.get("filters") or {})
                 filters["document_id"] = document_id
                 try:
-                    top_k = 30 if plan.intent == "service_materials" else 6
+                    top_k = (
+                        30
+                        if plan.intent == "service_materials"
+                        else 20
+                        if plan.intent == "technical_stage_requirement"
+                        else 6
+                    )
                     response = await knowledge.search(
                         combined_query,
                         filters,
@@ -1157,6 +1217,8 @@ class ResearchTaskRunner:
                             "exploration_to_mining_eligibility",
                             "projection_comparison",
                         }
+                        else 8
+                        if plan.intent == "technical_stage_requirement"
                         else 2
                     )
                     sources = [
@@ -1254,6 +1316,29 @@ class ResearchTaskRunner:
                     "classification": "special_provision",
                     "dimension": "申请材料与适用条件",
                     "finding": quote,
+                    "source_indices": [index],
+                }
+            )
+        return facts
+
+    @staticmethod
+    def _technical_stage_requirement_facts(
+        indexed_sources: list[tuple[int, Source, str]],
+    ) -> list[dict[str, Any]]:
+        facts: list[dict[str, Any]] = []
+        for index, source, document_id in indexed_sources:
+            if re.sub(r"\s+", "", source.standard_no or "").upper() != (
+                TECHNICAL_REQUIREMENT_STANDARD_NO.replace(" ", "").upper()
+            ):
+                continue
+            if not re.fullmatch(r"6\.[3-5]\.[1-4]", source.chapter or ""):
+                continue
+            facts.append(
+                {
+                    "document_id": document_id,
+                    "classification": "special_provision",
+                    "dimension": "条件化试验研究要求",
+                    "finding": normalize_user_query(source.quote or "")[:900],
                     "source_indices": [index],
                 }
             )
@@ -1628,12 +1713,14 @@ class ResearchTaskRunner:
             return self._render_transfer_answer(sources)
         if plan.intent == "projection_comparison":
             return self._render_projection_comparison(question, facts, sources)
+        if plan.intent == "technical_stage_requirement":
+            return self._render_technical_stage_requirement_answer(question, sources)
         summary = "本次研究已按知识库候选范围逐份检索，并仅使用命中的直接条款形成下列比较结果。"
         document_count = len({fact.get("document_id") for fact in facts if fact.get("document_id")})
         if document_count:
             summary = (
-                f"本次研究在 {document_count} 份文件中形成了可回溯到直接条款的比较事实。"
-                "下表分别列出所依据的工程间距、外推比例和适用条件；相同数值不代表适用前提相同。"
+                f"本次研究在 {document_count} 份文件中形成了可回溯到直接条款的结构化事实。"
+                "下表按当前问题的比较维度列出直接依据和适用条件。"
             )
         if plan.intent == "projection_comparison" and facts:
             has_finite = any(fact.get("dimension") == "有限外推规则" for fact in facts)
@@ -1747,6 +1834,71 @@ class ResearchTaskRunner:
             )
 
         return "\n".join(lines).strip()
+
+    @staticmethod
+    def _stage_requirement_quote(text: str, clause: str) -> str:
+        compact = re.sub(r"\s+", " ", text or "").strip()
+        compact = re.sub(r"-\s*\d+\s*[一二三四五六七八九十]+", "", compact)
+        compact = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", compact)
+        section = clause.rsplit(".", 1)[0]
+        next_section = str(int(section.split(".")[0]) + 1)
+        match = re.search(
+            rf"({re.escape(clause)}\s+.*?)(?=\s+{re.escape(section)}\.[0-9]+\s|\s+{re.escape(next_section)}\.\d|$)",
+            compact,
+        )
+        return match.group(1).strip() if match else compact
+
+    @staticmethod
+    def _split_stage_requirement_quote(quote: str, clause: str) -> tuple[str, str]:
+        text = re.sub(r"\s+", " ", quote or "").strip()
+        text = re.sub(rf"^{re.escape(clause)}\s*", "", text)
+        if "，在" in text:
+            condition, requirement = text.split("，在", 1)
+            return condition.strip(), f"在{requirement.strip()}"
+        return text or "相关条件", "见该条款原文"
+
+    @classmethod
+    def _render_technical_stage_requirement_answer(
+        cls,
+        question: str,
+        sources: list[Source],
+    ) -> str:
+        expected_clauses = stage_requirement_clauses(question)
+        by_clause = {
+            source.chapter: source
+            for source in sources
+            if re.sub(r"\s+", "", source.standard_no or "").upper()
+            == TECHNICAL_REQUIREMENT_STANDARD_NO.replace(" ", "").upper()
+        }
+        if not expected_clauses or not all(clause in by_clause for clause in expected_clauses):
+            return (
+                "**研究结论**\n\n"
+                "未取得该阶段完整的条件矩阵条款，不能仅凭单条或章节标题概括技术要求。"
+            )
+        lines = [
+            "**研究结论**",
+            "",
+            f"{stage_requirement_label(question)}矿石加工选冶技术性能要求取决于资源量规模和矿石加工选冶难易程度，"
+            "不能仅按矿种给出一个统一试验等级。",
+            "",
+            f"依据 **{TECHNICAL_REQUIREMENT_STANDARD_NO}《{TECHNICAL_REQUIREMENT_STANDARD_TITLE}》**，"
+            "完整条件矩阵如下：",
+            "",
+            "| 资源量规模与矿石类型 | 试验研究要求 | 依据条款 |",
+            "| --- | --- | --- |",
+        ]
+        for clause in expected_clauses:
+            quote = cls._stage_requirement_quote(by_clause[clause].quote or "", clause)
+            condition, requirement = cls._split_stage_requirement_quote(quote, clause)
+            lines.append(f"| {_markdown_cell(condition)} | {_markdown_cell(requirement)} | {clause} |")
+        lines.extend(
+            [
+                "",
+                "若补充资源量规模及矿石属于易选、较易选还是难选/新类型，可据此确定唯一适用行；"
+                "在此之前，上表已覆盖该阶段的全部条件组合。",
+            ]
+        )
+        return "\n".join(lines)
 
     @classmethod
     def _render_projection_comparison(

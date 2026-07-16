@@ -1304,5 +1304,43 @@ class TechnicalRequirementEvidenceTests(unittest.TestCase):
         )
 
 
+class TechnicalStageRequirementTests(unittest.TestCase):
+    QUESTION = "锂矿在详查阶段，对于矿石加工选冶技术性能的要求是怎样的？"
+
+    def _source(self, clause: str, quote: str) -> Source:
+        return Source(
+            title="矿产勘查矿石加工选冶技术性能试验研究程度要求",
+            standard_no="DZ/T 0340-2020",
+            chapter=clause,
+            quote=quote,
+            source_type="local_kb",
+            text_access="ocr_text",
+        )
+
+    def test_stage_requirement_returns_a_condition_matrix_without_clarification(self) -> None:
+        plan = understand_query(self.QUESTION)
+        sources = [
+            self._source("6.4.1", "6.4.1 小型资源量规模易选矿石，在工艺矿物学基本研究的基础上，进行类比研究，必要时进行可选性试验。"),
+            self._source("6.4.2", "6.4.2 大中型资源量规模易选矿石或中小型资源量规模较易选矿石，在工艺矿物学基本研究的基础上，进行可选性试验，必要时进行实验室流程试验。"),
+            self._source("6.4.3", "6.4.3 大型资源量规模较易选矿石或中小型资源量规模难选矿石，在工艺矿物学基本研究的基础上，进行实验室流程试验。"),
+            self._source("6.4.4", "6.4.4 大型资源量规模难选矿石，在工艺矿物学详细研究的基础上，进行实验室流程试验，必要时进行实验室扩大连续试验。"),
+        ]
+        agent = object.__new__(MiningQAAgent)
+
+        self.assertEqual(plan.intent, "technical_stage_requirement")
+        self.assertIn(plan.intent, PROTECTED_QUERY_INTENTS)
+        self.assertEqual(
+            agent._evaluate_evidence(self.QUESTION, {"has_clause_level_evidence": True}, sources, plan),
+            (True, True),
+        )
+        answer = agent._fast_answer(self.QUESTION, sources, plan) or ""
+
+        self.assertIn("| 资源量规模与矿石类型 | 试验研究要求 | 依据条款 |", answer)
+        self.assertIn("6.4.1", answer)
+        self.assertIn("6.4.4", answer)
+        self.assertIn("上表已覆盖本题应比较的全部详查情形", answer)
+        self.assertNotIn("请先确认", answer)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -33,6 +33,12 @@ from .technical_test_hierarchy import (
     levels_in_text,
     required_level_from_sufficiency_question,
 )
+from .technical_stage_requirements import (
+    TECHNICAL_REQUIREMENT_STANDARD_NO,
+    TECHNICAL_REQUIREMENT_STANDARD_TITLE,
+    stage_requirement_clauses,
+    stage_requirement_label,
+)
 from .web_supplement import WebSupplement
 
 
@@ -63,6 +69,7 @@ DETERMINISTIC_FAST_INTENTS = {
     "projection_comparison",
     "definition_explanation",
     "technical_requirement_sufficiency",
+    "technical_stage_requirement",
 }
 SYSTEM_PROMPT = """你是矿产资源标准知识问答 agent。
 
@@ -687,6 +694,17 @@ class MiningQAAgent:
             )
             return found, found
 
+        if effective_plan.intent == "technical_stage_requirement":
+            expected_clauses = set(stage_requirement_clauses(question))
+            found_clauses = {
+                source.chapter
+                for source in sources
+                if re.sub(r"\s+", "", source.standard_no or "").upper()
+                == TECHNICAL_REQUIREMENT_STANDARD_NO.replace(" ", "").upper()
+            }
+            found = bool(expected_clauses) and expected_clauses.issubset(found_clauses)
+            return found, found
+
         validators = {
             "engineering_distance_lookup": self._is_engineering_distance_source,
             "authority_responsibility": self._is_policy_authority_source,
@@ -937,6 +955,30 @@ class MiningQAAgent:
                 )
                 if hierarchy not in selected:
                     selected.append(hierarchy)
+            if selected:
+                return selected
+        if effective_plan.intent == "technical_stage_requirement":
+            expected_clauses = stage_requirement_clauses(question)
+            selected = []
+            for clause in expected_clauses:
+                candidates = [
+                    hit
+                    for hit in hits
+                    if re.sub(r"\s+", "", str(hit.get("standard_no") or "")).upper()
+                    == TECHNICAL_REQUIREMENT_STANDARD_NO.replace(" ", "").upper()
+                    and str(hit.get("clause_no") or hit.get("section_path") or "") == clause
+                ]
+                if candidates:
+                    selected.append(
+                        max(
+                            candidates,
+                            key=lambda hit: (
+                                "reference" in (hit.get("hit_type") or []),
+                                float(hit.get("score") or 0.0),
+                                len(self._hit_evidence_text(hit)),
+                            ),
+                        )
+                    )
             if selected:
                 return selected
         if effective_plan.intent == "engineering_distance_lookup" and effective_plan.target_exploration_type:
@@ -1761,6 +1803,38 @@ class MiningQAAgent:
                 )
                 return "\n".join(lines)
 
+        if effective_plan.intent == "technical_stage_requirement":
+            expected_clauses = stage_requirement_clauses(question)
+            by_clause = {
+                source.chapter: source
+                for source in sources
+                if re.sub(r"\s+", "", source.standard_no or "").upper()
+                == TECHNICAL_REQUIREMENT_STANDARD_NO.replace(" ", "").upper()
+            }
+            if expected_clauses and all(clause in by_clause for clause in expected_clauses):
+                lines = [
+                    f"{stage_requirement_label(question)}矿石加工选冶技术性能要求，"
+                    "不能仅按矿种给出一个统一试验等级；应同时按资源量规模和矿石加工选冶难易程度确定。",
+                    "",
+                    f"依据 **{TECHNICAL_REQUIREMENT_STANDARD_NO}《{TECHNICAL_REQUIREMENT_STANDARD_TITLE}》**，"
+                    "当前条件下应按下表选择对应要求：",
+                    "",
+                    "| 资源量规模与矿石类型 | 试验研究要求 | 依据条款 |",
+                    "| --- | --- | --- |",
+                ]
+                for clause in expected_clauses:
+                    quote = self._stage_requirement_quote(by_clause[clause].quote or "", clause)
+                    condition, requirement = self._split_stage_requirement_quote(quote, clause)
+                    lines.append(f"| {condition} | {requirement} | {clause} |")
+                lines.extend(
+                    [
+                        "",
+                        "要落到唯一一行，需要补充资源量规模以及矿石属于易选、较易选还是难选/新类型；"
+                        "在补充前，上表已覆盖本题应比较的全部详查情形。",
+                    ]
+                )
+                return "\n".join(lines)
+
         if effective_plan.intent == "projection_numeric_rule":
             source = next((item for item in sources if self._is_projection_numeric_source(item)), None)
             if source:
@@ -2165,6 +2239,27 @@ class MiningQAAgent:
             return "\n".join(lines)
 
         return None
+
+    @staticmethod
+    def _stage_requirement_quote(text: str, clause: str) -> str:
+        compact = re.sub(r"\s+", " ", text or "").strip()
+        compact = re.sub(r"-\s*\d+\s*[一二三四五六七八九十]+", "", compact)
+        compact = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", compact)
+        section = clause.rsplit(".", 1)[0]
+        match = re.search(
+            rf"({re.escape(clause)}\s+.*?)(?=\s+{re.escape(section)}\.[0-9]+\s|\s+{re.escape(str(int(section.split('.')[0]) + 1))}\.\d|$)",
+            compact,
+        )
+        return match.group(1).strip() if match else compact
+
+    @staticmethod
+    def _split_stage_requirement_quote(quote: str, clause: str) -> tuple[str, str]:
+        text = re.sub(r"\s+", " ", quote or "").strip()
+        text = re.sub(rf"^{re.escape(clause)}\s*", "", text)
+        if "，在" in text:
+            condition, requirement = text.split("，在", 1)
+            return condition.strip(), f"在{requirement.strip()}"
+        return text or "相关条件", "见该条款原文"
 
     @staticmethod
     def _definition_term_from_text(text: str, plan: QueryPlan) -> str | None:

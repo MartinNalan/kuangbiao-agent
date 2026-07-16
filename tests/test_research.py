@@ -280,6 +280,21 @@ class ResearchPlannerTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    async def test_stage_requirement_plan_keeps_matrix_scope_after_model_planning(self) -> None:
+        question = "锂矿在详查阶段，对于矿石加工选冶技术性能的要求是怎样的？"
+        planner = ResearchPlanner(
+            Settings(OPENAI_API_KEY="configured"),
+            GenericPlannerLLM(),  # type: ignore[arg-type]
+        )
+
+        plan = await planner.plan(question)
+
+        self.assertEqual(plan.intent, "technical_stage_requirement")
+        self.assertEqual(plan.strategy, "requirements_matrix")
+        self.assertEqual(plan.anchor_standard_numbers, ("DZ/T 0340-2020",))
+        self.assertEqual(plan.corpus_title_terms, ("矿产勘查矿石加工选冶技术性能试验研究程度要求",))
+        self.assertIn("6.4.1", plan.evidence_queries[0])
+
 
 class ResearchAnalyzerTests(unittest.IsolatedAsyncioTestCase):
     async def test_source_indices_govern_internal_document_identity(self) -> None:
@@ -548,6 +563,30 @@ class ResearchAnalyzerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("**对比结果**", answer)
         self.assertIn("| 文件 | 判定 | 比较维度 | 具体发现 | 依据条款 |", answer)
         self.assertNotIn("**代表性直接依据**", answer)
+        self.assertNotIn("工程间距、外推比例", answer)
+
+    async def test_stage_requirement_rendering_uses_a_condition_matrix(self) -> None:
+        question = "锂矿在详查阶段，对于矿石加工选冶技术性能的要求是怎样的？"
+        sources = [
+            Source(title="矿产勘查矿石加工选冶技术性能试验研究程度要求", standard_no="DZ/T 0340-2020", chapter="6.4.1", quote="6.4.1 小型资源量规模易选矿石，在工艺矿物学基本研究的基础上，进行类比研究。", source_type="local_kb", text_access="ocr_text"),
+            Source(title="矿产勘查矿石加工选冶技术性能试验研究程度要求", standard_no="DZ/T 0340-2020", chapter="6.4.2", quote="6.4.2 大中型资源量规模易选矿石或中小型资源量规模较易选矿石，在工艺矿物学基本研究的基础上，进行可选性试验。", source_type="local_kb", text_access="ocr_text"),
+            Source(title="矿产勘查矿石加工选冶技术性能试验研究程度要求", standard_no="DZ/T 0340-2020", chapter="6.4.3", quote="6.4.3 大型资源量规模较易选矿石或中小型资源量规模难选矿石，在工艺矿物学基本研究的基础上，进行实验室流程试验。", source_type="local_kb", text_access="ocr_text"),
+            Source(title="矿产勘查矿石加工选冶技术性能试验研究程度要求", standard_no="DZ/T 0340-2020", chapter="6.4.4", quote="6.4.4 大型资源量规模难选矿石，在工艺矿物学详细研究的基础上，进行实验室流程试验。", source_type="local_kb", text_access="ocr_text"),
+        ]
+        answer = await ResearchTaskRunner()._render_answer(
+            question,
+            ResearchPlanner._fallback(question),
+            [],
+            sources,
+            DisabledResearchLLM(),  # type: ignore[arg-type]
+            Settings(),
+        )
+
+        self.assertIn("| 资源量规模与矿石类型 | 试验研究要求 | 依据条款 |", answer)
+        self.assertIn("6.4.1", answer)
+        self.assertIn("6.4.4", answer)
+        self.assertNotIn("工程间距", answer)
+        self.assertNotIn("外推比例", answer)
 
     async def test_transfer_answer_uses_relation_sections_without_internal_ids_or_table(self) -> None:
         sources = [

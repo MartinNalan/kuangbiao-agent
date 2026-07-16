@@ -43,6 +43,11 @@ from .technical_test_hierarchy import (
     highest_level_in_text,
     required_level_from_sufficiency_question,
 )
+from .technical_stage_requirements import (
+    TECHNICAL_REQUIREMENT_STANDARD_NO,
+    stage_requirement_clauses,
+    stage_section_from_text,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -827,6 +832,20 @@ def query_terms(query: str, plan: QueryPlan | None = None) -> list[str]:
                 "试验记录",
             ]
         )
+    elif effective_plan.intent == "technical_stage_requirement":
+        section = stage_section_from_text(normalized_query)
+        terms.extend(
+            [
+                TECHNICAL_REQUIREMENT_STANDARD_NO,
+                section or "",
+                *stage_requirement_clauses(normalized_query),
+                "资源量规模",
+                "矿石加工选冶难易程度",
+                "可选性试验",
+                "实验室流程试验",
+                "实验室扩大连续试验",
+            ]
+        )
     raw_terms = re.findall(
         r"[A-Za-z0-9]+(?:/[A-Za-z0-9]+)?(?:[-.][A-Za-z0-9]+)*|[\u4e00-\u9fff]{2,}",
         normalized_query,
@@ -1159,6 +1178,7 @@ STRICT_EVIDENCE_INTENTS = {
     "definition_explanation",
     "technical_requirement_sufficiency",
     "technical_test_conformity_verification",
+    "technical_stage_requirement",
 }
 
 
@@ -1436,6 +1456,17 @@ def row_has_technical_test_conformity_evidence(row: sqlite3.Row) -> bool:
     )
 
 
+def row_has_technical_stage_requirement_evidence(row: sqlite3.Row, plan: QueryPlan) -> bool:
+    expected_clauses = set(stage_requirement_clauses(plan.normalized_query))
+    clause = str(row["clause_no"] or "")
+    standard_no = re.sub(r"\s+", "", str(row["standard_no"] or "")).upper()
+    return bool(
+        expected_clauses
+        and clause in expected_clauses
+        and standard_no == TECHNICAL_REQUIREMENT_STANDARD_NO.replace(" ", "").upper()
+    )
+
+
 def row_matches_query_plan_evidence(row: sqlite3.Row, plan: QueryPlan) -> bool:
     if plan.intent == "engineering_distance_lookup":
         return row_has_engineering_distance_evidence(row, plan)
@@ -1465,6 +1496,8 @@ def row_matches_query_plan_evidence(row: sqlite3.Row, plan: QueryPlan) -> bool:
         return row_has_technical_requirement_sufficiency_evidence(row)
     if plan.intent == "technical_test_conformity_verification":
         return row_has_technical_test_conformity_evidence(row)
+    if plan.intent == "technical_stage_requirement":
+        return row_has_technical_stage_requirement_evidence(row, plan)
     return row_matches_required_evidence_groups(row, plan)
 
 
@@ -1892,6 +1925,13 @@ class KnowledgeStore:
                 plan,
                 where,
                 params,
+            )
+            self._add_stage_technical_requirement_candidates(
+                conn,
+                candidate_rows,
+                plan,
+                base_where,
+                base_params,
             )
 
             if not self._evidence_sufficient_without_vectors(candidate_rows, plan, scope_applied):
@@ -2382,6 +2422,35 @@ class KnowledgeStore:
                      c.section_path
             """,
             params,
+        ).fetchall()
+        for rank, row in enumerate(rows, start=1):
+            self._add_candidate(candidate_rows, row, "reference", rank, 1.0)
+
+    def _add_stage_technical_requirement_candidates(
+        self,
+        conn: sqlite3.Connection,
+        candidate_rows: dict[str, dict[str, Any]],
+        plan: QueryPlan,
+        base_where: list[str],
+        base_params: list[Any],
+    ) -> None:
+        if plan.intent != "technical_stage_requirement":
+            return
+        clauses = stage_requirement_clauses(plan.normalized_query)
+        if not clauses:
+            return
+        placeholders = ",".join("?" for _ in clauses)
+        rows = conn.execute(
+            f"""
+            select c.*, d.document_type, d.status, d.official_url, d.source_platform, 0.0 as rank
+            from chunks c
+            join documents d on d.document_id = c.document_id
+            where {' and '.join(base_where)}
+              and d.standard_no = ?
+              and c.clause_no in ({placeholders})
+            order by c.clause_no
+            """,
+            [*base_params, TECHNICAL_REQUIREMENT_STANDARD_NO, *clauses],
         ).fetchall()
         for rank, row in enumerate(rows, start=1):
             self._add_candidate(candidate_rows, row, "reference", rank, 1.0)
