@@ -572,7 +572,7 @@ class PlannerFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.plan.required_evidence_groups)
         self.assertEqual(result.error, "RuntimeError")
 
-    async def test_protected_transfer_intent_skips_model_planning(self) -> None:
+    async def test_protected_transfer_intent_uses_model_planning_without_overriding_intent(self) -> None:
         class CountingLLM:
             enabled = True
 
@@ -581,16 +581,86 @@ class PlannerFallbackTests(unittest.IsolatedAsyncioTestCase):
 
             async def complete_json(self, messages, **kwargs):  # noqa: ANN001
                 self.calls += 1
-                raise AssertionError("protected intent must not call planner")
+                return json.dumps(
+                    {
+                        "canonical_query": "探矿权转采矿权中详查程度和储量报告条件",
+                        "intent": "general",
+                        "search_mode": "default",
+                        "subject_terms": ["探矿权转采矿权"],
+                        "required_terms": ["经评审备案的矿产资源储量报告"],
+                        "confidence": 0.9,
+                    },
+                    ensure_ascii=False,
+                )
 
         question = "哪些标准、制度规定了详查报告就可以转采"
         llm = CountingLLM()
         settings = Settings(OPENAI_API_KEY="configured", QUERY_PLANNER_ENABLED=True)
         result = await RetrievalPlanner(settings, llm).plan(question, understand_query(question))  # type: ignore[arg-type]
 
-        self.assertFalse(result.used)
-        self.assertEqual(llm.calls, 0)
+        self.assertTrue(result.used)
+        self.assertEqual(llm.calls, 1)
         self.assertEqual(result.plan.intent, "exploration_to_mining_eligibility")
+
+    async def test_compound_administrative_plan_generates_independent_evidence_queries(self) -> None:
+        class PlanningLLM:
+            enabled = True
+
+            async def complete_json(self, messages, **kwargs):  # noqa: ANN001
+                return json.dumps(
+                    {
+                        "canonical_query": "同一主体相邻矿业权间夹缝资源的配置条件及采矿权扩大矿区范围登记程序",
+                        "intent": "service_procedure_basis",
+                        "search_mode": "scoped",
+                        "subject_terms": ["同一主体相邻矿业权", "夹缝区域", "扩大矿区范围"],
+                        "required_terms": ["协议方式出让", "采矿权变更登记"],
+                        "document_types": ["policy_document", "regulation", "service_guide"],
+                        "subqueries": [
+                            {
+                                "target": "夹缝资源配置条件",
+                                "query": "同一主体 相邻矿业权 夹缝区域 协议方式出让 采矿权",
+                                "document_types": ["policy_document", "regulation", "law"],
+                                "alternative_terms": ["相邻矿业权", "夹缝区域", "协议方式出让"],
+                            },
+                            {
+                                "target": "矿区范围变更登记",
+                                "query": "已设采矿权 变更矿区范围 统一编报申报要件 采矿权变更登记",
+                                "document_types": ["policy_document", "service_guide", "administrative_service_guide"],
+                                "alternative_terms": ["变更后的矿区范围", "统一编报申报要件"],
+                            },
+                        ],
+                        "confidence": 0.94,
+                    },
+                    ensure_ascii=False,
+                )
+
+        question = "采矿权人申请扩大矿区范围，涉及同一主体持有的夹缝资源，应如何办理？"
+        plan_result = await RetrievalPlanner(
+            Settings(OPENAI_API_KEY="configured", QUERY_PLANNER_ENABLED=True),
+            PlanningLLM(),
+        ).plan(question, understand_query(question))  # type: ignore[arg-type]
+        agent = object.__new__(MiningQAAgent)
+        agent.settings = Settings(CONTROLLED_MULTI_QUERY_ENABLED=True, CONTROLLED_MULTI_QUERY_MAX=2)
+
+        initial_plans = agent._initial_retrieval_plans(plan_result.plan, plan_result.query_variants)
+
+        self.assertEqual(len(plan_result.query_variants), 2)
+        self.assertEqual(len(initial_plans), 3)
+        self.assertIn("协议方式出让", plan_result.plan.required_terms)
+        self.assertEqual(initial_plans[0].standard_numbers, ("自然资规〔2023〕4号",))
+        self.assertEqual(initial_plans[1].standard_numbers, ())
+        self.assertEqual(initial_plans[2].standard_numbers, ())
+        self.assertEqual(initial_plans[1].document_types, ("policy_document", "regulation", "law"))
+        self.assertIn("协议方式出让", initial_plans[1].alternative_terms)
+        self.assertIn("夹缝区域", initial_plans[1].retrieval_query)
+        self.assertIn("变更矿区范围", initial_plans[2].retrieval_query)
+
+        kb_plan = query_plan_from_payload(question, initial_plans[1].to_payload())
+        self.assertEqual(kb_plan.standard_numbers, ())
+        self.assertEqual(kb_plan.scope_origin, "semantic_target")
+        self.assertEqual(kb_plan.document_types, ("policy_document", "regulation", "law"))
+        self.assertEqual(kb_plan.required_evidence_groups, ())
+        self.assertIn("夹缝区域", kb_plan.retrieval_query)
 
     async def test_projection_comparison_uses_model_without_overriding_protected_intent(self) -> None:
         class PlanningLLM:

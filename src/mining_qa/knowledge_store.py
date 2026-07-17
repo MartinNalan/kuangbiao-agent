@@ -1262,6 +1262,11 @@ STRICT_EVIDENCE_INTENTS = {
 }
 
 
+def is_semantic_evidence_target(plan: QueryPlan) -> bool:
+    """Model-planned subqueries are screened by the evidence auditor, not a parent intent's fixed validator."""
+    return plan.scope_origin == "semantic_target" and plan.planner_used
+
+
 def row_context(row: sqlite3.Row) -> str:
     return " ".join(
         str(row[key] or "")
@@ -1599,6 +1604,12 @@ def query_plan_score(row: sqlite3.Row, plan: QueryPlan) -> float:
     score += sum(2.0 for term in plan.subject_terms if term and term in context)
     score += sum(2.5 for term in plan.required_terms if term and term in context)
     score += sum(1.0 for term in plan.alternative_terms if term and term in context)
+    if is_semantic_evidence_target(plan):
+        relation_terms = tuple(dict.fromkeys((*plan.subject_terms, *plan.required_terms)))
+        relation_matches = sum(term in context for term in relation_terms if term)
+        score += relation_matches * 3.0
+        if plan.required_terms and all(term in context for term in plan.required_terms):
+            score += 4.0
     if plan.required_evidence_groups:
         matched_groups = evidence_group_match_count(row, plan)
         score += matched_groups * 3.0
@@ -1621,7 +1632,7 @@ def query_plan_score(row: sqlite3.Row, plan: QueryPlan) -> float:
                 score += 10.0
         if row_has_engineering_distance_evidence(row, plan):
             score += 10.0
-    elif plan.intent == "service_materials":
+    elif plan.intent == "service_materials" and not is_semantic_evidence_target(plan):
         if row["document_type"] == "policy_attachment":
             score += 18.0
             if not service_application_section_terms(plan) and row["chunk_type"] in {
@@ -1645,7 +1656,7 @@ def query_plan_score(row: sqlite3.Row, plan: QueryPlan) -> float:
             score += 12.0
         if "自然资规〔2023〕6号" in (row["standard_no"] or ""):
             score -= 10.0
-    elif plan.intent == "service_procedure_basis":
+    elif plan.intent == "service_procedure_basis" and not is_semantic_evidence_target(plan):
         if row["document_type"] in {"service_guide", "administrative_service_guide"}:
             score += 10.0
         if "自然资规〔2023〕4号" in (row["standard_no"] or ""):
@@ -2095,7 +2106,7 @@ class KnowledgeStore:
             reverse=True,
         )
         ranked = [item for item in ranked if item[1]["final_score"] > 0.05]
-        if plan.intent in STRICT_EVIDENCE_INTENTS:
+        if plan.intent in STRICT_EVIDENCE_INTENTS and not is_semantic_evidence_target(plan):
             evidence_ranked = [
                 item for item in ranked if row_matches_query_plan_evidence(item[1]["row"], plan)
             ]
@@ -2234,7 +2245,11 @@ class KnowledgeStore:
             "projection_comparison",
             "clause_comparison",
         }
-        has_hits = route_evidence_found if plan.intent in STRICT_EVIDENCE_INTENTS else bool(items)
+        has_hits = (
+            route_evidence_found
+            if plan.intent in STRICT_EVIDENCE_INTENTS and not is_semantic_evidence_target(plan)
+            else bool(items)
+        )
         if plan.required_evidence_groups:
             has_hits = bool(direct_rows) and (not comparison or len(direct_documents) >= 2)
         has_clause_level_evidence = any(
@@ -2246,7 +2261,7 @@ class KnowledgeStore:
             )
             for item in items
         )
-        if plan.intent in STRICT_EVIDENCE_INTENTS:
+        if plan.intent in STRICT_EVIDENCE_INTENTS and not is_semantic_evidence_target(plan):
             has_clause_level_evidence = route_evidence_found
         if plan.required_evidence_groups:
             has_clause_level_evidence = has_hits
@@ -2636,6 +2651,20 @@ class KnowledgeStore:
         )
         heuristic_score = 1.0 / (1.0 + math.exp(-max(-40.0, min(40.0, heuristic_raw)) / 8.0))
         direct_bonus = 0.08 if row_matches_query_plan_evidence(row, plan) else 0.0
+        if is_semantic_evidence_target(plan):
+            context = row_context(row)
+            relation_terms = tuple(dict.fromkeys((*plan.subject_terms, *plan.required_terms)))
+            matched_terms = sum(term in context for term in relation_terms if term)
+            minimum_matches = max(
+                1,
+                len(plan.required_terms) + (1 if plan.subject_terms else 0),
+            )
+            if matched_terms >= minimum_matches:
+                # The target relation is supplied by the semantic planner and
+                # will still be checked by the evidence auditor. This bonus
+                # prevents a generic workflow clause from outranking the one
+                # clause that actually covers the target relation.
+                direct_bonus = max(direct_bonus, 0.16)
         return min(0.99, max(0.0, route_score * 0.68 + heuristic_score * 0.32 + direct_bonus))
 
     def _apply_mmr(
@@ -2826,7 +2855,7 @@ class KnowledgeStore:
                 if slot
             }
             return bool(plan.definition_slots) and set(plan.definition_slots).issubset(matched_slots)
-        if plan.intent in STRICT_EVIDENCE_INTENTS:
+        if plan.intent in STRICT_EVIDENCE_INTENTS and not is_semantic_evidence_target(plan):
             return any(row_matches_query_plan_evidence(row, plan) for row in rows)
         if plan.required_evidence_groups:
             direct_rows = [row for row in rows if row_matches_required_evidence_groups(row, plan)]
@@ -2851,7 +2880,7 @@ class KnowledgeStore:
         plan: QueryPlan,
         scope_applied: bool,
     ) -> bool:
-        if plan.exhaustive_search or not candidate_rows:
+        if plan.exhaustive_search or is_semantic_evidence_target(plan) or not candidate_rows:
             return False
         if plan.intent in STRICT_EVIDENCE_INTENTS | {"standard_selection"}:
             return self._route_evidence_found(candidate_rows, plan)

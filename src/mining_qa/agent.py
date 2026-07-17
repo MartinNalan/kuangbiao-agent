@@ -142,6 +142,16 @@ class MiningQAAgent:
         base_plan = request.query_plan or understand_query(question)
         planner_result = await self.planner.plan(question, base_plan)
         plan = planner_result.plan
+        semantic_evidence_required = bool(planner_result.query_variants)
+        semantic_target_payload = tuple(
+            {
+                "target": variant.target,
+                "query": variant.query,
+                "document_types": variant.document_types,
+                "alternative_terms": variant.alternative_terms,
+            }
+            for variant in planner_result.query_variants
+        )
         rounds = max(1, min(2, int(self.settings.max_retrieval_rounds)))
         merged_hits: list[dict] = []
         kb_results = []
@@ -154,18 +164,48 @@ class MiningQAAgent:
         supplemental_error_count = 0
 
         kb_started = perf_counter()
-        kb_result = await self.knowledge.search(
-            question,
-            filters,
-            plan,
-            retrieval_round=1,
+        initial_plans = self._initial_retrieval_plans(plan, planner_result.query_variants)
+        initial_results = await asyncio.gather(
+            *(
+                self.knowledge.search(
+                    question,
+                    filters,
+                    retrieval_plan,
+                    retrieval_round=1,
+                )
+                for retrieval_plan in initial_plans
+            ),
+            return_exceptions=True,
         )
         knowledge_ms += (perf_counter() - kb_started) * 1000
+        primary_result = initial_results[0]
+        if isinstance(primary_result, Exception):
+            raise primary_result
+        kb_result = primary_result
         kb_results.append(kb_result)
         merged_hits = self._merge_hits(merged_hits, kb_result.results)
+        for result in initial_results[1:]:
+            if isinstance(result, Exception):
+                supplemental_error_count += 1
+                continue
+            kb_results.append(result)
+            merged_hits = self._merge_hits(merged_hits, result.results)
+        multi_query_count = max(0, len(initial_plans) - 1)
+        use_model_evidence = semantic_evidence_required or self.reranker.needs_model(plan)
+        audit_hits = self._evidence_audit_hits(
+            merged_hits,
+            kb_results,
+            semantic_evidence_required,
+        )
 
-        if self.reranker.needs_model(plan):
-            rerank_result = await self.reranker.judge(question, plan, merged_hits)
+        if use_model_evidence:
+            rerank_result = await self.reranker.judge(
+                question,
+                plan,
+                audit_hits,
+                force_model=semantic_evidence_required,
+                evidence_targets=semantic_target_payload,
+            )
             reranker_ms += rerank_result.elapsed_ms
             if not rerank_result.sufficient and rounds > 1:
                 supplemental = self._supplemental_plans(
@@ -175,7 +215,7 @@ class MiningQAAgent:
                 )
                 if supplemental:
                     logical_rounds = 2
-                    multi_query_count = sum(1 for _, is_multi_query in supplemental if is_multi_query)
+                    multi_query_count += sum(1 for _, is_multi_query in supplemental if is_multi_query)
                     batch_started = perf_counter()
                     batch_results = await asyncio.gather(
                         *(
@@ -196,13 +236,29 @@ class MiningQAAgent:
                             continue
                         kb_results.append(result)
                         merged_hits = self._merge_hits(merged_hits, result.results)
-                    rerank_result = await self.reranker.judge(question, plan, merged_hits)
+                    audit_hits = self._evidence_audit_hits(
+                        merged_hits,
+                        kb_results,
+                        semantic_evidence_required,
+                    )
+                    rerank_result = await self.reranker.judge(
+                        question,
+                        plan,
+                        audit_hits,
+                        force_model=semantic_evidence_required,
+                        evidence_targets=semantic_target_payload,
+                    )
                     reranker_ms += rerank_result.elapsed_ms
 
-        kb_result = kb_results[-1]
-        if self.reranker.needs_model(plan):
+        if use_model_evidence:
             if rerank_result is None:
-                rerank_result = await self.reranker.judge(question, plan, merged_hits)
+                rerank_result = await self.reranker.judge(
+                    question,
+                    plan,
+                    audit_hits,
+                    force_model=semantic_evidence_required,
+                    evidence_targets=semantic_target_payload,
+                )
                 reranker_ms += rerank_result.elapsed_ms
             evidence_hits = list(rerank_result.hits)
             if plan.intent in {"projection_comparison", "technical_requirement_sufficiency"}:
@@ -213,7 +269,7 @@ class MiningQAAgent:
             evidence_hits = self._select_evidence_hits(merged_hits, question, plan)
         sources = [self._source_from_hit(hit) for hit in evidence_hits]
         sources = self._trim_source_quotes(question, sources, plan)
-        if rerank_result is not None and self.reranker.needs_model(plan):
+        if rerank_result is not None and use_model_evidence:
             deterministic_usable, deterministic_clause = self._evaluate_evidence(
                 question,
                 kb_result.coverage,
@@ -248,7 +304,7 @@ class MiningQAAgent:
         if logical_rounds > 1:
             notes.append("首轮证据不足，已按证据缺口执行第二轮受控检索。")
         if multi_query_count:
-            notes.append(f"第二轮使用 {multi_query_count} 条按证据目标约束的子查询补充召回。")
+            notes.append(f"首轮使用 {multi_query_count} 条按证据目标约束的子查询补充召回。")
         if supplemental_error_count:
             notes.append("部分补充查询执行失败，已使用其余检索结果继续完成证据审查。")
         if planner_result.error:
@@ -335,7 +391,13 @@ class MiningQAAgent:
             return response
 
         synthesis_started = perf_counter()
-        answer = self._fast_answer(question, sources, plan) if plan.intent in DETERMINISTIC_FAST_INTENTS else None
+        answer = (
+            None
+            if semantic_evidence_required
+            else self._fast_answer(question, sources, plan)
+            if plan.intent in DETERMINISTIC_FAST_INTENTS
+            else None
+        )
         if answer is not None:
             generation_details = {
                 "used": False,
@@ -430,6 +492,85 @@ class MiningQAAgent:
             if not UNRESOLVED_CONFIRMATION_LINE.search(line)
         ]
         return "\n".join(lines).strip()
+
+    def _initial_retrieval_plans(
+        self,
+        plan: QueryPlan,
+        variants: tuple[QueryVariant, ...],
+    ) -> list[QueryPlan]:
+        """Build independent first-round searches for model-identified evidence goals."""
+        plans = [plan]
+        if not self.settings.controlled_multi_query_enabled:
+            return plans
+
+        limit = max(1, min(3, int(self.settings.controlled_multi_query_max)))
+        seen = {normalize_user_query(plan.retrieval_query)}
+        preserve_explicit_scope = plan.scope_origin == "user"
+        for variant in variants:
+            retrieval_query = normalize_user_query(variant.query)
+            if not retrieval_query or retrieval_query in seen:
+                continue
+            seen.add(retrieval_query)
+            plans.append(
+                replace(
+                    plan,
+                    retrieval_query=retrieval_query,
+                    # A deterministic anchor is useful for the primary search,
+                    # but must not suppress a second legal relation discovered
+                    # by the semantic planner. Explicit user scopes stay intact.
+                    candidate_title_terms=(
+                        plan.candidate_title_terms if preserve_explicit_scope else ()
+                    ),
+                    standard_numbers=plan.standard_numbers if preserve_explicit_scope else (),
+                    scope_origin=(
+                        plan.scope_origin if preserve_explicit_scope else "semantic_target"
+                    ),
+                    document_types=variant.document_types or plan.document_types,
+                    # The target query supplies its own relation. Reusing the
+                    # parent query's AND groups can otherwise discard a valid
+                    # policy clause that answers a different evidence slot.
+                    required_evidence_groups=(),
+                    alternative_terms=tuple(
+                        dict.fromkeys(
+                            (*plan.alternative_terms, *variant.alternative_terms, variant.target)
+                        )
+                    ),
+                )
+            )
+            if len(plans) > limit:
+                break
+        return plans
+
+    @staticmethod
+    def _evidence_audit_hits(
+        merged_hits: list[dict],
+        kb_results: list,
+        semantic_evidence_required: bool,
+    ) -> list[dict]:
+        if not semantic_evidence_required:
+            return merged_hits
+
+        selected: list[dict] = []
+        seen: set[str] = set()
+
+        def add(hit: dict) -> None:
+            key = str(hit.get("chunk_id") or hit.get("document_id") or "")
+            if not key or key in seen:
+                return
+            seen.add(key)
+            selected.append(hit)
+
+        # Preserve a small evidence set from each independent target before
+        # global score ordering. A material row may legitimately rank above a
+        # policy clause, but cannot replace that clause's legal relation.
+        for result in kb_results:
+            for hit in result.results[:3]:
+                add(hit)
+        for hit in merged_hits:
+            if len(selected) >= 10:
+                break
+            add(hit)
+        return selected[:10]
 
     def _merge_hits(self, existing: list[dict], incoming: list[dict]) -> list[dict]:
         merged: dict[tuple[str, str, str], dict] = {}
@@ -543,7 +684,12 @@ class MiningQAAgent:
                 "elapsed_ms": round(planner_result.elapsed_ms, 3),
                 "error": planner_result.error,
                 "query_variants": [
-                    {"target": variant.target, "query": variant.query}
+                    {
+                        "target": variant.target,
+                        "query": variant.query,
+                        "document_types": variant.document_types,
+                        "alternative_terms": variant.alternative_terms,
+                    }
                     for variant in planner_result.query_variants
                 ],
             },

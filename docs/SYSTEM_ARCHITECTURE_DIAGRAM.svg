@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1320" viewBox="0 0 1800 1320" role="img" aria-labelledby="title desc">
-  <title id="title">geowiki v3.0.4 系统架构与用户问答处理流程</title>
+  <title id="title">geowiki v3.1.0 系统架构与用户问答处理流程</title>
   <desc id="desc">展示用户从网页或 API 提问后，经认证、问题理解、分类确认、混合检索、证据校验和回答生成的流程，以及私有知识库、模型服务、补库和运营反馈路径。</desc>
   <defs>
     <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="strokeWidth">
@@ -37,7 +37,7 @@
   </defs>
 
   <rect class="canvas" width="1800" height="1320"/>
-  <text class="title" x="70" y="62">geowiki v3.0.4 系统架构与用户问答处理流程</text>
+  <text class="title" x="70" y="62">geowiki v3.1.0 系统架构与用户问答处理流程</text>
   <text class="subtitle" x="70" y="92">一款专注地质领域的百科全搜 · 私有知识库受控检索，不将标准正文暴露给公网</text>
 
   <rect class="boundary" x="45" y="122" width="1710" height="1030"/>

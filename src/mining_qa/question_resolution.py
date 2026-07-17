@@ -517,24 +517,10 @@ class QuestionResolver:
 
     @staticmethod
     def _needs_model(question: str, plan: QueryPlan) -> bool:
-        if plan.intent == "general":
-            return True
-        if plan.intent == "engineering_distance_lookup":
-            return not plan.target_exploration_type or not plan.candidate_title_terms
-        if plan.intent == "service_materials":
-            return True
-        if plan.intent == "authority_responsibility":
-            return plan.authority_role_ambiguous or plan.license_issuer_level == "unknown"
-        return plan.intent in {
-            "license_reference",
-            "service_procedure_basis",
-            "projection_rule",
-            "related_documents",
-            "regulation_lookup",
-            "technical_requirement_sufficiency",
-            "technical_test_conformity_verification",
-            "technical_stage_requirement",
-        }
+        # Every in-scope question first receives a semantic interpretation from
+        # the model. Deterministic understanding remains the fallback if the
+        # model is unavailable or its structured response cannot be validated.
+        return bool(question.strip())
 
     def _apply_model_intent(
         self,

@@ -7,7 +7,7 @@ if TYPE_CHECKING:
     from .config import Settings
 
 
-PROMPT_REGISTRY_VERSION = "v3.0.4"
+PROMPT_REGISTRY_VERSION = "v3.1.0"
 
 
 @dataclass(frozen=True)

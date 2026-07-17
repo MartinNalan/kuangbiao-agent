@@ -9,7 +9,6 @@ from .config import Settings
 from .llm_client import LLMClient
 from .prompt_registry import prompt_text
 from .query_understanding import (
-    PROTECTED_QUERY_INTENTS,
     QueryPlan,
     apply_semantic_plan,
     normalize_user_query,
@@ -56,23 +55,12 @@ ALLOWED_DOCUMENT_TYPES = {
     "amendment",
 }
 
-MODEL_PLANNING_INTENTS = {
-    "general",
-    "projection_rule",
-    "projection_comparison",
-    "related_documents",
-}
-
-PLANNER_BYPASS_INTENTS = PROTECTED_QUERY_INTENTS - {
-    "authority_responsibility",
-    "projection_comparison",
-}
-
-
 @dataclass(frozen=True)
 class QueryVariant:
     target: str
     query: str
+    document_types: tuple[str, ...] = ()
+    alternative_terms: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -91,26 +79,7 @@ class RetrievalPlanner:
 
     async def plan(self, question: str, base_plan: QueryPlan) -> PlannerResult:
         started = perf_counter()
-        authority_needs_model = (
-            base_plan.intent == "authority_responsibility"
-            and base_plan.authority_role_ambiguous
-        )
-        protected_model_intent = base_plan.intent == "projection_comparison"
-        if (
-            not self.settings.query_planner_enabled
-            or not self.llm.enabled
-            or base_plan.intent in PLANNER_BYPASS_INTENTS
-            or (
-                base_plan.intent == "authority_responsibility"
-                and not authority_needs_model
-            )
-            or (
-                base_plan.intent not in MODEL_PLANNING_INTENTS
-                and not base_plan.exhaustive_search
-                and not authority_needs_model
-                and not protected_model_intent
-            )
-        ):
+        if not self.settings.query_planner_enabled or not self.llm.enabled:
             return PlannerResult(
                 plan=apply_semantic_plan(base_plan, None),
                 used=False,
@@ -141,6 +110,16 @@ class RetrievalPlanner:
                     "两者不能相互替代；问题未明确时必须返回 unknown，不能根据矿种或规模猜测。"
                     "对于复杂比较或多证据槽位问题，可以给出最多3条 subqueries；"
                     "每条必须对应不同证据目标，不能只改写同义词。简单问题返回空数组。"
+                    "每条 subquery 都必须提供 2 至 4 个 alternative_terms，覆盖用户口语、事实描述与"
+                    "法规或标准中的正式表述；不能只重复用户原词或父问题的文件锚点。"
+                    "alternative_terms 的每一项必须是可单独全文匹配的短语，不得把多个关系词拼接成一句。"
+                    "复合行政办理问题必须拆分为彼此独立的法律关系和办理环节。例如用户同时问"
+                    "‘同一主体、相邻矿业权、夹缝区域、扩大矿区范围’，至少应分别检索："
+                    "夹缝资源是否符合协议出让或其他配置条件，以及既有采矿权如何办理矿区范围变更登记。"
+                    "对于上述配置条件，alternative_terms 应覆盖‘相邻矿业权、夹缝区域、协议方式出让’等"
+                    "正式关系表达，不能只写‘夹缝资源、协议出让’。"
+                    "不得因为问题中出现‘扩大矿区范围’就只检索变更登记材料；也不得将模型记忆中的"
+                    "文号作为硬过滤条件。应使用规范化关系短语在本地知识库中核验来源。"
                     "document_types 只能从 standard、national_standard、industry_standard、policy_document、"
                     "policy_attachment、law、regulation、department_rule、guidance、service_guide、"
                     "administrative_service_guide、amendment 中选择。"
@@ -181,6 +160,8 @@ class RetrievalPlanner:
                                 {
                                     "target": "独立证据槽位或比较维度",
                                     "query": "只用于本地知识库检索的子查询",
+                                    "document_types": ["该证据目标应优先检索的文件类型"],
+                                    "alternative_terms": ["法规或标准中的正式替代表述"],
                                 }
                             ],
                             "confidence": 0.0,
@@ -253,16 +234,18 @@ class RetrievalPlanner:
             return ()
         variants: list[QueryVariant] = []
         seen = {plan.retrieval_query, plan.normalized_query}
-        protected_suffix = " ".join(
-            dict.fromkeys(
-                (
-                    plan.normalized_query if plan.intent in PROTECTED_QUERY_INTENTS else "",
-                    *plan.standard_numbers,
-                    *plan.subject_terms,
-                    *plan.required_terms,
+        protected_suffix = ""
+        if plan.scope_origin == "user":
+            protected_suffix = " ".join(
+                dict.fromkeys(
+                    (
+                        plan.normalized_query,
+                        *plan.standard_numbers,
+                        *plan.subject_terms,
+                        *plan.required_terms,
+                    )
                 )
             )
-        )
         for value in values[:3]:
             if not isinstance(value, dict):
                 continue
@@ -270,10 +253,41 @@ class RetrievalPlanner:
             query = normalize_user_query(str(value.get("query") or ""))[:500]
             if not target or not query:
                 continue
+            raw_document_types = value.get("document_types") or []
+            if isinstance(raw_document_types, str):
+                raw_document_types = [raw_document_types]
+            document_types: list[str] = []
+            if isinstance(raw_document_types, list):
+                for document_type in raw_document_types:
+                    value_type = str(document_type).strip()
+                    if value_type == "standard":
+                        document_types.extend(("standard", "national_standard", "industry_standard"))
+                    elif value_type in ALLOWED_DOCUMENT_TYPES:
+                        document_types.append(value_type)
+            raw_alternative_terms = value.get("alternative_terms") or []
+            if isinstance(raw_alternative_terms, str):
+                raw_alternative_terms = [raw_alternative_terms]
+            if not isinstance(raw_alternative_terms, list):
+                raw_alternative_terms = []
+            alternative_terms = tuple(
+                term
+                for term in (
+                    normalize_user_query(str(item or ""))[:120]
+                    for item in raw_alternative_terms
+                )
+                if term
+            )[:4]
             if protected_suffix:
                 query = " ".join(dict.fromkeys((query, protected_suffix)))[:700]
             if query in seen:
                 continue
             seen.add(query)
-            variants.append(QueryVariant(target=target, query=query))
+            variants.append(
+                QueryVariant(
+                    target=target,
+                    query=query,
+                    document_types=tuple(dict.fromkeys(document_types)),
+                    alternative_terms=tuple(dict.fromkeys(alternative_terms)),
+                )
+            )
         return tuple(variants)

@@ -201,7 +201,10 @@ class ResearchPlanner:
                     "文件类型、比较维度和最多3条证据查询。候选集合必须能够从标准目录枚举，"
                     "例如‘各分矿种规范’应使用‘矿产地质勘查规范’作为 corpus_title_terms，"
                     "不能只列出你记得的几个标准号。required_evidence_groups 组间为 AND、组内为 OR，"
-                    "用于排除只共享普通关键词但没有目标关系的条款。明确区分基准文件和待审查文件。只返回 JSON。\n"
+                    "用于排除只共享普通关键词但没有目标关系的条款。明确区分基准文件和待审查文件。"
+                    "复合行政办理问题必须拆解为独立的证据查询和办理环节：先检索权利取得、配置条件或例外，"
+                    "再检索登记变更、申请材料或后续程序。不能因问题含有‘变更’就只审查变更登记文件。"
+                    "模型提出的文件名称或文号仅是知识库待核验候选，不得代替检索到的原文。只返回 JSON。\n"
                     f"{prompt_text(self.settings, 'retrieval_planner', primary_intent=(fallback.query_classification or {}).get('primary_intent'))}"
                 ),
             },
@@ -264,8 +267,14 @@ class ResearchPlanner:
             intent=fallback.intent,
             strategy=fallback.strategy,
             anchor_titles=_clean_list(payload.get("anchor_titles"), limit=8) or fallback.anchor_titles,
-            anchor_standard_numbers=_clean_list(payload.get("anchor_standard_numbers"), limit=8)
-            or fallback.anchor_standard_numbers,
+            anchor_standard_numbers=tuple(
+                dict.fromkeys(
+                    (
+                        *fallback.anchor_standard_numbers,
+                        *_clean_list(payload.get("anchor_standard_numbers"), limit=8),
+                    )
+                )
+            ),
             corpus_title_terms=_clean_list(payload.get("corpus_title_terms"), limit=12)
             or fallback.corpus_title_terms,
             corpus_standard_numbers=_clean_list(payload.get("corpus_standard_numbers"), limit=20)

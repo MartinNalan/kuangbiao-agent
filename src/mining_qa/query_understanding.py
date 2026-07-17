@@ -748,6 +748,46 @@ def query_plan_from_payload(query: str, payload: dict[str, Any] | None) -> Query
     base = understand_query(query)
     if not payload:
         return apply_semantic_plan(base, None)
+    payload_scope_origin = str(payload.get("scope_origin") or "").strip().lower()
+    payload_retrieval_query = normalize_user_query(str(payload.get("retrieval_query") or ""))
+    semantic_target_query = (
+        payload_scope_origin == "semantic_target" and bool(payload_retrieval_query)
+    )
+    if semantic_target_query:
+        # A semantic evidence-target query may intentionally explore a second
+        # legal relation. Do not reconstruct the deterministic anchor from the
+        # original question on the KB service. Explicit user scopes never use
+        # this branch and remain protected below.
+        base = replace(
+            base,
+            retrieval_query=payload_retrieval_query,
+            candidate_title_terms=(),
+            standard_numbers=(),
+            scope_origin="semantic_target",
+        )
+    target_document_types: tuple[str, ...] = ()
+    if semantic_target_query:
+        allowed_document_types = {
+            "standard",
+            "national_standard",
+            "industry_standard",
+            "policy_document",
+            "policy_attachment",
+            "law",
+            "regulation",
+            "department_rule",
+            "guidance",
+            "service_guide",
+            "administrative_service_guide",
+            "amendment",
+        }
+        target_types: list[str] = []
+        for document_type in _clean_terms(payload.get("document_types"), limit=12):
+            if document_type == "standard":
+                target_types.extend(("standard", "national_standard", "industry_standard"))
+            elif document_type in allowed_document_types:
+                target_types.append(document_type)
+        target_document_types = tuple(dict.fromkeys(target_types))
     protected = base.intent in PROTECTED_QUERY_INTENTS
     allowed = {
         "canonical_query": payload.get("normalized_query") or payload.get("canonical_query"),
@@ -798,9 +838,16 @@ def query_plan_from_payload(query: str, payload: dict[str, Any] | None) -> Query
         intent=resolved_intent,
         target_exploration_type=target_type or plan.target_exploration_type,
         focus_terms=focus_terms or plan.focus_terms,
-        document_types=classification.document_types or plan.document_types,
+        document_types=(
+            target_document_types or plan.document_types
+            if semantic_target_query
+            else classification.document_types or plan.document_types
+        ),
         classification=classification,
         planner_used=bool(payload.get("planner_used", plan.planner_used)),
+        required_evidence_groups=(
+            () if semantic_target_query else plan.required_evidence_groups
+        ),
         exhaustive_search=(
             plan.exhaustive_search
             if protected

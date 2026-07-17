@@ -252,17 +252,17 @@ class QuestionResolverTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.requires_clarification)
         self.assertIn("领取采矿许可证", result.canonical_question)
 
-    async def test_clear_engineering_distance_question_uses_fast_path(self) -> None:
+    async def test_clear_engineering_distance_question_is_semantically_resolved_first(self) -> None:
         llm = FakeResolutionLLM({})
         resolver = QuestionResolver(self.settings(), llm=llm)  # type: ignore[arg-type]
 
         result = await resolver.resolve("金矿勘查一类型的推荐工程间距是多少？")
 
         self.assertFalse(result.requires_clarification)
-        self.assertFalse(result.model_used)
+        self.assertTrue(result.model_used)
         self.assertEqual(result.plan.intent, "engineering_distance_lookup")
         self.assertEqual(result.plan.target_exploration_type, "Ⅰ")
-        self.assertEqual(llm.calls, 0)
+        self.assertEqual(llm.calls, 1)
 
     async def test_authority_question_without_license_issuer_requests_confirmation(self) -> None:
         llm = FakeResolutionLLM(

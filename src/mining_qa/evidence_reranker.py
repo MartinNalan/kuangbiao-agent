@@ -90,6 +90,9 @@ class EvidenceReranker:
         question: str,
         plan: QueryPlan,
         hits: list[dict[str, Any]],
+        *,
+        force_model: bool = False,
+        evidence_targets: tuple[dict[str, Any], ...] = (),
     ) -> RerankResult:
         started = perf_counter()
         candidates = hits[:10]
@@ -98,7 +101,7 @@ class EvidenceReranker:
             not candidates
             or not self.settings.evidence_reranker_enabled
             or not self.llm.enabled
-            or not self.needs_model(plan)
+            or (not force_model and not self.needs_model(plan))
         ):
             return fallback
 
@@ -136,6 +139,8 @@ class EvidenceReranker:
                     "阶段最低要求条款，以及研究层级、前置基础或包含关系条款。"
                     "不得把用户没有说过的‘未开展较低级工作’补成事实；‘必要时’不等于机械的先后顺序。"
                     "只有原文明确说明包含、以前一研究为基础或不能替代时，才能判断满足或不能满足。"
+                    "当检索计划包含多个证据目标时，必须分别保留能覆盖各目标的直接条款；"
+                    "不能因某一条款排名较高就丢弃另一法律关系所必需的政策、法规或办事依据。"
                     "模型常识不能作为证据；所有结论必须能由候选原文直接推出。"
                     "若证据不足，给出一条更适合搜索本地标准库的 refined_query 和短语列表。"
                     "只负责筛选证据，不生成最终回答。最多选择4份代表性文件。"
@@ -148,10 +153,14 @@ class EvidenceReranker:
                     {
                         "question": question,
                         "retrieval_plan": plan.to_llm_payload(),
+                        "evidence_targets": evidence_targets,
                         "candidates": compact_candidates,
                         "output_schema": {
                             "selected_indices": [1],
                             "direct_evidence_indices": [1],
+                            "target_evidence_indices": [
+                                {"target": "证据目标", "indices": [1]}
+                            ],
                             "sufficient": False,
                             "missing_evidence_groups": ["缺失的关系或条件"],
                             "refined_query": "证据不足时使用的检索问题",
