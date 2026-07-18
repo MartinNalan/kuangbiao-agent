@@ -142,15 +142,20 @@ class MiningQAAgent:
         base_plan = request.query_plan or understand_query(question)
         planner_result = await self.planner.plan(question, base_plan)
         plan = planner_result.plan
-        semantic_evidence_required = bool(planner_result.query_variants)
+        evidence_targets = planner_result.evidence_targets
+        # A single direct clause can support a simple lookup. Once the model
+        # identifies multiple independent targets, every target must be
+        # supported before an answer is treated as complete.
+        semantic_evidence_required = len(evidence_targets) > 1
         semantic_target_payload = tuple(
             {
                 "target": variant.target,
                 "query": variant.query,
                 "document_types": variant.document_types,
                 "alternative_terms": variant.alternative_terms,
+                "required": variant.required,
             }
-            for variant in planner_result.query_variants
+            for variant in evidence_targets
         )
         rounds = max(1, min(2, int(self.settings.max_retrieval_rounds)))
         merged_hits: list[dict] = []
@@ -305,6 +310,11 @@ class MiningQAAgent:
             notes.append("首轮证据不足，已按证据缺口执行第二轮受控检索。")
         if multi_query_count:
             notes.append(f"首轮使用 {multi_query_count} 条按证据目标约束的子查询补充召回。")
+        if rerank_result and semantic_evidence_required and rerank_result.missing_targets:
+            notes.append(
+                "以下独立证据目标未获得直接条款："
+                + "；".join(rerank_result.missing_targets)
+            )
         if supplemental_error_count:
             notes.append("部分补充查询执行失败，已使用其余检索结果继续完成证据审查。")
         if planner_result.error:
@@ -567,10 +577,10 @@ class MiningQAAgent:
             for hit in result.results[:3]:
                 add(hit)
         for hit in merged_hits:
-            if len(selected) >= 10:
+            if len(selected) >= 14:
                 break
             add(hit)
-        return selected[:10]
+        return selected[:14]
 
     def _merge_hits(self, existing: list[dict], incoming: list[dict]) -> list[dict]:
         merged: dict[tuple[str, str, str], dict] = {}
@@ -691,6 +701,15 @@ class MiningQAAgent:
                         "alternative_terms": variant.alternative_terms,
                     }
                     for variant in planner_result.query_variants
+                ],
+                "evidence_targets": [
+                    {
+                        "target": target.target,
+                        "query": target.query,
+                        "document_types": target.document_types,
+                        "required": target.required,
+                    }
+                    for target in planner_result.evidence_targets
                 ],
             },
             "knowledge_rounds": [
@@ -2304,6 +2323,26 @@ class MiningQAAgent:
 
         if effective_plan.intent == "standard_selection" and sources:
             source = sources[0]
+            if (
+                effective_plan.classification
+                and effective_plan.classification.primary_intent == "status_verification"
+            ):
+                status = source.effective_status or "unverified"
+                label = {
+                    "current": "现行有效",
+                    "repealed": "已废止或失效",
+                    "governance_conflict": "时效状态存在冲突，待人工复核",
+                    "unverified": "尚未完成官方时效核验",
+                }.get(status, status)
+                lines = [
+                    f"**结论：{source.standard_no or '该文件'}《{source.title}》当前状态为：{label}。**",
+                    "",
+                    f"- **状态依据**：{source.status_evidence or '知识库未保存可核验的状态依据。'}",
+                    f"- **状态来源**：{source.status_source or '未标注'}。",
+                ]
+                if source.status_checked_at:
+                    lines.append(f"- **核验时间**：{source.status_checked_at}。")
+                return "\n".join(lines)
             return (
                 f"根据当前知识库和官方标准目录，建议使用 **{source.standard_no or '未知标准号'}"
                 f"《{source.title}》**。\n\n"
@@ -2585,6 +2624,11 @@ class MiningQAAgent:
             validation_status=hit.get("validation_status"),
             source_platform=hit.get("source_platform"),
             source_role=hit.get("source_role"),
+            effective_status=hit.get("effective_status"),
+            status_source=hit.get("status_source"),
+            status_evidence=hit.get("status_evidence"),
+            status_checked_at=hit.get("status_checked_at"),
+            ocr_confidence=hit.get("ocr_confidence"),
         )
 
     def _append_source_links(self, answer: str, sources: list[Source]) -> str:

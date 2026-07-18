@@ -209,6 +209,9 @@ class QuestionResolver:
                     "不得使用模型记忆生成专业结论。判断歧义时关注：不同解释是否会改变目标标准、"
                     "条款范围、业务事项或最终结论。只有存在两个以上实质不同且合理的专业方向，"
                     "或缺少决定结论的关键条件时，才要求确认；不要对表达清楚的问题过度追问。"
+                    "技术要求、准入条件和研究程度问题中，若缺少的因素可以作为同一标准内的条件矩阵"
+                    "呈现，则不得要求用户先确认；应保留这些因素并让后续检索覆盖各条件分支。"
+                    "只有缺少信息会把问题导向不同业务事项、不同法规体系或互斥结论时，才要求确认。"
                     "矿产资源储量评审备案机构取决于许可证颁发机关；用户只给矿种或矿山规模而未说明"
                     "许可证由自然资源部还是省级自然资源主管部门颁发时，必须判为歧义并给出对应候选。"
                     "上述发证机关规则只适用于用户明确询问矿产资源储量评审备案机构的情形，"
@@ -350,11 +353,13 @@ class QuestionResolver:
             and canonical_plan.classification.primary_intent == "service_materials"
             and not canonical_plan.classification.missing_slots
         )
+        matrix_answer_available = self._can_answer_as_condition_matrix(canonical_plan)
         if (
             payload.is_ambiguous
             and payload.confidence >= self.settings.question_resolution_min_confidence
             and len(options) >= 2
             and not complete_material_classification
+            and not matrix_answer_available
         ):
             interpreted = canonical if canonical != normalized else normalized
             reason = normalize_user_query(payload.reason)[:300] or "当前问题存在多个会影响检索范围的专业方向。"
@@ -380,6 +385,17 @@ class QuestionResolver:
             canonical_question=canonical,
             plan=canonical_plan,
             model_used=True,
+        )
+
+    @staticmethod
+    def _can_answer_as_condition_matrix(plan: QueryPlan) -> bool:
+        classification = plan.classification
+        if classification is None:
+            return False
+        return bool(
+            classification.primary_intent in {"eligibility_condition", "technical_method"}
+            and classification.output_shape in {"condition_matrix", "requirements_and_advice"}
+            and classification.target_entity
         )
 
     @staticmethod
@@ -599,6 +615,28 @@ class QuestionResolver:
             ),
         )
         classification = merge_slot_updates(classification, fallback.resolved_slots)
+        if (
+            classification.business_action
+            and classification.primary_intent in {"technical_method", "eligibility_condition"}
+        ):
+            classification = replace(
+                classification,
+                document_types=tuple(
+                    dict.fromkeys(
+                        (
+                            *classification.document_types,
+                            "policy_document",
+                            "law",
+                            "regulation",
+                            "department_rule",
+                            "guidance",
+                            "standard",
+                            "national_standard",
+                            "industry_standard",
+                        )
+                    )
+                ),
+            )
         strategy = strategy_for(classification.primary_intent)
         retrieval_query = " ".join(
             dict.fromkeys(

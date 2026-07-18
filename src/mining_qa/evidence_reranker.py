@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from time import perf_counter
 from typing import Any
 
@@ -41,11 +41,17 @@ class EvidenceFact(BaseModel):
     condition: str = Field(default="", max_length=300)
 
 
+class EvidenceTargetSelection(BaseModel):
+    target: str = Field(min_length=1, max_length=160)
+    indices: list[int] = Field(default_factory=list, max_length=8)
+
+
 class EvidenceDecision(BaseModel):
     selected_indices: list[int] = Field(default_factory=list, max_length=10)
     direct_evidence_indices: list[int] = Field(default_factory=list, max_length=10)
     sufficient: bool = False
     missing_evidence_groups: list[str] = Field(default_factory=list, max_length=8)
+    target_evidence_indices: list[EvidenceTargetSelection] = Field(default_factory=list, max_length=8)
     refined_query: str = Field(default="", max_length=500)
     refined_terms: list[str] = Field(default_factory=list, max_length=16)
     facts: list[EvidenceFact] = Field(default_factory=list, max_length=12)
@@ -67,6 +73,8 @@ class RerankResult:
     grounded_answer: str = ""
     confidence: float = 0.0
     error: str | None = None
+    target_coverage: dict[str, tuple[int, ...]] = field(default_factory=dict)
+    missing_targets: tuple[str, ...] = ()
 
 
 class EvidenceReranker:
@@ -95,8 +103,9 @@ class EvidenceReranker:
         evidence_targets: tuple[dict[str, Any], ...] = (),
     ) -> RerankResult:
         started = perf_counter()
-        candidates = hits[:10]
-        fallback = self._deterministic_result(plan, candidates, started)
+        candidates = hits[:14]
+        active_targets = self._active_targets(plan, evidence_targets)
+        fallback = self._deterministic_result(plan, candidates, started, active_targets)
         if (
             not candidates
             or not self.settings.evidence_reranker_enabled
@@ -141,6 +150,9 @@ class EvidenceReranker:
                     "只有原文明确说明包含、以前一研究为基础或不能替代时，才能判断满足或不能满足。"
                     "当检索计划包含多个证据目标时，必须分别保留能覆盖各目标的直接条款；"
                     "不能因某一条款排名较高就丢弃另一法律关系所必需的政策、法规或办事依据。"
+                    "target_evidence_indices 中必须逐项返回 evidence_targets 的原样 target；"
+                    "每个 required=true 的目标至少对应一个直接条款。一个条款可覆盖多个目标，"
+                    "但不得把只包含相同名词、没有表达目标关系的条款标为覆盖。"
                     "模型常识不能作为证据；所有结论必须能由候选原文直接推出。"
                     "若证据不足，给出一条更适合搜索本地标准库的 refined_query 和短语列表。"
                     "只负责筛选证据，不生成最终回答。最多选择4份代表性文件。"
@@ -153,7 +165,7 @@ class EvidenceReranker:
                     {
                         "question": question,
                         "retrieval_plan": plan.to_llm_payload(),
-                        "evidence_targets": evidence_targets,
+                        "evidence_targets": active_targets,
                         "candidates": compact_candidates,
                         "output_schema": {
                             "selected_indices": [1],
@@ -185,6 +197,13 @@ class EvidenceReranker:
 
         selected_indices = self._valid_indices(decision.selected_indices, len(candidates))
         direct_indices = self._valid_indices(decision.direct_evidence_indices, len(candidates))
+        raw_target_coverage = self._target_coverage(
+            decision.target_evidence_indices,
+            active_targets,
+            len(candidates),
+        )
+        for indices in raw_target_coverage.values():
+            direct_indices = self._valid_indices([*direct_indices, *indices], len(candidates))
         if plan.intent in STRUCTURAL_GUARD_INTENTS:
             structurally_direct = {
                 index
@@ -208,6 +227,25 @@ class EvidenceReranker:
             selected_indices = self._valid_indices(selected_indices, len(candidates))
             selected_indices = [index for index in selected_indices if index in direct_indices] or direct_indices
 
+        target_coverage = {
+            target: tuple(index for index in indices if index in direct_indices)
+            for target, indices in raw_target_coverage.items()
+        }
+        required_targets = [
+            str(target["target"])
+            for target in active_targets
+            if bool(target.get("required", True))
+        ]
+        # For a simple lookup, selected direct evidence covers the implicit
+        # primary target even when older model responses omit the new field.
+        if len(required_targets) == 1 and not target_coverage and direct_indices:
+            target_coverage[required_targets[0]] = tuple(direct_indices)
+        missing_targets = tuple(
+            target
+            for target in required_targets
+            if not target_coverage.get(target)
+        )
+
         selected_hits = tuple(candidates[index - 1] for index in selected_indices)
         distinct_documents = {
             str(hit.get("document_id") or f"row-{index}")
@@ -217,7 +255,12 @@ class EvidenceReranker:
             "projection_comparison",
             "clause_comparison",
         }
-        sufficient = bool(decision.sufficient and direct_indices and selected_hits)
+        sufficient = bool(
+            decision.sufficient
+            and direct_indices
+            and selected_hits
+            and not missing_targets
+        )
         if comparison and len(distinct_documents) < 2:
             sufficient = False
 
@@ -238,6 +281,8 @@ class EvidenceReranker:
             facts=facts,
             grounded_answer="",
             confidence=decision.confidence,
+            target_coverage=target_coverage,
+            missing_targets=missing_targets,
         )
 
     def _deterministic_result(
@@ -245,6 +290,7 @@ class EvidenceReranker:
         plan: QueryPlan,
         hits: list[dict[str, Any]],
         started: float,
+        evidence_targets: tuple[dict[str, Any], ...],
     ) -> RerankResult:
         direct = [hit for hit in hits if self._matches_all_groups(hit, plan.required_evidence_groups)]
         if not plan.required_evidence_groups:
@@ -270,7 +316,23 @@ class EvidenceReranker:
             if len(selected) >= 4:
                 break
         distinct_documents = {str(hit.get("document_id") or "") for hit in selected}
-        sufficient = bool(selected) and (not comparison or len(distinct_documents) >= 2)
+        target_coverage: dict[str, tuple[int, ...]] = {}
+        required_targets = [
+            str(target["target"])
+            for target in evidence_targets
+            if bool(target.get("required", True))
+        ]
+        # A deterministic fallback cannot safely infer which of several
+        # independent relations a hit proves. It may cover a single target,
+        # but leaves multi-target questions for the model or a second search.
+        if len(required_targets) == 1 and selected:
+            target_coverage[required_targets[0]] = tuple(range(1, len(selected) + 1))
+        missing_targets = tuple(
+            target for target in required_targets if not target_coverage.get(target)
+        )
+        sufficient = bool(selected) and not missing_targets and (
+            not comparison or len(distinct_documents) >= 2
+        )
         return RerankResult(
             hits=tuple(selected),
             sufficient=sufficient,
@@ -278,7 +340,62 @@ class EvidenceReranker:
             elapsed_ms=(perf_counter() - started) * 1000,
             direct_evidence_count=len(selected),
             refined_query=self._fallback_refined_query(plan) if not sufficient else "",
+            target_coverage=target_coverage,
+            missing_targets=missing_targets,
         )
+
+    @staticmethod
+    def _active_targets(
+        plan: QueryPlan,
+        evidence_targets: tuple[dict[str, Any], ...],
+    ) -> tuple[dict[str, Any], ...]:
+        targets: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in evidence_targets:
+            if not isinstance(item, dict):
+                continue
+            target = str(item.get("target") or "").strip()[:160]
+            query = str(item.get("query") or "").strip()[:500]
+            if not target or not query or target in seen:
+                continue
+            seen.add(target)
+            targets.append(
+                {
+                    "target": target,
+                    "query": query,
+                    "document_types": list(item.get("document_types") or ()),
+                    "alternative_terms": list(item.get("alternative_terms") or ()),
+                    "required": bool(item.get("required", True)),
+                }
+            )
+        if targets:
+            return tuple(targets)
+        return (
+            {
+                "target": "核心结论",
+                "query": plan.retrieval_query or plan.normalized_query,
+                "document_types": list(plan.document_types),
+                "alternative_terms": list(plan.alternative_terms[:4]),
+                "required": True,
+            },
+        )
+
+    @staticmethod
+    def _target_coverage(
+        selections: list[EvidenceTargetSelection],
+        targets: tuple[dict[str, Any], ...],
+        candidate_count: int,
+    ) -> dict[str, tuple[int, ...]]:
+        allowed = {str(target["target"]) for target in targets}
+        coverage: dict[str, tuple[int, ...]] = {}
+        for selection in selections:
+            target = str(selection.target).strip()
+            if target not in allowed or target in coverage:
+                continue
+            indices = tuple(EvidenceReranker._valid_indices(selection.indices, candidate_count))
+            if indices:
+                coverage[target] = indices
+        return coverage
 
     @staticmethod
     def _candidate_text(hit: dict[str, Any]) -> str:
@@ -338,4 +455,6 @@ class EvidenceReranker:
             grounded_answer=fallback.grounded_answer,
             confidence=fallback.confidence,
             error=error,
+            target_coverage=fallback.target_coverage,
+            missing_targets=fallback.missing_targets,
         )

@@ -264,6 +264,35 @@ class QuestionResolverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.plan.target_exploration_type, "Ⅰ")
         self.assertEqual(llm.calls, 1)
 
+    async def test_condition_matrix_is_answered_without_forcing_a_branch_confirmation(self) -> None:
+        llm = FakeResolutionLLM(
+            {
+                "canonical_question": "某矿区在简单、中等、复杂条件下，技术研究要求分别是什么？",
+                "intent": "general",
+                "primary_intent": "technical_method",
+                "target_entity": "技术研究要求",
+                "business_action": "矿区开发论证",
+                "document_types": ["standard", "guidance"],
+                "evidence_slots": ["条件分支", "技术要求", "适用范围"],
+                "output_shape": "requirements_and_advice",
+                "is_ambiguous": True,
+                "confidence": 0.93,
+                "missing_slots": ["矿种"],
+                "reason": "模型错误地要求先选择矿种。",
+                "interpretations": [
+                    {"label": "条件简单", "question": "简单条件下的技术研究要求是什么？"},
+                    {"label": "条件复杂", "question": "复杂条件下的技术研究要求是什么？"},
+                ],
+            }
+        )
+        resolver = QuestionResolver(self.settings(), llm=llm)  # type: ignore[arg-type]
+
+        result = await resolver.resolve("某矿区在简单、中等、复杂条件下，技术研究要求分别是什么？")
+
+        self.assertFalse(result.requires_clarification)
+        self.assertEqual(result.plan.classification.primary_intent, "technical_method")
+        self.assertEqual(result.plan.classification.output_shape, "requirements_and_advice")
+
     async def test_authority_question_without_license_issuer_requests_confirmation(self) -> None:
         llm = FakeResolutionLLM(
             {

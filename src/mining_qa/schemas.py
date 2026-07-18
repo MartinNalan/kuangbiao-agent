@@ -86,6 +86,11 @@ class Source(BaseModel):
     source_platform: str | None = None
     source_role: str | None = None
     validation_status: str | None = None
+    effective_status: str | None = None
+    status_source: str | None = None
+    status_evidence: str | None = None
+    status_checked_at: str | None = None
+    ocr_confidence: float | None = None
 
 
 class RetrievalStats(BaseModel):

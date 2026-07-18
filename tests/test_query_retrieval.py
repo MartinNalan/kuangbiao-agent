@@ -130,6 +130,15 @@ class QueryUnderstandingTests(unittest.TestCase):
         self.assertFalse(plan.exhaustive_search)
         self.assertIn("探矿权转采矿权", plan.retrieval_query)
 
+    def test_authority_question_accepts_government_agency_wording(self) -> None:
+        plan = understand_query(
+            "省级颁发的采矿许可证，采矿期间资源量重大变化后应向哪个机关申请评审备案？"
+        )
+
+        self.assertEqual(plan.intent, "authority_responsibility")
+        self.assertEqual(plan.classification.primary_intent, "authority_jurisdiction")  # type: ignore[union-attr]
+        self.assertEqual(plan.license_issuer_level, "province")
+
     def test_exploration_to_mining_intent_has_a_deterministic_fallback(self) -> None:
         plan = apply_semantic_plan(
             understand_query("哪些标准、制度规定了详查报告就可以转采？"),
@@ -500,6 +509,78 @@ class RetrievalStrategyTests(unittest.TestCase):
 
 
 class EvidenceRerankerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_multi_target_question_requires_direct_evidence_for_every_target(self) -> None:
+        class TargetCoverageLLM:
+            enabled = True
+
+            def __init__(self, coverage: list[dict[str, object]]):
+                self.coverage = coverage
+
+            async def complete_json(self, messages, **kwargs):  # noqa: ANN001
+                return json.dumps(
+                    {
+                        "selected_indices": [1, 2],
+                        "direct_evidence_indices": [1, 2],
+                        "target_evidence_indices": self.coverage,
+                        "sufficient": True,
+                        "confidence": 0.92,
+                    },
+                    ensure_ascii=False,
+                )
+
+        plan = understand_query("某项目需要完成哪些行政手续和技术研究？")
+        hits = [
+            {
+                "document_id": "policy",
+                "title": "管理规定",
+                "standard_no": "政策文件",
+                "clause_no": "第三条",
+                "quote": "申请人应完成相关行政审批手续。",
+            },
+            {
+                "document_id": "standard",
+                "title": "技术规范",
+                "standard_no": "GB/T 0000-2020",
+                "clause_no": "5.2",
+                "quote": "项目应完成相应技术研究并形成报告。",
+            },
+        ]
+        targets = (
+            {"target": "行政手续", "query": "行政审批手续", "required": True},
+            {"target": "技术研究", "query": "技术研究要求", "required": True},
+        )
+
+        incomplete = await EvidenceReranker(
+            Settings(OPENAI_API_KEY="configured"),
+            TargetCoverageLLM([{"target": "行政手续", "indices": [1]}]),  # type: ignore[arg-type]
+        ).judge(
+            "某项目需要完成哪些行政手续和技术研究？",
+            plan,
+            hits,
+            force_model=True,
+            evidence_targets=targets,
+        )
+        complete = await EvidenceReranker(
+            Settings(OPENAI_API_KEY="configured"),
+            TargetCoverageLLM(
+                [
+                    {"target": "行政手续", "indices": [1]},
+                    {"target": "技术研究", "indices": [2]},
+                ]
+            ),  # type: ignore[arg-type]
+        ).judge(
+            "某项目需要完成哪些行政手续和技术研究？",
+            plan,
+            hits,
+            force_model=True,
+            evidence_targets=targets,
+        )
+
+        self.assertFalse(incomplete.sufficient)
+        self.assertEqual(incomplete.missing_targets, ("技术研究",))
+        self.assertTrue(complete.sufficient)
+        self.assertEqual(set(complete.target_coverage), {"行政手续", "技术研究"})
+
     async def test_projection_evidence_requires_the_relation_not_just_spacing_words(self) -> None:
         question = "关于矿体无限外推所依据的间距，不同标准是否有不同规定？"
         plan = apply_semantic_plan(understand_query(question), None)

@@ -96,6 +96,16 @@ SERVICE_CHANGE_SECTIONS = {
 
 
 @dataclass(frozen=True)
+class ResearchEvidenceTarget:
+    """A factual relation that must be evidenced before deep-mode synthesis."""
+
+    label: str
+    query: str
+    document_types: tuple[str, ...] = ()
+    required: bool = True
+
+
+@dataclass(frozen=True)
 class ResearchPlan:
     canonical_question: str
     intent: str = "cross_document_audit"
@@ -116,6 +126,7 @@ class ResearchPlan:
     )
     comparison_dimensions: tuple[str, ...] = ()
     evidence_queries: tuple[str, ...] = ()
+    evidence_targets: tuple[ResearchEvidenceTarget, ...] = ()
     required_evidence_groups: tuple[tuple[str, ...], ...] = ()
     scope_note: str = ""
     planner_used: bool = False
@@ -147,6 +158,82 @@ def _clean_groups(value: object) -> tuple[tuple[str, ...], ...]:
         if group:
             groups.append(group)
     return tuple(groups)
+
+
+def _clean_evidence_targets(
+    value: object,
+    fallback_queries: tuple[str, ...],
+    fallback_dimensions: tuple[str, ...],
+    fallback_document_types: tuple[str, ...],
+) -> tuple[ResearchEvidenceTarget, ...]:
+    """Validate model-defined evidence objectives without assigning domain semantics in code."""
+    allowed_types = {
+        "standard",
+        "national_standard",
+        "industry_standard",
+        "policy_document",
+        "law",
+        "regulation",
+        "department_rule",
+        "guidance",
+        "service_guide",
+        "administrative_service_guide",
+        "policy_attachment",
+    }
+    targets: list[ResearchEvidenceTarget] = []
+    seen_queries: set[str] = set()
+    if isinstance(value, list):
+        for index, raw in enumerate(value[:4], start=1):
+            if not isinstance(raw, dict):
+                continue
+            label = normalize_user_query(str(raw.get("label") or ""))[:120]
+            query = normalize_user_query(str(raw.get("query") or ""))[:500]
+            if not label or not query or query in seen_queries:
+                continue
+            raw_types = raw.get("document_types") or []
+            if isinstance(raw_types, str):
+                raw_types = [raw_types]
+            document_types = tuple(
+                dict.fromkeys(
+                    str(item).strip()
+                    for item in raw_types
+                    if str(item).strip() in allowed_types
+                )
+            )
+            targets.append(
+                ResearchEvidenceTarget(
+                    label=label,
+                    query=query,
+                    document_types=document_types or fallback_document_types,
+                    required=bool(raw.get("required", True)),
+                )
+            )
+            seen_queries.add(query)
+    if targets:
+        return tuple(targets)
+
+    # A fallback has no explicit relation map. The planner contract defines
+    # each evidence query as an independently checkable route, so retain all
+    # of them as required objectives rather than silently validating only the
+    # first high-scoring clause.
+    fallback_targets: list[ResearchEvidenceTarget] = []
+    for index, query in enumerate(fallback_queries[:4], start=1):
+        if not query:
+            continue
+        label = (
+            fallback_dimensions[index - 1]
+            if index <= len(fallback_dimensions)
+            else f"证据目标{index}"
+        )
+        fallback_targets.append(
+            ResearchEvidenceTarget(
+                label=label,
+                query=query,
+                document_types=fallback_document_types,
+                required=True,
+            )
+        )
+    return tuple(fallback_targets)
 
 
 def _explicit_titles(question: str) -> tuple[str, ...]:
@@ -198,7 +285,9 @@ class ResearchPlanner:
                 "content": (
                     "你是 geowiki 深度研究规划器。只制定本地私有知识库检索计划，不回答问题，"
                     "不使用互联网，不把模型记忆当作标准证据。识别基准文件、候选文件集合的标题模式、"
-                    "文件类型、比较维度和最多3条证据查询。候选集合必须能够从标准目录枚举，"
+                    "文件类型、比较维度和最多3条证据查询。evidence_targets 是最终结论必须具备的"
+                    "独立事实关系：只有不同条款、不同文件类型或不同条件分别成立时才拆成多个 required=true 目标；"
+                    "同义改写或召回补充不得伪装成独立目标。候选集合必须能够从标准目录枚举，"
                     "例如‘各分矿种规范’应使用‘矿产地质勘查规范’作为 corpus_title_terms，"
                     "不能只列出你记得的几个标准号。required_evidence_groups 组间为 AND、组内为 OR，"
                     "用于排除只共享普通关键词但没有目标关系的条款。明确区分基准文件和待审查文件。"
@@ -223,6 +312,14 @@ class ResearchPlanner:
                             "document_types": ["industry_standard"],
                             "comparison_dimensions": ["比较维度"],
                             "evidence_queries": ["用于每份候选文件内部检索的查询"],
+                            "evidence_targets": [
+                                {
+                                    "label": "一个必须回答的事实关系或条件维度",
+                                    "query": "只用于本地知识库检索的独立查询",
+                                    "document_types": ["policy_document"],
+                                    "required": True,
+                                }
+                            ],
                             "required_evidence_groups": [["每组至少命中一个术语，组间为AND关系"]],
                             "scope_note": "候选范围说明",
                         },
@@ -260,6 +357,7 @@ class ResearchPlanner:
             for value in _clean_list(payload.get("document_types"), limit=12)
             if value in allowed_types
         )
+        evidence_queries = _clean_list(payload.get("evidence_queries"), limit=3, item_limit=500) or fallback.evidence_queries
         plan = ResearchPlan(
             canonical_question=normalize_user_query(
                 str(payload.get("canonical_question") or fallback.canonical_question)
@@ -282,8 +380,14 @@ class ResearchPlanner:
             document_types=document_types or fallback.document_types,
             comparison_dimensions=_clean_list(payload.get("comparison_dimensions"), limit=10)
             or fallback.comparison_dimensions,
-            evidence_queries=_clean_list(payload.get("evidence_queries"), limit=3, item_limit=500)
-            or fallback.evidence_queries,
+            evidence_queries=evidence_queries,
+            evidence_targets=_clean_evidence_targets(
+                payload.get("evidence_targets"),
+                evidence_queries,
+                _clean_list(payload.get("comparison_dimensions"), limit=10)
+                or fallback.comparison_dimensions,
+                document_types or fallback.document_types,
+            ),
             required_evidence_groups=_clean_groups(payload.get("required_evidence_groups"))
             or fallback.required_evidence_groups,
             scope_note=normalize_user_query(str(payload.get("scope_note") or fallback.scope_note))[:400],
@@ -313,6 +417,7 @@ class ResearchPlanner:
                     document_types=fallback.document_types,
                     comparison_dimensions=fallback.comparison_dimensions,
                     evidence_queries=fallback.evidence_queries,
+                    evidence_targets=fallback.evidence_targets,
                     required_evidence_groups=fallback.required_evidence_groups,
                     scope_note=(
                         "只检索采矿权变更（续期）登记办事指南中的申请材料目录，"
@@ -334,6 +439,7 @@ class ResearchPlanner:
                 document_types=fallback.document_types,
                 comparison_dimensions=fallback.comparison_dimensions,
                 evidence_queries=fallback.evidence_queries,
+                evidence_targets=fallback.evidence_targets,
                 required_evidence_groups=fallback.required_evidence_groups,
                 scope_note="只检索采矿权申请资料清单及要求、对应政策附件和办事指南，不按发证机关分叉。",
             )
@@ -355,6 +461,7 @@ class ResearchPlanner:
                 ),
                 comparison_dimensions=fallback.comparison_dimensions,
                 evidence_queries=fallback.evidence_queries,
+                evidence_targets=fallback.evidence_targets,
                 required_evidence_groups=(),
                 scope_note=(
                     "围绕探矿权转采矿权及其正向等价表述检索一般政策、分矿种特殊规定和报告类型限制。"
@@ -373,8 +480,30 @@ class ResearchPlanner:
                 document_types=fallback.document_types,
                 comparison_dimensions=fallback.comparison_dimensions,
                 evidence_queries=fallback.evidence_queries,
+                evidence_targets=fallback.evidence_targets,
                 required_evidence_groups=fallback.required_evidence_groups,
                 scope_note=fallback.scope_note,
+            )
+        if ResearchPlanner._is_requirements_matrix(base):
+            fallback = ResearchPlanner._fallback(question, base)
+            return replace(
+                plan,
+                intent=fallback.intent,
+                strategy="requirements_matrix",
+                anchor_standard_numbers=tuple(
+                    dict.fromkeys((*fallback.anchor_standard_numbers, *plan.anchor_standard_numbers))
+                ),
+                document_types=tuple(
+                    dict.fromkeys((*fallback.document_types, *plan.document_types))
+                ),
+                comparison_dimensions=fallback.comparison_dimensions,
+                evidence_queries=plan.evidence_queries or fallback.evidence_queries,
+                evidence_targets=plan.evidence_targets or fallback.evidence_targets,
+                required_evidence_groups=(),
+                scope_note=(
+                    "按问题理解阶段识别出的独立条件维度分别检索；每个维度均需保留可回溯的直接条款，"
+                    "不得以单一高分条款替代其他条件或技术要求。"
+                ),
             )
         focus = _projection_focus(question)
         if not focus:
@@ -415,6 +544,7 @@ class ResearchPlanner:
         base_plan: QueryPlan | None = None,
     ) -> ResearchPlan:
         base = base_plan or understand_query(question)
+        requirements_matrix = ResearchPlanner._is_requirements_matrix(base)
         post_filing_steps = is_post_filing_license_steps_query(question)
         title_terms: list[str] = []
         document_types = list(base.document_types or default_document_types(base.intent))
@@ -459,6 +589,22 @@ class ResearchPlanner:
                 "department_rule",
                 "guidance",
             ]
+        if requirements_matrix and base.classification and base.classification.business_action:
+            document_types = list(
+                dict.fromkeys(
+                    (
+                        *document_types,
+                        "policy_document",
+                        "law",
+                        "regulation",
+                        "department_rule",
+                        "guidance",
+                        "standard",
+                        "national_standard",
+                        "industry_standard",
+                    )
+                )
+            )
         dimensions = base.comparison_dimensions or (
             "适用范围",
             "条件和前提",
@@ -552,6 +698,13 @@ class ResearchPlanner:
                 focus_query, focus_group = focus
                 evidence_queries = tuple(dict.fromkeys((*evidence_queries, focus_query)))[:3]
                 required_evidence_groups = (*required_evidence_groups, focus_group)
+        elif requirements_matrix:
+            dimensions = tuple(
+                base.classification.evidence_slots
+                if base.classification and base.classification.evidence_slots
+                else dimensions
+            )
+            evidence_queries = (base.retrieval_query or base.normalized_query,)
         return ResearchPlan(
             canonical_question=base.normalized_query,
             intent=base.intent,
@@ -561,7 +714,7 @@ class ResearchPlanner:
                 else "relation_discovery"
                 if base.intent == "exploration_to_mining_eligibility"
                 else "requirements_matrix"
-                if base.intent == "technical_stage_requirement"
+                if base.intent == "technical_stage_requirement" or requirements_matrix
                 else "cross_document_comparison"
             ),
             anchor_titles=tuple(
@@ -604,6 +757,12 @@ class ResearchPlanner:
             document_types=tuple(dict.fromkeys(document_types)),
             comparison_dimensions=tuple(dimensions),
             evidence_queries=evidence_queries,
+            evidence_targets=_clean_evidence_targets(
+                None,
+                evidence_queries,
+                tuple(dimensions),
+                tuple(dict.fromkeys(document_types)),
+            ),
             required_evidence_groups=required_evidence_groups,
             scope_note=(
                 "按采矿权变更（续期）登记办事指南核对评审备案后至领证前的材料和手续。"
@@ -614,6 +773,16 @@ class ResearchPlanner:
             query_classification=(
                 base.classification.to_payload() if base.classification else None
             ),
+        )
+
+    @staticmethod
+    def _is_requirements_matrix(base: QueryPlan) -> bool:
+        classification = base.classification
+        if classification is None:
+            return False
+        return bool(
+            classification.primary_intent in {"eligibility_condition", "technical_method"}
+            and classification.output_shape in {"condition_matrix", "requirements_and_advice"}
         )
 
 
@@ -645,6 +814,9 @@ class ResearchAnalyzer:
             }
             for index, source, document_id in indexed_sources
         ]
+        required_target_labels = tuple(
+            target.label for target in plan.evidence_targets if target.required
+        )
         messages = [
             {
                 "role": "system",
@@ -657,6 +829,10 @@ class ResearchAnalyzer:
                     "不能因为某个给定片段没有写到某项内容，就推断整份文件未规定或未提及；"
                     "not_covered 和 insufficient_evidence 由检索覆盖层判断，不在有直接引文的事实中使用。"
                     "每份文档最多提取3项事实，每项 finding 不超过180个汉字；严格区分有限外推和无限外推。"
+                    "当任务目标是条件矩阵或技术要求时，dimension 必须对应给定的条件维度；"
+                    "不得把不同条件、不同阶段或不同法律关系误写成文件之间的冲突或差异。"
+                    "evidence_targets 中每个 required=true 目标均须由至少一项事实明确标记 target_label；"
+                    "没有直接条款支撑的目标不得标记为已覆盖。"
                     "只返回 JSON。"
                 ),
             },
@@ -667,12 +843,21 @@ class ResearchAnalyzer:
                         "question": question,
                         "anchor_titles": plan.anchor_titles,
                         "comparison_dimensions": plan.comparison_dimensions,
+                        "evidence_targets": [
+                            {
+                                "label": target.label,
+                                "query": target.query,
+                                "required": target.required,
+                            }
+                            for target in plan.evidence_targets
+                        ],
                         "evidence": evidence,
                         "output_schema": {
                             "facts": [
                                 {
                                     "document_id": "文档ID",
                                     "classification": "consistent",
+                                    "target_label": "对应的 evidence_targets.label；单目标问题可留空",
                                     "dimension": "比较维度",
                                     "finding": "由引文直接支持的具体差异或要求",
                                     "source_indices": [1],
@@ -703,6 +888,7 @@ class ResearchAnalyzer:
 
         valid_indices = {index for index, _, _ in indexed_sources}
         document_by_index = {index: document_id for index, _, document_id in indexed_sources}
+        allowed_target_labels = set(required_target_labels)
         facts: list[dict[str, Any]] = []
         for value in values[:40]:
             if not isinstance(value, dict):
@@ -732,6 +918,9 @@ class ResearchAnalyzer:
             )
             if not finding:
                 continue
+            target_label = normalize_user_query(str(value.get("target_label") or ""))[:120]
+            if len(required_target_labels) > 1 and target_label not in allowed_target_labels:
+                continue
             if not (plan.anchor_titles or plan.anchor_standard_numbers):
                 if classification == "consistent":
                     classification = "equivalent_wording"
@@ -744,6 +933,7 @@ class ResearchAnalyzer:
                     "dimension": normalize_user_query(str(value.get("dimension") or ""))[:160],
                     "finding": finding,
                     "source_indices": list(dict.fromkeys(source_indices))[:5],
+                    "target_label": target_label or None,
                 }
             )
         if facts:
@@ -821,6 +1011,11 @@ def _source_from_hit(hit: dict[str, Any]) -> Source:
         source_platform=hit.get("source_platform"),
         source_role=hit.get("source_role"),
         validation_status=hit.get("validation_status"),
+        effective_status=hit.get("effective_status"),
+        status_source=hit.get("status_source"),
+        status_evidence=hit.get("status_evidence"),
+        status_checked_at=hit.get("status_checked_at"),
+        ocr_confidence=hit.get("ocr_confidence"),
     )
 
 
@@ -922,16 +1117,19 @@ class ResearchTaskRunner:
                 message="正在从知识库目录枚举候选文件。",
                 plan=plan.to_payload(),
             )
-            corpus = await knowledge.research_corpus(
-                {
-                    "title_terms": list(dict.fromkeys((*plan.corpus_title_terms, *plan.anchor_titles))),
-                    "standard_numbers": list(
-                        dict.fromkeys((*plan.corpus_standard_numbers, *plan.anchor_standard_numbers))
-                    ),
-                    "document_types": list(plan.document_types),
-                    "limit": settings.research_max_documents,
-                }
-            )
+            if plan.strategy == "requirements_matrix":
+                corpus = await self._discover_requirement_documents(task, plan, knowledge)
+            else:
+                corpus = await knowledge.research_corpus(
+                    {
+                        "title_terms": list(dict.fromkeys((*plan.corpus_title_terms, *plan.anchor_titles))),
+                        "standard_numbers": list(
+                            dict.fromkeys((*plan.corpus_standard_numbers, *plan.anchor_standard_numbers))
+                        ),
+                        "document_types": list(plan.document_types),
+                        "limit": settings.research_max_documents,
+                    }
+                )
             documents = list(corpus.get("items") or [])
             documents = self._prioritize_documents(documents, plan)
             total_documents = int(corpus.get("total") or len(documents))
@@ -959,7 +1157,7 @@ class ResearchTaskRunner:
                 )
                 return
 
-            sources_by_document, failed_documents = await self._retrieve_documents(
+            sources_by_document, failed_documents, covered_targets = await self._retrieve_documents(
                 store,
                 task_id,
                 task,
@@ -999,6 +1197,28 @@ class ResearchTaskRunner:
                 )
                 return
 
+            required_targets = [
+                target.label for target in plan.evidence_targets if target.required
+            ]
+            if len(required_targets) > 1:
+                missing_targets = [
+                    label for label in required_targets if label not in covered_targets
+                ]
+                if missing_targets:
+                    await self._finish_insufficient(
+                        store,
+                        task,
+                        plan,
+                        snapshot,
+                        total_documents,
+                        candidate_truncated,
+                        "已命中部分证据，但以下独立证据目标未获得直接条款："
+                        + "；".join(missing_targets),
+                        settings,
+                        examined_documents=len(documents),
+                    )
+                    return
+
             store.update_research_task(
                 task_id,
                 status="analyzing",
@@ -1014,7 +1234,20 @@ class ResearchTaskRunner:
             ]
             analyzer = ResearchAnalyzer(settings, llm)
             facts: list[dict[str, Any]] = []
-            if plan.intent == "service_materials":
+            if plan.strategy == "requirements_matrix":
+                # Do not dispatch condition matrices to a topic-specific
+                # formatter. The same evidence contract works for technical,
+                # administrative and mixed questions.
+                batch_size = settings.research_analysis_batch_size
+                for start in range(0, len(indexed_sources), batch_size):
+                    facts.extend(
+                        await analyzer.analyze_batch(
+                            task["retrieval_question"],
+                            plan,
+                            indexed_sources[start : start + batch_size],
+                        )
+                    )
+            elif plan.intent == "service_materials":
                 facts = self._service_material_facts(indexed_sources)
             elif plan.intent == "exploration_to_mining_eligibility":
                 facts = self._transfer_facts(indexed_sources)
@@ -1032,6 +1265,42 @@ class ResearchTaskRunner:
                             indexed_sources[start : start + batch_size],
                         )
                     )
+            if plan.strategy == "requirements_matrix" and not facts:
+                await self._finish_insufficient(
+                    store,
+                    task,
+                    plan,
+                    snapshot,
+                    total_documents,
+                    candidate_truncated,
+                    "已召回候选条款，但未能抽取可直接支持问题条件的结构化事实。",
+                    settings,
+                    examined_documents=len(documents),
+                )
+                return
+            if len(required_targets) > 1:
+                covered_fact_targets = {
+                    str(fact.get("target_label") or "")
+                    for fact in facts
+                    if fact.get("target_label")
+                }
+                missing_fact_targets = [
+                    label for label in required_targets if label not in covered_fact_targets
+                ]
+                if missing_fact_targets:
+                    await self._finish_insufficient(
+                        store,
+                        task,
+                        plan,
+                        snapshot,
+                        total_documents,
+                        candidate_truncated,
+                        "已召回候选条款，但以下证据目标未形成可直接推出的事实："
+                        + "；".join(missing_fact_targets),
+                        settings,
+                        examined_documents=len(documents),
+                    )
+                    return
             facts, sources = self._compact_fact_sources(facts, sources)
             store.update_research_task(
                 task_id,
@@ -1154,13 +1423,14 @@ class ResearchTaskRunner:
         total_documents: int,
         knowledge: KnowledgeClient,
         settings: Settings,
-    ) -> tuple[dict[str, list[Source]], int]:
+    ) -> tuple[dict[str, list[Source]], int, set[str]]:
         semaphore = asyncio.Semaphore(settings.research_document_concurrency)
         progress_lock = asyncio.Lock()
         examined = 0
         evidence_documents = 0
         failed_documents = 0
         results: dict[str, list[Source]] = {}
+        covered_targets: set[str] = set()
         combined_query = " ".join(
             dict.fromkeys(
                 (
@@ -1176,31 +1446,6 @@ class ResearchTaskRunner:
             nonlocal examined, evidence_documents, failed_documents
             document_id = str(document.get("document_id") or "")
             async with semaphore:
-                base = understand_query(combined_query)
-                scoped_plan: QueryPlan = replace(
-                    base,
-                    original_query=task["retrieval_question"],
-                    normalized_query=plan.canonical_question,
-                    retrieval_query=combined_query,
-                    intent=(
-                        plan.intent
-                        if plan.intent in {
-                            "service_materials",
-                            "exploration_to_mining_eligibility",
-                            "technical_stage_requirement",
-                        }
-                        else "cross_document_audit"
-                    ),
-                    candidate_title_terms=(),
-                    standard_numbers=(),
-                    document_types=(str(document.get("document_type") or "standard"),),
-                    required_evidence_groups=plan.required_evidence_groups,
-                    search_mode="scoped",
-                    comparison_dimensions=plan.comparison_dimensions,
-                    scope_origin="none",
-                    planner_used=plan.planner_used,
-                    exhaustive_search=False,
-                )
                 filters = dict(task.get("filters") or {})
                 filters["document_id"] = document_id
                 try:
@@ -1210,13 +1455,6 @@ class ResearchTaskRunner:
                         else 20
                         if plan.intent == "technical_stage_requirement"
                         else 6
-                    )
-                    response = await knowledge.search(
-                        combined_query,
-                        filters,
-                        scoped_plan,
-                        top_k=top_k,
-                        allow_web_supplement=False,
                     )
                     per_document_limit = (
                         24
@@ -1230,17 +1468,81 @@ class ResearchTaskRunner:
                         if plan.intent == "technical_stage_requirement"
                         else 2
                     )
-                    sources = [
-                        _source_from_hit(hit)
-                        for hit in response.results
-                        if (hit.get("quote") or hit.get("evidence_text"))
-                        and (hit.get("clause_no") or hit.get("section_path"))
-                        and self._hit_matches_research_plan(hit, plan)
-                        and not self._hit_is_normative_reference_list(
-                            hit,
-                            task["retrieval_question"],
+                    target_contract = (
+                        len(plan.evidence_targets) > 1
+                        or (
+                            not plan.evidence_targets
+                            and plan.strategy == "requirements_matrix"
+                            and len(plan.evidence_queries) > 1
                         )
-                    ][:per_document_limit]
+                    )
+                    if plan.evidence_targets:
+                        target_queries = tuple(
+                            (target.label, target.query) for target in plan.evidence_targets
+                        )
+                    elif plan.strategy == "requirements_matrix" and plan.evidence_queries:
+                        target_queries = tuple((query, query) for query in plan.evidence_queries)
+                    else:
+                        target_queries = (("核心结论", combined_query),)
+                    if target_contract:
+                        per_document_limit = max(per_document_limit, min(12, len(target_queries) * 3))
+                    sources: list[Source] = []
+                    for target_label, target_query in target_queries:
+                        base = understand_query(target_query)
+                        scoped_plan: QueryPlan = replace(
+                            base,
+                            original_query=task["retrieval_question"],
+                            normalized_query=plan.canonical_question,
+                            retrieval_query=target_query,
+                            intent=(
+                                plan.intent
+                                if plan.intent in {
+                                    "service_materials",
+                                    "exploration_to_mining_eligibility",
+                                    "technical_stage_requirement",
+                                }
+                                else "general"
+                            ),
+                            candidate_title_terms=(),
+                            standard_numbers=(),
+                            document_types=(str(document.get("document_type") or "standard"),),
+                            required_evidence_groups=(
+                                () if target_contract else plan.required_evidence_groups
+                            ),
+                            search_mode="scoped",
+                            comparison_dimensions=plan.comparison_dimensions,
+                            scope_origin="semantic_target",
+                            planner_used=plan.planner_used,
+                            exhaustive_search=False,
+                        )
+                        response = await knowledge.search(
+                            target_query,
+                            filters,
+                            scoped_plan,
+                            top_k=top_k,
+                            allow_web_supplement=False,
+                        )
+                        target_sources = [
+                            _source_from_hit(hit)
+                            for hit in response.results
+                            if (hit.get("quote") or hit.get("evidence_text"))
+                            and (hit.get("clause_no") or hit.get("section_path"))
+                            and self._hit_matches_research_plan(hit, scoped_plan)
+                            and not self._hit_is_normative_reference_list(
+                                hit,
+                                task["retrieval_question"],
+                            )
+                        ]
+                        target_sources = target_sources[:3]
+                        if target_sources:
+                            covered_targets.add(target_label)
+                        for source in target_sources:
+                            key = (source.chapter or "", source.quote or "")
+                            if key not in {(item.chapter or "", item.quote or "") for item in sources}:
+                                sources.append(source)
+                        if not target_contract and len(sources) >= per_document_limit:
+                            break
+                    sources = sources[:per_document_limit]
                     if sources:
                         results[document_id] = sources
                 except Exception:
@@ -1262,7 +1564,67 @@ class ResearchTaskRunner:
                     )
 
         await asyncio.gather(*(retrieve(document) for document in documents))
-        return results, failed_documents
+        return results, failed_documents, covered_targets
+
+    async def _discover_requirement_documents(
+        self,
+        task: dict[str, Any],
+        plan: ResearchPlan,
+        knowledge: KnowledgeClient,
+    ) -> dict[str, Any]:
+        documents: dict[str, dict[str, Any]] = {}
+        snapshot: str | None = None
+        target_queries = (
+            tuple(target.query for target in plan.evidence_targets)
+            or plan.evidence_queries
+            or (plan.canonical_question,)
+        )
+        for target_query in target_queries:
+            base = understand_query(target_query)
+            discovery_plan = replace(
+                base,
+                original_query=task["retrieval_question"],
+                normalized_query=plan.canonical_question,
+                retrieval_query=target_query,
+                intent="general",
+                candidate_title_terms=(),
+                standard_numbers=(),
+                document_types=plan.document_types,
+                required_evidence_groups=(),
+                search_mode="scoped",
+                scope_origin="semantic_target",
+                planner_used=plan.planner_used,
+                exhaustive_search=False,
+            )
+            response = await knowledge.search(
+                target_query,
+                dict(task.get("filters") or {}),
+                discovery_plan,
+                top_k=6,
+                allow_web_supplement=False,
+            )
+            snapshot = snapshot or response.coverage.get("knowledge_snapshot")
+            for hit in response.results:
+                document_id = str(hit.get("document_id") or "")
+                if not document_id:
+                    continue
+                documents.setdefault(
+                    document_id,
+                    {
+                        "document_id": document_id,
+                        "title": hit.get("title") or "",
+                        "standard_no": hit.get("standard_no") or "",
+                        "document_type": hit.get("document_type") or "standard",
+                    },
+                )
+        items = self._prioritize_documents(list(documents.values()), plan)
+        return {
+            "items": items,
+            "total": len(items),
+            "returned": len(items),
+            "truncated": False,
+            "knowledge_snapshot": snapshot,
+        }
 
     @staticmethod
     def _prioritize_documents(
@@ -1716,20 +2078,34 @@ class ResearchTaskRunner:
         llm: LLMClient,
         settings: Settings,
     ) -> str:
+        requirements_matrix = plan.strategy == "requirements_matrix"
         if plan.intent == "service_materials":
             return self._render_service_material_answer(plan, sources)
         if plan.intent == "exploration_to_mining_eligibility":
             return self._render_transfer_answer(sources)
         if plan.intent == "projection_comparison":
             return self._render_projection_comparison(question, facts, sources)
-        if plan.intent == "technical_stage_requirement":
+        # Retain the legacy renderer only for direct callers that do not pass
+        # extracted facts. Normal deep execution uses the generic contract and
+        # cannot silently skip a missing condition dimension.
+        if plan.intent == "technical_stage_requirement" and not requirements_matrix:
             return self._render_technical_stage_requirement_answer(question, sources)
-        summary = "本次研究已按知识库候选范围逐份检索，并仅使用命中的直接条款形成下列比较结果。"
+        if plan.intent == "technical_stage_requirement" and not facts:
+            return self._render_technical_stage_requirement_answer(question, sources)
+        summary = (
+            "本次研究已按问题中的独立条件维度检索，并仅使用命中的直接条款形成下列条件矩阵。"
+            if requirements_matrix
+            else "本次研究已按知识库候选范围逐份检索，并仅使用命中的直接条款形成下列比较结果。"
+        )
         document_count = len({fact.get("document_id") for fact in facts if fact.get("document_id")})
         if document_count:
             summary = (
                 f"本次研究在 {document_count} 份文件中形成了可回溯到直接条款的结构化事实。"
-                "下表按当前问题的比较维度列出直接依据和适用条件。"
+                + (
+                    "下表按问题的条件维度列出直接依据和适用条件。"
+                    if requirements_matrix
+                    else "下表按当前问题的比较维度列出直接依据和适用条件。"
+                )
             )
         if plan.intent == "projection_comparison" and facts:
             has_finite = any(fact.get("dimension") == "有限外推规则" for fact in facts)
@@ -1772,11 +2148,17 @@ class ResearchTaskRunner:
                             "role": "system",
                             "content": (
                                 "你是 geowiki 深度研究摘要器。只概括给定结构化事实，不能增加新标准、"
-                                "新数值或模型常识。用2至4句中文说明主要一致点、差异和不确定性。"
+                                "新数值或模型常识。用2至4句中文说明可直接推出的结论、适用条件和不确定性。"
                                 "必须保持用户问题限定的外推类型，严禁把有限外推当作无限外推，或反向替换。"
                                 "只有至少两份文件在同一比较维度上有直接事实时，才能概括为一致。"
-                                "\n"
-                                f"{prompt_text(settings, 'research_summary', primary_intent=(plan.query_classification or {}).get('primary_intent'))}"
+                                + (
+                                    "当前任务是条件矩阵，不得把不同条件维度表述为文件之间存在差异；"
+                                    "应先说明总体结论，再明确每项条件所对应的条款。"
+                                    if requirements_matrix
+                                    else ""
+                                )
+                                + "\n"
+                                + f"{prompt_text(settings, 'research_summary', primary_intent=(plan.query_classification or {}).get('primary_intent'))}"
                             ),
                         },
                         {
@@ -1812,10 +2194,19 @@ class ResearchTaskRunner:
             )
             document_meta.setdefault(document_id, source)
 
-        lines = ["**研究结论**", "", summary.strip(), "", "**对比结果**", ""]
+        lines = [
+            "**研究结论**",
+            "",
+            summary.strip(),
+            "",
+            "**条件与直接依据**" if requirements_matrix else "**对比结果**",
+            "",
+        ]
         lines.extend(
             [
-                "| 文件 | 判定 | 比较维度 | 具体发现 | 依据条款 |",
+                "| 文件 | 判定 | 条件维度 | 具体发现 | 依据条款 |"
+                if requirements_matrix
+                else "| 文件 | 判定 | 比较维度 | 具体发现 | 依据条款 |",
                 "| --- | --- | --- | --- | --- |",
             ]
         )

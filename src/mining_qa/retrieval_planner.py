@@ -57,10 +57,13 @@ ALLOWED_DOCUMENT_TYPES = {
 
 @dataclass(frozen=True)
 class QueryVariant:
+    """One independently verifiable evidence objective for a user question."""
+
     target: str
     query: str
     document_types: tuple[str, ...] = ()
     alternative_terms: tuple[str, ...] = ()
+    required: bool = True
 
 
 @dataclass(frozen=True)
@@ -70,6 +73,7 @@ class PlannerResult:
     elapsed_ms: float
     error: str | None = None
     query_variants: tuple[QueryVariant, ...] = ()
+    evidence_targets: tuple[QueryVariant, ...] = ()
 
 
 class RetrievalPlanner:
@@ -80,10 +84,12 @@ class RetrievalPlanner:
     async def plan(self, question: str, base_plan: QueryPlan) -> PlannerResult:
         started = perf_counter()
         if not self.settings.query_planner_enabled or not self.llm.enabled:
+            plan = apply_semantic_plan(base_plan, None)
             return PlannerResult(
-                plan=apply_semantic_plan(base_plan, None),
+                plan=plan,
                 used=False,
                 elapsed_ms=(perf_counter() - started) * 1000,
+                evidence_targets=self._primary_evidence_target(plan),
             )
 
         messages = [
@@ -99,6 +105,10 @@ class RetrievalPlanner:
                     "如果用户问哪些制度允许详查报告用于探矿权转采矿权，应识别为 exploration_to_mining_eligibility，"
                     "检索政策中的转采条件、勘查程度要求和技术标准中的报告类型限制；"
                     "必须区分行政上的探矿权转采矿权与技术上的矿山设计开采依据。"
+                    "凡是一个结论同时依赖行政准入条件、技术要求、阶段要求、材料要求或例外条件中的两项以上，"
+                    "必须生成对应数量的 subqueries，每一条只服务一个独立证据目标；"
+                    "这些目标不是可选同义词扩展，任何一个没有直接条款时都不能宣称已形成完整结论。"
+                    "用户已经列举多个条件分支时，应保留为条件矩阵，不得改写为跨文件比较或先要求补充其中一个分支。"
                     "行政申请语境中的‘要件、必备资料、所需资料’应理解为申请材料；"
                     "政策正文引用附件清单时，document_types 必须包含 policy_attachment，不能只检索父政策正文。"
                     "required_evidence_groups 是 AND 关系，每个子数组内部是 OR 关系。"
@@ -207,26 +217,49 @@ class RetrievalPlanner:
                 intent=base_plan.intent,
                 classification=base_plan.classification,
             )
+            variants = self._query_variants(payload.get("subqueries"), plan)
             return PlannerResult(
                 plan=plan,
                 used=True,
                 elapsed_ms=(perf_counter() - started) * 1000,
-                query_variants=self._query_variants(payload.get("subqueries"), plan),
+                query_variants=variants,
+                # A multi-part question is answerable only when every model-
+                # identified target has direct evidence. Simple questions use
+                # one primary target and keep the low-latency retrieval path.
+                evidence_targets=variants or self._primary_evidence_target(plan),
             )
         except (json.JSONDecodeError, TypeError, ValueError, OSError) as error:
+            plan = apply_semantic_plan(base_plan, None)
             return PlannerResult(
-                plan=apply_semantic_plan(base_plan, None),
+                plan=plan,
                 used=False,
                 elapsed_ms=(perf_counter() - started) * 1000,
                 error=type(error).__name__,
+                evidence_targets=self._primary_evidence_target(plan),
             )
         except Exception as error:
+            plan = apply_semantic_plan(base_plan, None)
             return PlannerResult(
-                plan=apply_semantic_plan(base_plan, None),
+                plan=plan,
                 used=False,
                 elapsed_ms=(perf_counter() - started) * 1000,
                 error=type(error).__name__,
+                evidence_targets=self._primary_evidence_target(plan),
             )
+
+    @staticmethod
+    def _primary_evidence_target(plan: QueryPlan) -> tuple[QueryVariant, ...]:
+        query = normalize_user_query(plan.retrieval_query or plan.normalized_query)
+        if not query:
+            return ()
+        return (
+            QueryVariant(
+                target="核心结论",
+                query=query,
+                document_types=plan.document_types,
+                alternative_terms=plan.alternative_terms[:4],
+            ),
+        )
 
     @staticmethod
     def _query_variants(values: object, plan: QueryPlan) -> tuple[QueryVariant, ...]:

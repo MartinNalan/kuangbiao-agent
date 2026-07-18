@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from types import SimpleNamespace
 
 from mining_qa.config import Settings
 from mining_qa.research import (
@@ -294,6 +295,75 @@ class ResearchPlannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plan.anchor_standard_numbers, ("DZ/T 0340-2020",))
         self.assertEqual(plan.corpus_title_terms, ("矿产勘查矿石加工选冶技术性能试验研究程度要求",))
         self.assertIn("6.4.1", plan.evidence_queries[0])
+
+    def test_generic_requirement_questions_use_matrix_strategy(self) -> None:
+        plan = ResearchPlanner._fallback("矿区开发论证的技术研究要求应达到什么程度？")
+
+        self.assertEqual(plan.strategy, "requirements_matrix")
+        self.assertFalse(plan.required_evidence_groups)
+
+    async def test_requirement_matrix_retrieves_each_evidence_query_independently(self) -> None:
+        plan = ResearchPlan(
+            canonical_question="矿区开发论证的条件和技术要求是什么？",
+            intent="general",
+            strategy="requirements_matrix",
+            document_types=("policy_document", "national_standard"),
+            evidence_queries=("行政准入条件", "技术研究要求"),
+        )
+
+        class FakeKnowledge:
+            async def search(self, query, filters, query_plan, **kwargs):
+                document_id = filters["document_id"]
+                if query == "行政准入条件" and document_id == "policy":
+                    return SimpleNamespace(
+                        results=[
+                            {
+                                "title": "管理办法",
+                                "standard_no": "政策文件",
+                                "clause_no": "第三条",
+                                "quote": "应当符合行政准入条件。",
+                                "source_type": "local_kb",
+                                "text_access": "html_text",
+                            }
+                        ]
+                    )
+                if query == "技术研究要求" and document_id == "standard":
+                    return SimpleNamespace(
+                        results=[
+                            {
+                                "title": "技术规范",
+                                "standard_no": "GB/T 0000-2020",
+                                "clause_no": "5.2",
+                                "quote": "应完成相应技术研究。",
+                                "source_type": "local_kb",
+                                "text_access": "ocr_text",
+                            }
+                        ]
+                    )
+                return SimpleNamespace(results=[])
+
+        class FakeStore:
+            def update_research_task(self, *args, **kwargs):
+                return None
+
+        documents = [
+            {"document_id": "policy", "document_type": "policy_document"},
+            {"document_id": "standard", "document_type": "national_standard"},
+        ]
+        sources, failures, covered = await ResearchTaskRunner()._retrieve_documents(
+            FakeStore(),
+            "task",
+            {"retrieval_question": plan.canonical_question, "filters": {}},
+            plan,
+            documents,
+            len(documents),
+            FakeKnowledge(),
+            Settings(OPENAI_API_KEY="configured"),
+        )
+
+        self.assertEqual(failures, 0)
+        self.assertEqual(covered, set(plan.evidence_queries))
+        self.assertEqual(set(sources), {"policy", "standard"})
 
 
 class ResearchAnalyzerTests(unittest.IsolatedAsyncioTestCase):

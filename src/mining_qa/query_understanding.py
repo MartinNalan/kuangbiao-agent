@@ -92,6 +92,7 @@ POST_FILING_LICENSE_ACTION_TERMS = (
 )
 AUTHORITY_INTENT_TERMS = (
     "哪个机构",
+    "哪个机关",
     "去哪个机构",
     "谁负责",
     "哪一级部门",
@@ -869,6 +870,7 @@ def normalize_user_query(query: str) -> str:
         normalized.replace("勘察", "勘查")
         .replace("工程距离", "工程间距")
         .replace("实验室流程实验", "实验室流程试验")
+        .replace("相差报告", "储量报告")
     )
     normalized = re.sub(r"\s+", " ", normalized).strip()
 
@@ -1494,6 +1496,27 @@ def understand_query(query: str) -> QueryPlan:
         "deterministic" if candidate_titles or standards else "none"
     )
     document_types = default_document_types(intent)
+    # Status verification is a governance lookup, not a standard-body search.
+    # It must include policies, amendments and regulations even though the
+    # legacy renderer continues to use the standard_selection intent.
+    if any(
+        term in normalized
+        for term in ("还有效", "是否有效", "现行", "废止", "替代", "最新版", "新版本")
+    ):
+        document_types = (
+            "standard",
+            "national_standard",
+            "industry_standard",
+            "amendment",
+            "policy_document",
+            "policy_attachment",
+            "law",
+            "regulation",
+            "department_rule",
+            "guidance",
+            "service_guide",
+            "administrative_service_guide",
+        )
     classification = build_classification(
         normalized,
         intent,

@@ -36,6 +36,7 @@ from .query_understanding import (
     query_plan_from_payload,
     understand_query,
 )
+from .mnr_policy_allowlist import normalize_document_number
 from .technical_test_hierarchy import (
     MINERAL_PROCESSING_TEST_LEVELS,
     actual_level_from_sufficiency_question,
@@ -99,6 +100,12 @@ class VectorCandidateResult:
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _status_title_terms(query: str) -> tuple[str, ...]:
+    compact = re.sub(r"[，,。？?！!：:\s]+", "", query or "")
+    compact = re.sub(r"(?:是否|现行|废止|失效|有效|替代|规定|规则|是什么|哪些)$", "", compact)
+    return tuple(term for term in (compact,) if len(term) >= 2)
 
 
 def connect(db_path: Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
@@ -264,6 +271,59 @@ def ensure_document_source_columns(conn: sqlite3.Connection) -> None:
         conn.execute("alter table documents add column official_url text")
     if "source_platform" not in columns:
         conn.execute("alter table documents add column source_platform text")
+    for name, declaration in (
+        ("effective_status", "text"),
+        ("status_source", "text"),
+        ("status_evidence", "text"),
+        ("status_checked_at", "text"),
+        ("attachment_count", "integer not null default 0"),
+    ):
+        if name not in columns:
+            conn.execute(f"alter table documents add column {name} {declaration}")
+    conn.executescript(
+        """
+        create table if not exists document_relations (
+          relation_id text primary key,
+          source_document_id text not null references documents(document_id) on delete cascade,
+          relation_type text not null,
+          target_document_id text references documents(document_id) on delete set null,
+          target_standard_no text,
+          effective_date text,
+          evidence_chunk_id text references chunks(chunk_id) on delete set null,
+          details_json text,
+          created_at text not null
+        );
+        create index if not exists idx_document_relations_target_standard
+          on document_relations(target_standard_no, relation_type);
+        create table if not exists clause_effects (
+          effect_id text primary key,
+          amendment_document_id text not null references documents(document_id) on delete cascade,
+          target_document_id text references documents(document_id) on delete set null,
+          target_standard_no text not null,
+          clause_no text not null,
+          effect_type text not null,
+          effective_date text,
+          evidence_chunk_id text references chunks(chunk_id) on delete set null,
+          evidence_text text,
+          created_at text not null,
+          unique(amendment_document_id, target_standard_no, clause_no, effect_type)
+        );
+        create index if not exists idx_clause_effects_standard_clause
+          on clause_effects(target_standard_no, clause_no, effect_type);
+        """
+    )
+    conn.execute(
+        """
+        update documents
+        set effective_status = case
+          when status in ('废止', '废止/失效', '已废止', '失效', 'deprecated', 'replaced') then 'repealed'
+          when status in ('current', 'active', '现行', '有效', '现行有效') then 'current'
+          when status is null or status = '' or status = 'unknown' then 'unverified'
+          else coalesce(effective_status, 'unverified')
+        end
+        where effective_status is null or effective_status = ''
+        """
+    )
 
 
 def official_source(standard_no: str | None) -> tuple[str | None, str | None]:
@@ -1963,10 +2023,219 @@ class KnowledgeStore:
             "ann_runtime_expansion_search": settings.ann_expansion_search,
         }
 
+    @staticmethod
+    def _is_status_verification(plan: QueryPlan, query: str) -> bool:
+        classification = plan.classification
+        return bool(
+            classification
+            and classification.primary_intent == "status_verification"
+        ) or any(
+            marker in query
+            for marker in ("是否现行", "是否废止", "还有效", "是否有效", "已废止", "被替代", "现行规定")
+        )
+
+    @staticmethod
+    def _status_payload(row: sqlite3.Row) -> tuple[str, str | None, str | None]:
+        status = str(row["effective_status"] or "unverified")
+        label = {
+            "current": "现行有效",
+            "repealed": "已废止或失效",
+            "governance_conflict": "时效状态存在冲突，待人工复核",
+            "unverified": "未完成官方时效核验",
+        }.get(status, status)
+        evidence = row["status_evidence"]
+        if not evidence:
+            try:
+                metadata = json.loads(row["bibliographic_json"] or "{}")
+            except json.JSONDecodeError:
+                metadata = {}
+            evidence = metadata.get("废止(失效)记录") or metadata.get("时效状态")
+        quote = f"该文件当前状态：{label}。"
+        if evidence:
+            quote += f" 状态依据：{evidence}"
+        if row["status_checked_at"]:
+            quote += f" 核验时间：{row['status_checked_at']}。"
+        return quote, status, evidence
+
+    def _search_document_status(
+        self,
+        query: str,
+        plan: QueryPlan,
+        started: float,
+    ) -> dict[str, Any]:
+        requested_numbers = {
+            normalize_document_number(number)
+            for number in plan.standard_numbers
+            if normalize_document_number(number)
+        }
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                select * from documents
+                where visibility in ('internal', 'public')
+                order by coalesce(status_checked_at, updated_at) desc, title
+                """
+            ).fetchall()
+        matched = [
+            row
+            for row in rows
+            if (
+                requested_numbers
+                and normalize_document_number(row["standard_no"]) in requested_numbers
+            )
+            or (
+                not requested_numbers
+                and any(term and term in row["title"] for term in _status_title_terms(query))
+            )
+        ]
+        items: list[dict[str, Any]] = []
+        for row in matched[:20]:
+            quote, effective_status, status_evidence = self._status_payload(row)
+            items.append(
+                {
+                    "chunk_id": None,
+                    "document_id": row["document_id"],
+                    "title": row["title"],
+                    "standard_no": row["standard_no"],
+                    "section_path": "文件时效状态",
+                    "clause_no": "时效状态",
+                    "page_start": None,
+                    "page_end": None,
+                    "page": None,
+                    "quote": quote,
+                    "evidence_text": quote,
+                    "score": 0.99,
+                    "hit_type": ["governance_status"],
+                    "source_type": "official_metadata" if row["status_source"] else row["source_type"],
+                    "text_access": "metadata_only",
+                    "validation_status": row["validation_status"],
+                    "url": row["official_url"],
+                    "source_platform": row["source_platform"],
+                    "document_type": row["document_type"],
+                    "source_role": source_role(row),
+                    "effective_status": effective_status,
+                    "status_source": row["status_source"],
+                    "status_evidence": status_evidence,
+                    "status_checked_at": row["status_checked_at"],
+                    "ocr_confidence": None,
+                }
+            )
+        found = bool(items)
+        total_ms = (perf_counter() - started) * 1000
+        return {
+            "query": query,
+            "results": items,
+            "retrieval": {
+                "full_text_hits": 0, "vector_hits": 0, "graph_hits": 0, "web_hits": 0,
+                "scoped_search": int(bool(requested_numbers)), "vector_skipped": 1,
+                "direct_evidence_hits": len(items), "candidate_count": len(items),
+                "ann_used": 0, "mmr_used": 0, "mmr_lambda": None,
+                "duplicate_ratio_before": 0.0, "duplicate_ratio_after": 0.0,
+                "vector_route": "none", "vector_error": None, "retrieval_round": 1,
+                "timings_ms": {"lexical_graph": 0.0, "embedding": 0.0, "vector_search": 0.0, "vector_total": 0.0, "mmr": 0.0, "total": round(total_ms, 3)},
+            },
+            "coverage": {
+                "has_clause_level_evidence": found,
+                "has_page_level_evidence": False,
+                "needs_web_supplement": not found,
+                "notes": [] if found else ["知识库中没有可核验的目标文件时效元数据。"],
+                "query_plan": {"normalized_query": plan.normalized_query, "intent": plan.intent, "status_lookup": True},
+            },
+        }
+
+    def _search_deleted_clause_effects(
+        self,
+        query: str,
+        plan: QueryPlan,
+        started: float,
+    ) -> dict[str, Any] | None:
+        requested_numbers = {
+            normalize_document_number(number)
+            for number in plan.standard_numbers
+            if normalize_document_number(number)
+        }
+        requested_clauses = set(re.findall(r"(?<![A-Za-z0-9])\d+(?:\.\d+)+(?![A-Za-z0-9])", query))
+        if not requested_numbers or not requested_clauses:
+            return None
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                select e.*, a.title as amendment_title, a.official_url, a.source_platform,
+                       a.effective_status, a.status_source, a.status_checked_at
+                from clause_effects e
+                join documents a on a.document_id = e.amendment_document_id
+                where e.effect_type = 'delete'
+                """
+            ).fetchall()
+        matches = [
+            row for row in rows
+            if normalize_document_number(row["target_standard_no"]) in requested_numbers
+            and row["clause_no"] in requested_clauses
+        ]
+        if not matches:
+            return None
+        items = []
+        for row in matches:
+            quote = f"{row['target_standard_no']} 第 {row['clause_no']} 条已被修改单删除，不得作为现行依据引用。"
+            if row["evidence_text"]:
+                quote += f" 修改依据：{row['evidence_text']}"
+            items.append({
+                "chunk_id": row["evidence_chunk_id"], "document_id": row["amendment_document_id"],
+                "title": row["amendment_title"], "standard_no": row["target_standard_no"],
+                "section_path": "修改单", "clause_no": row["clause_no"],
+                "page_start": None, "page_end": None, "page": None,
+                "quote": quote, "evidence_text": quote, "score": 0.99,
+                "hit_type": ["amendment_effect"], "source_type": "official_metadata",
+                "text_access": "ocr_text", "validation_status": "governance_verified",
+                "url": row["official_url"], "source_platform": row["source_platform"],
+                "document_type": "amendment", "source_role": "amendment",
+                "effective_status": row["effective_status"], "status_source": row["status_source"],
+                "status_evidence": row["evidence_text"], "status_checked_at": row["status_checked_at"],
+                "ocr_confidence": None,
+            })
+        total_ms = (perf_counter() - started) * 1000
+        retrieval = {"full_text_hits": 0, "vector_hits": 0, "graph_hits": 0, "web_hits": 0, "scoped_search": 1, "vector_skipped": 1, "direct_evidence_hits": len(items), "candidate_count": len(items), "ann_used": 0, "mmr_used": 0, "mmr_lambda": None, "duplicate_ratio_before": 0.0, "duplicate_ratio_after": 0.0, "vector_route": "none", "vector_error": None, "retrieval_round": 1, "timings_ms": {"lexical_graph": 0.0, "embedding": 0.0, "vector_search": 0.0, "vector_total": 0.0, "mmr": 0.0, "total": round(total_ms, 3)}}
+        coverage = {"has_clause_level_evidence": True, "has_page_level_evidence": False, "needs_web_supplement": False, "notes": ["目标条款已被修改单删除，系统未返回旧条款正文。"], "query_plan": {"normalized_query": plan.normalized_query, "intent": plan.intent, "amendment_effect": "delete"}}
+        return {"query": query, "results": items, "retrieval": retrieval, "coverage": coverage}
+
+    @staticmethod
+    def _deleted_clauses_for_plan(conn: sqlite3.Connection, plan: QueryPlan) -> dict[str, set[str]]:
+        numbers = [number for number in plan.standard_numbers if number]
+        if not numbers:
+            return {}
+        normalized = {normalize_document_number(number) for number in numbers}
+        rows = conn.execute("select target_standard_no, clause_no from clause_effects where effect_type = 'delete'").fetchall()
+        result: dict[str, set[str]] = {}
+        for row in rows:
+            standard_no = str(row["target_standard_no"] or "")
+            if normalize_document_number(standard_no) in normalized:
+                result.setdefault(normalize_document_number(standard_no), set()).add(str(row["clause_no"]))
+        return result
+
+    @staticmethod
+    def _candidate_is_deleted_clause(row: sqlite3.Row, deleted: dict[str, set[str]]) -> bool:
+        standard_no = normalize_document_number(row["standard_no"])
+        clause = str(row["clause_no"] or "").strip()
+        return bool(clause and clause in deleted.get(standard_no, set()))
+
+    @staticmethod
+    def _candidate_quality_eligible(row: sqlite3.Row) -> bool:
+        if "confidence" not in row.keys() or row["confidence"] is None:
+            return True
+        try:
+            return float(row["confidence"]) >= 0.6
+        except (TypeError, ValueError):
+            return False
+
     def search(self, payload: dict[str, Any]) -> dict[str, Any]:
         started = perf_counter()
         query = str(payload.get("query") or "").strip()
         plan = query_plan_from_payload(query, payload.get("retrieval_plan"))
+        if self._is_status_verification(plan, query):
+            return self._search_document_status(query, plan, started)
+        deleted_effects = self._search_deleted_clause_effects(query, plan, started)
+        if deleted_effects is not None:
+            return deleted_effects
         retrieval_query = plan.retrieval_query or plan.normalized_query or query
         filters = payload.get("filters") or {}
         options = payload.get("options") or {}
@@ -2009,6 +2278,10 @@ class KnowledgeStore:
             placeholders = ",".join("?" for _ in doc_types)
             base_where.append(f"d.document_type in ({placeholders})")
             base_params.extend(doc_types)
+        # Current-use questions must never treat a document whose official
+        # metadata says it has been repealed as positive evidence. Historical
+        # status lookups are handled by _search_document_status above.
+        base_where.append("coalesce(d.effective_status, '') != 'repealed'")
 
         scope_document_ids: list[str] = []
         scope_applied = False
@@ -2096,8 +2369,15 @@ class KnowledgeStore:
                 base_params,
             )
 
+            deleted_clauses = self._deleted_clauses_for_plan(conn, plan)
+
         items = []
-        candidates = list(candidate_rows.values())
+        candidates = [
+            candidate
+            for candidate in candidate_rows.values()
+            if not self._candidate_is_deleted_clause(candidate["row"], deleted_clauses)
+            and self._candidate_quality_eligible(candidate["row"])
+        ]
         for candidate in candidates:
             candidate["final_score"] = self._candidate_fusion_score(candidate, plan)
         ranked = sorted(
@@ -2229,6 +2509,11 @@ class KnowledgeStore:
                 "source_platform": row["source_platform"],
                 "document_type": row["document_type"],
                 "source_role": source_role(row),
+                "effective_status": row["effective_status"] if "effective_status" in row.keys() else None,
+                "status_source": row["status_source"] if "status_source" in row.keys() else None,
+                "status_evidence": row["status_evidence"] if "status_evidence" in row.keys() else None,
+                "status_checked_at": row["status_checked_at"] if "status_checked_at" in row.keys() else None,
+                "ocr_confidence": row["confidence"] if "confidence" in row.keys() else None,
             }
             if include_full_text:
                 item["text"] = row["text"]
