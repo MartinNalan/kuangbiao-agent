@@ -359,13 +359,28 @@ class QuestionResolver:
         matrix_answer_available = self._can_answer_as_condition_matrix(canonical_plan)
         if (
             payload.is_ambiguous
-            and payload.confidence >= self.settings.question_resolution_min_confidence
-            and len(options) >= 2
             and not complete_material_classification
             and not matrix_answer_available
+            and (
+                payload.confidence < self.settings.question_resolution_min_confidence
+                or len(options) >= 2
+            )
         ):
             interpreted = canonical if canonical != normalized else normalized
-            reason = normalize_user_query(payload.reason)[:300] or "当前问题存在多个会影响检索范围的专业方向。"
+            reliable_options = (
+                payload.confidence >= self.settings.question_resolution_min_confidence
+                and len(options) >= 2
+            )
+            if reliable_options:
+                reason = (
+                    normalize_user_query(payload.reason)[:300]
+                    or "当前问题存在多个会影响检索范围的专业方向。"
+                )
+            else:
+                reason = (
+                    "系统识别到该问题可能存在会影响检索范围的歧义，但当前无法可靠地给出候选方向；"
+                    "请补充具体业务事项、对象或希望核对的关系。"
+                )
             clarification = Clarification(
                 pending_slot=(payload.missing_slots[0] if payload.missing_slots else None),
                 resolved_slots=(
@@ -375,7 +390,7 @@ class QuestionResolver:
                 ),
                 interpreted_question=interpreted,
                 reason=reason,
-                options=options,
+                options=options if reliable_options else [],
                 allow_free_text=True,
             )
             return QuestionResolution(
@@ -746,6 +761,7 @@ class QuestionResolver:
             classification
             and classification.primary_intent == "service_materials"
             and "application_type" in classification.missing_slots
+            and not QuestionResolver._is_material_inventory_overview(original)
         ):
             return Clarification(
                 pending_slot="application_type",
@@ -928,6 +944,18 @@ class QuestionResolver:
             and any(term in question for term in MINING_RIGHT_LICENSE_TERMS)
             and not any(term in question for term in MINING_RIGHT_APPLICATION_TERMS)
             and not is_post_filing_license_steps_query(question)
+        )
+
+    @staticmethod
+    def _is_material_inventory_overview(question: str) -> bool:
+        compact = re.sub(r"\s+", "", question or "")
+        return bool(
+            any(term in compact for term in MINING_RIGHT_LICENSE_TERMS)
+            and any(
+                marker in compact
+                for marker in ("前置条件", "申请类型", "各类", "分类", "总体", "整体", "概览")
+            )
+            and any(term in compact for term in MINING_RIGHT_MATERIAL_TERMS)
         )
 
     @classmethod

@@ -2,7 +2,7 @@
 
 ## Current Priority
 
-1. Continue improving retrieval ranking and clause parsing with real questions.
+1. Complete document-status verification for all positive-answer evidence before further ranking tuning.
 
 ## Tasks
 
@@ -26,6 +26,7 @@
 | T016 | KB agent | done | Treat `/home/nalanmading/下载/0. 继续有效文件.xls` as the authoritative allowlist for previously web-crawled MNR files published before 2026. Completely remove every in-scope pre-2026 crawled document whose normalized document number is absent from the workbook, remove all active derived data, and prevent future re-ingestion. | `scripts/govern_mnr_policy_allowlist.py`, refreshed private `data/knowledge_base/`, deletion manifest, regression results, `coordination/kb_agent_status.md` |
 | T017 | KB agent | done | Ingest the 40 structured MNR mineral-service guides under `/home/nalanmading/下载/2. geowiki` as a distinct official service-guide corpus, preserving sections, application-material tables, official source links, attachment links, and flowchart links. | idempotent ingest script, refreshed private `data/knowledge_base/`, service-guide manifest, regression results, `coordination/kb_agent_status.md` |
 | T018 | KB agent | done | Parse and index `自然资规〔2023〕4号` attachment 4, `采矿权申请资料清单及要求.doc`, as structured evidence linked to the parent policy and relevant service guides. | attachment parser, structured material chunks/tables, refreshed private indexes, regressions, `coordination/kb_agent_status.md` |
+| T019 | KB agent | pending | Reconcile the five `effective_status='unverified'` documents that remain eligible by review and answerability. Verify each against its official source, record `status_source`/`status_evidence`/`status_checked_at`, then set `effective_status` to `current`, `repealed`, or `governance_conflict` only with evidence. Do not promote by title or model memory. The immediate regression blocker is `DZ/T 0430-2023《固体矿产资源储量核实报告编写规范》`: its 291 existing chunks must remain unavailable to positive answers until status verification completes. Rebuild only affected retrieval artifacts if document IDs/chunks change; status-only changes do not require content re-ingestion. | refreshed private SQLite KB and metadata-only verification report in `coordination/kb_agent_status.md`; `PRAGMA integrity_check`; update `scripts/run_kb_regression.py` so report-limit assertions require a `current` document rather than silently accepting `unverified`; `cloud_sync_required=true` |
 
 ## T018 Execution Contract
 

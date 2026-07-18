@@ -245,6 +245,14 @@ def legacy_intent_for_primary(primary_intent: str, fallback: str = "general") ->
         return fallback
     if primary_intent == "cross_document_comparison" and fallback not in {"general", "projection_rule"}:
         return fallback
+    if primary_intent == "service_workflow" and fallback in {
+        "service_procedure_basis",
+        "service_time_limit",
+    }:
+        # The primary classification groups procedure and time-limit questions
+        # under one workflow strategy. Preserve the legacy sub-intent because
+        # it carries a distinct evidence validator and renderer.
+        return fallback
     return value
 
 

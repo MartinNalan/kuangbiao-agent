@@ -90,6 +90,24 @@ SYSTEM_PROMPT = """你是矿产资源标准知识问答 agent。
 UNRESOLVED_CONFIRMATION_LINE = re.compile(
     r"(?:请先确认办理类型|变更申请还需进一步说明具体变更事项|请选择更接近你实际需求的方向)"
 )
+STANDARD_REFERENCE_RE = re.compile(
+    r"\b(?:GB|DZ|MT|YS|HJ|JGJ|SL|TD|AQ|NB|DB)(?:[/／][A-Z]{0,4})?\s*\d{2,6}(?:\.\d+)?[-－]\d{4}\b",
+    flags=re.IGNORECASE,
+)
+POLICY_REFERENCE_RE = re.compile(
+    r"[\u4e00-\u9fff]{1,12}〔\d{4}〕\d{1,4}号"
+)
+CONCRETE_VALUE_RE = re.compile(
+    r"(?<![A-Za-z0-9])\d+(?:\.\d+)?\s*(?:[-~～至]\s*\d+(?:\.\d+)?)?\s*(?:%|％|件|项|个|份|天|日|小时|h|m|米|千米|吨|t|克|kg|公斤|页|条|次|个月|年|万元|元)(?![A-Za-z0-9])",
+    flags=re.IGNORECASE,
+)
+FRACTION_RE = re.compile(r"(?<![0-9])\d+\s*[／/]\s*\d+(?![0-9])")
+DATE_RE = re.compile(r"\d{4}年(?:\d{1,2}月(?:\d{1,2}日)?)?")
+AUTHORITY_ASSERTION_RE = re.compile(
+    r"(?P<subject>自然资源部|(?:省|市|县)级自然资源主管部门|自然资源主管部门|国务院)"
+    r"[^。；;\n]{0,48}?(?P<verb>负责|主管|审批|登记|备案|颁发)"
+)
+NORMATIVE_CLAIM_MARKERS = ("仅限", "仅在", "前提", "条件", "除非", "不得", "必须", "应当", "可以", "需要", "需", "为准")
 
 
 class MiningQAAgent:
@@ -141,6 +159,24 @@ class MiningQAAgent:
 
         filters = request.filters.model_dump(exclude_none=True)
         base_plan = request.query_plan or understand_query(question)
+        if (
+            base_plan.classification
+            and base_plan.classification.primary_intent == "out_of_scope"
+        ):
+            limitations = Limitations(
+                has_clause_level_evidence=False,
+                notes=["问题理解阶段判定为领域外，未执行知识库检索。"],
+            )
+            response = AskResponse(
+                answer="本服务仅回答矿产资源、地质勘查、矿山设计、自然资源管理及相关标准政策问题，无法处理该问题。",
+                session_id=session_id,
+                status="out_of_scope",
+                limitations=limitations,
+                confidence="low",
+            )
+            response.retrieval.total_ms = round((perf_counter() - started) * 1000, 3)
+            self._write_trace(trace_id, question, base_plan, response, {})
+            return response
         planner_result = await self.planner.plan(question, base_plan)
         plan = planner_result.plan
         evidence_targets = planner_result.evidence_targets
@@ -468,6 +504,15 @@ class MiningQAAgent:
                 "已拦截包含本次证据以外文件引用的生成内容，并改用可回溯证据答案。"
             )
             generation_details["grounding_guard_triggered"] = True
+        elif self._answer_has_unsupported_factual_claim(answer, sources):
+            # A real citation does not make an invented number, authority or
+            # condition trustworthy. Fall back to the evidence itself when a
+            # concrete claim cannot be traced to this request's sources.
+            answer = self._fast_answer(question, sources, plan) or self._evidence_summary_answer(sources)
+            limitations.notes.append(
+                "已拦截本次证据未支撑的具体事实主张，并改用可回溯证据答案。"
+            )
+            generation_details["factual_grounding_guard_triggered"] = True
         answer = self._append_source_links(answer, sources)
         response = AskResponse(
             answer=answer,
@@ -1062,6 +1107,17 @@ class MiningQAAgent:
         if not hits:
             return []
         effective_plan = plan or understand_query(question)
+        # Catalog hits answer only a genuine standard-selection request. For
+        # clause, table, materials and authority questions they are metadata
+        # hints, not evidence; otherwise a synthetic 0.99 catalog score can
+        # suppress the lower-scored but directly relevant clause rows from the
+        # same document.
+        if effective_plan.intent != "standard_selection":
+            direct_hits = [
+                hit for hit in hits if "catalog" not in (hit.get("hit_type") or [])
+            ]
+            if direct_hits:
+                hits = direct_hits
         if effective_plan.intent == "definition_explanation" and effective_plan.definition_slots:
             selected: list[dict] = []
             for slot in effective_plan.definition_slots:
@@ -1170,7 +1226,10 @@ class MiningQAAgent:
                     and all(label in quote for label in required_labels)
                 ):
                     return [hit]
-        if self._is_standard_selection_question(question):
+        if (
+            effective_plan.intent == "standard_selection"
+            and self._is_standard_selection_question(question)
+        ):
             catalog_hits = [hit for hit in hits if "catalog" in (hit.get("hit_type") or [])]
             if catalog_hits:
                 return catalog_hits[:1]
@@ -2073,6 +2132,45 @@ class MiningQAAgent:
                     application_label = application_label or "变更"
 
                 if application_label is None:
+                    overview_sections = [
+                        item
+                        for item in attachment_sources
+                        if (item.chapter or "") in {
+                            "附件4 > 适用类型",
+                            "附件4 > 新立",
+                            "附件4 > 延续",
+                            "附件4 > 变更",
+                            "附件4 > 注销",
+                        }
+                    ]
+                    overview_labels = {
+                        "附件4 > 新立": "新立",
+                        "附件4 > 延续": "延续",
+                        "附件4 > 变更": "变更",
+                        "附件4 > 注销": "注销",
+                    }
+                    if overview_sections and any(
+                        (item.chapter or "") == "附件4 > 适用类型"
+                        for item in overview_sections
+                    ):
+                        lines = [
+                            "采矿权申请资料不适用一套统一清单。"
+                            "**自然资规〔2023〕4号《采矿权申请资料清单及要求》的附件4已经完整、结构化入库，"
+                            "应按办理类型确定要件：**",
+                            "",
+                        ]
+                        for item in overview_sections:
+                            label = overview_labels.get(item.chapter or "")
+                            if label:
+                                lines.append(f"- **{label}**：{item.quote}")
+                        lines.extend(
+                            [
+                                "",
+                                "请进一步明确是新立、延续、变更还是注销；变更还需明确具体变更事项，"
+                                "才能列出逐项必须材料。",
+                            ]
+                        )
+                        return "\n".join(lines)
                     return None
 
                 def material_sequence(item: Source) -> int:
@@ -2667,29 +2765,95 @@ class MiningQAAgent:
         if not answer:
             return False
         allowed_numbers = {
-            re.sub(r"\s+", "", source.standard_no or "").upper()
+            MiningQAAgent._normalize_grounding_text(source.standard_no or "")
             for source in sources
             if source.standard_no
         }
+        evidence_corpus = MiningQAAgent._evidence_corpus(sources)
+        allowed_numbers.update(
+            MiningQAAgent._normalize_grounding_text(match.group(0))
+            for match in (*STANDARD_REFERENCE_RE.finditer(evidence_corpus), *POLICY_REFERENCE_RE.finditer(evidence_corpus))
+        )
         allowed_titles = {
-            re.sub(r"\s+", "", source.title or "")
+            MiningQAAgent._normalize_grounding_text(source.title or "")
             for source in sources
             if source.title
         }
-        # Covers GB/T, DZ/T and analogous Chinese standard/document numbers.
-        number_pattern = re.compile(
-            r"\b(?:GB|DZ|MT|YS|HJ|JGJ|SL|TD|AQ|NB|DB)[/／][A-Z]{0,4}\s*[〔\[（(]?\d{2,6}(?:[〕\]）)]|[-.]\d{1,4})?",
-            flags=re.IGNORECASE,
-        )
-        for number in number_pattern.findall(answer):
-            normalized = re.sub(r"\s+", "", number).upper()
+        for match in (*STANDARD_REFERENCE_RE.finditer(answer), *POLICY_REFERENCE_RE.finditer(answer)):
+            normalized = MiningQAAgent._normalize_grounding_text(match.group(0))
             if normalized not in allowed_numbers:
                 return True
         for title in re.findall(r"《([^》]{2,120})》", answer):
-            normalized = re.sub(r"\s+", "", title)
-            if normalized and normalized not in allowed_titles:
+            normalized = MiningQAAgent._normalize_grounding_text(title)
+            if normalized and normalized not in allowed_titles and normalized not in MiningQAAgent._normalize_grounding_text(evidence_corpus):
                 return True
         return False
+
+    @staticmethod
+    def _normalize_grounding_text(value: str) -> str:
+        return re.sub(r"[\s\-－—~～,，。；;:：()（）\[\]【】]", "", value or "").upper()
+
+    @staticmethod
+    def _evidence_corpus(sources: list[Source]) -> str:
+        return "\n".join(
+            part
+            for source in sources
+            for part in (source.standard_no or "", source.title or "", source.chapter or "", source.quote or "")
+            if part
+        )
+
+    @classmethod
+    def _answer_has_unsupported_factual_claim(cls, answer: str, sources: list[Source]) -> bool:
+        """Verify concrete output facts against the evidence supplied to generation.
+
+        This is intentionally a conservative deterministic guard. It does not
+        claim to solve full natural-language entailment; it prevents the common
+        high-risk failure mode where a valid source is cited next to invented
+        quantities, dates, authority assignments or normative conditions.
+        """
+        if not answer or not sources:
+            return bool(answer)
+        evidence = cls._evidence_corpus(sources)
+        normalized_evidence = cls._normalize_grounding_text(evidence)
+
+        concrete_values = [match.group(0) for match in CONCRETE_VALUE_RE.finditer(answer)]
+        concrete_values.extend(match.group(0) for match in FRACTION_RE.finditer(answer))
+        concrete_values.extend(match.group(0) for match in DATE_RE.finditer(answer))
+        for value in concrete_values:
+            if cls._normalize_grounding_text(value) not in normalized_evidence:
+                return True
+
+        for match in AUTHORITY_ASSERTION_RE.finditer(answer):
+            subject = match.group("subject")
+            verb = match.group("verb")
+            if not re.search(
+                rf"{re.escape(subject)}[^。；;\n]{{0,64}}{re.escape(verb)}",
+                evidence,
+            ):
+                return True
+
+        for sentence in re.split(r"[。；;\n]+", answer):
+            compact = cls._normalize_grounding_text(sentence)
+            if len(compact) < 12 or not any(marker in sentence for marker in NORMATIVE_CLAIM_MARKERS):
+                continue
+            if cls._claim_has_insufficient_textual_support(compact, normalized_evidence):
+                return True
+        return False
+
+    @staticmethod
+    def _claim_has_insufficient_textual_support(claim: str, evidence: str) -> bool:
+        # Character bigrams are a language-independent fallback for Chinese
+        # text. A claim with little overlap is a new substantive condition,
+        # not merely a concise restatement of the source.
+        bigrams = {
+            claim[index:index + 2]
+            for index in range(len(claim) - 1)
+            if not claim[index:index + 2].isdigit()
+        }
+        if len(bigrams) < 5:
+            return False
+        supported = sum(1 for value in bigrams if value in evidence)
+        return supported / len(bigrams) < 0.38
 
     def _insufficient_answer(self, question: str, notes: list[str]) -> str:
         details = "\n".join(f"- {note}" for note in notes) if notes else "- 当前没有可用条款级证据。"

@@ -73,6 +73,27 @@ class QuestionResolverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result.clarification.options), 2)  # type: ignore[union-attr]
         self.assertEqual(llm.calls, 1)
 
+    async def test_low_confidence_ambiguity_stops_before_retrieval(self) -> None:
+        llm = FakeResolutionLLM(
+            {
+                "canonical_question": "金矿勘查工作如何安排？",
+                "intent": "general",
+                "is_ambiguous": True,
+                "confidence": 0.3,
+                "missing_slots": ["technical_goal"],
+                "reason": "不确定用户是询问工程布置、试验研究还是报告编制。",
+                "interpretations": [],
+            }
+        )
+        resolver = QuestionResolver(self.settings(), llm=llm)  # type: ignore[arg-type]
+
+        result = await resolver.resolve("金矿勘查工作如何安排？")
+
+        self.assertTrue(result.requires_clarification)
+        self.assertEqual(result.clarification.options, [])  # type: ignore[union-attr]
+        self.assertTrue(result.clarification.allow_free_text)  # type: ignore[union-attr]
+        self.assertIn("无法可靠", result.clarification.reason)  # type: ignore[union-attr]
+
     async def test_broad_goaf_schema_overrides_model_under_confirmation(self) -> None:
         llm = FakeResolutionLLM(
             {
@@ -407,6 +428,17 @@ class QuestionResolverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.plan.classification.primary_intent, "service_materials")  # type: ignore[union-attr]
         self.assertEqual(result.plan.classification.application_type, "change")  # type: ignore[union-attr]
         self.assertEqual(result.plan.classification.change_subtype, "expand_area")  # type: ignore[union-attr]
+
+    async def test_material_inventory_overview_can_answer_without_application_type(self) -> None:
+        resolver = QuestionResolver(
+            Settings(QUESTION_RESOLUTION_ENABLED=True, OPENAI_API_KEY=""),
+        )
+
+        result = await resolver.resolve("采矿权申请的前置条件及要件有哪些？")
+
+        self.assertFalse(result.requires_clarification)
+        self.assertEqual(result.plan.intent, "service_materials")
+        self.assertIn("application_type", result.plan.classification.missing_slots)  # type: ignore[union-attr]
 
     async def test_generic_change_materials_returns_five_subtypes(self) -> None:
         resolver = QuestionResolver(

@@ -13,6 +13,7 @@ from mining_qa.knowledge_store import (
     VectorCandidateResult,
     authority_evidence_quote,
     connect,
+    governed_answer_document_where,
     row_has_technical_requirement_sufficiency_evidence,
     is_policy_condition_query,
     policy_condition_row_priority,
@@ -113,6 +114,108 @@ class QueryUnderstandingTests(unittest.TestCase):
                 [source],
             )
         )
+
+    def test_answer_guard_rejects_unsupported_document_number_and_concrete_values(self) -> None:
+        source = Source(
+            title="矿产勘查矿石加工选冶技术性能试验研究程度要求",
+            standard_no="DZ/T 0340-2020",
+            chapter="6.4",
+            quote="详查阶段应根据矿石性质开展相应试验研究。",
+            source_type="local_kb",
+            text_access="ocr_text",
+        )
+        agent = object.__new__(MiningQAAgent)
+
+        self.assertTrue(
+            agent._answer_has_unverified_document_reference(
+                "自然资规〔2099〕99号对此另有规定。",
+                [source],
+            )
+        )
+        self.assertTrue(
+            agent._answer_has_unsupported_factual_claim(
+                "依据 DZ/T 0340-2020，样品不得少于50件，连续运行不少于72小时。",
+                [source],
+            )
+        )
+
+    def test_answer_guard_allows_concrete_fact_present_in_evidence(self) -> None:
+        source = Source(
+            title="矿产地质勘查规范 岩金",
+            standard_no="DZ/T 0205-2020",
+            chapter="4.3.2",
+            quote="自然资源部负责本级审批事项。试验样品不得少于50件，连续运行不少于72小时。",
+            source_type="local_kb",
+            text_access="ocr_text",
+        )
+        agent = object.__new__(MiningQAAgent)
+
+        self.assertFalse(
+            agent._answer_has_unsupported_factual_claim(
+                "自然资源部负责本级审批事项；试验样品不得少于50件，连续运行不少于72小时。",
+                [source],
+            )
+        )
+
+    def test_answer_guard_rejects_unsupported_authority_and_condition(self) -> None:
+        source = Source(
+            title="矿产资源管理规定",
+            standard_no="自然资规〔2023〕6号",
+            chapter="十、",
+            quote="自然资源部负责本级已颁发采矿许可证的矿产资源储量评审备案工作。申请人应当提交评审备案文件。",
+            source_type="local_kb",
+            text_access="ocr_text",
+        )
+        agent = object.__new__(MiningQAAgent)
+
+        self.assertTrue(
+            agent._answer_has_unsupported_factual_claim(
+                "省级自然资源主管部门负责本级已颁发采矿许可证的评审备案工作。",
+                [source],
+            )
+        )
+        self.assertTrue(
+            agent._answer_has_unsupported_factual_claim(
+                "申请人必须提交环境影响评价报告后才能办理。",
+                [source],
+            )
+        )
+
+    def test_catalog_hint_does_not_displace_clause_evidence(self) -> None:
+        agent = object.__new__(MiningQAAgent)
+        catalog = {
+            "document_id": "doc-gold",
+            "chunk_id": None,
+            "title": "矿产地质勘查规范 岩金",
+            "standard_no": "DZ/T 0205-2020",
+            "section_path": "标准目录",
+            "quote": "标准目录命中。",
+            "score": 0.99,
+            "hit_type": ["catalog"],
+        }
+        direct = engineering_row()
+        direct.update(
+            {
+                "quote": "表 F.1：Ⅰ类型；坑探-穿脉 80～160 m；坑探-沿脉 80～160 m；钻探-走向 80～160 m；钻探-倾斜 80～160 m。",
+                "score": 0.58,
+                "hit_type": ["full_text"],
+            }
+        )
+
+        selected = agent._select_evidence_hits(  # noqa: SLF001
+            [catalog, direct],
+            "金矿勘查Ⅰ类型的推荐工程间距是多少？",
+            understand_query("金矿勘查Ⅰ类型的推荐工程间距是多少？"),
+        )
+
+        self.assertEqual([item["chunk_id"] for item in selected], ["chunk-f1"])
+
+    def test_service_time_limit_survives_primary_intent_round_trip(self) -> None:
+        plan = understand_query("矿产资源开采方案的办结时限是多久？")
+        restored = query_plan_from_payload(plan.normalized_query, plan.to_payload())
+
+        self.assertEqual(plan.intent, "service_time_limit")
+        self.assertEqual(restored.intent, "service_time_limit")
 
     def test_equivalent_exploration_type_forms_share_one_plan(self) -> None:
         plans = [understand_query(question) for question in QUESTIONS]
@@ -539,6 +642,74 @@ class RetrievalStrategyTests(unittest.TestCase):
         self.assertEqual(result.route, "local_hash")
         self.assertEqual(result.candidates[0][0]["chunk_id"], "chunk-f1")
 
+    def test_answer_retrieval_and_research_corpus_share_current_governance_filter(self) -> None:
+        records = (
+            ("current", "current", "approved_for_service", 1, "1001"),
+            ("repealed", "repealed", "approved_for_service", 1, "1002"),
+            ("unverified", "unverified", "approved_for_service", 1, "1003"),
+            ("conflict", "governance_conflict", "approved_for_service", 1, "1004"),
+            ("draft", "current", "review_pending", 1, "1005"),
+            ("nonanswerable", "current", "approved_for_service", 0, "1006"),
+        )
+        with connect(self.store.db_path) as connection:
+            for document_id, effective_status, review_status, can_answer, number in records:
+                connection.execute(
+                    """
+                    insert into documents(
+                      document_id, title, standard_no, document_type, status, source_type,
+                      text_access, validation_status, visibility, review_status, effective_status,
+                      ingestion_time, updated_at, page_count, chunk_count, table_count, can_answer
+                    ) values (?, ?, ?, 'policy_document', 'current', 'local_kb', 'ocr_text',
+                              'approved', 'internal', ?, ?, 'now', 'now', 1, 1, 0, ?)
+                    """,
+                    (
+                        document_id,
+                        f"矿业权转让规定-{document_id}",
+                        f"自然资规〔2026〕{number}号",
+                        review_status,
+                        effective_status,
+                        can_answer,
+                    ),
+                )
+                connection.execute(
+                    """
+                    insert into chunks(
+                      chunk_id, document_id, chunk_type, title, standard_no, clause_no, text,
+                      source_type, text_access, parse_method, validation_status, visibility, created_at
+                    ) values (?, ?, 'text', ?, ?, '第三条', '矿业权转让应当按照现行规定办理审批。',
+                              'local_kb', 'ocr_text', 'test', 'approved', 'internal', 'now')
+                    """,
+                    (
+                        f"chunk-{document_id}",
+                        document_id,
+                        f"矿业权转让规定-{document_id}",
+                        f"自然资规〔2026〕{number}号",
+                    ),
+                )
+
+            rows = connection.execute(
+                f"""
+                select document_id from documents d
+                where {' and '.join(governed_answer_document_where('d'))}
+                order by document_id
+                """
+            ).fetchall()
+
+        self.assertEqual([row["document_id"] for row in rows], ["current"])
+
+        result = self.store.search(
+            {"query": "矿业权转让是否需要审批？", "options": {"top_k": 20}}
+        )
+        self.assertEqual({item["document_id"] for item in result["results"]}, {"current"})
+        self.assertEqual({item["effective_status"] for item in result["results"]}, {"current"})
+
+        corpus = self.store.research_corpus({"title_terms": ["矿业权转让规定"]})
+        self.assertEqual(corpus["total"], 1)
+        self.assertEqual([item["document_id"] for item in corpus["items"]], ["current"])
+
+        status = self.store.search({"query": "自然资规〔2026〕1002号是否废止？"})
+        self.assertEqual(status["results"][0]["document_id"], "repealed")
+
 
 class EvidenceRerankerTests(unittest.IsolatedAsyncioTestCase):
     async def test_multi_target_question_requires_direct_evidence_for_every_target(self) -> None:
@@ -886,7 +1057,7 @@ class FastAnswerTests(unittest.TestCase):
         self.assertNotIn("2.14", answer)
         self.assertIn("没有作为同名、独立术语", answer)
 
-    def test_generic_mining_right_requirements_do_not_bypass_confirmation(self) -> None:
+    def test_material_inventory_overview_returns_type_level_answer(self) -> None:
         agent = object.__new__(MiningQAAgent)
         sources = [
             Source(
@@ -918,7 +1089,9 @@ class FastAnswerTests(unittest.TestCase):
             understand_query("采矿权申请的前置条件及要件有哪些"),
         ) or ""
 
-        self.assertEqual(answer, "")
+        self.assertIn("附件4已经完整、结构化入库", answer)
+        for label in ("新立", "延续", "变更", "注销"):
+            self.assertIn(f"**{label}**", answer)
         self.assertIn(
             "application_type",
             understand_query("采矿权申请的前置条件及要件有哪些").classification.missing_slots,

@@ -70,6 +70,15 @@ def assert_true(condition: bool, label: str) -> None:
         raise AssertionError(label)
 
 
+def effective_status(standard_no: str) -> str | None:
+    with sqlite3.connect(f"file:{KB_DB_PATH}?mode=ro", uri=True) as connection:
+        row = connection.execute(
+            "select effective_status from documents where standard_no = ? limit 1",
+            (standard_no,),
+        ).fetchone()
+    return str(row[0]) if row and row[0] else None
+
+
 def assert_search(query: str, expected_title: str, expected_source_type: str | None = None) -> None:
     result = post_json(
         f"{KB_URL}/knowledge/search",
@@ -240,7 +249,15 @@ def assert_complex_relation_retrieval() -> None:
     eligibility_hits = eligibility.get("results") or []
     standard_numbers = {hit.get("standard_no") for hit in eligibility_hits}
     assert_true("自然资规〔2023〕4号" in standard_numbers, "eligibility query should retrieve policy condition")
-    assert_true("DZ/T 0430-2023" in standard_numbers, "eligibility query should retrieve report-type limitation")
+    report_limit_status = effective_status("DZ/T 0430-2023")
+    if report_limit_status == "current":
+        assert_true("DZ/T 0430-2023" in standard_numbers, "eligibility query should retrieve report-type limitation")
+    else:
+        assert_true(
+            "DZ/T 0430-2023" not in standard_numbers,
+            "non-current report-limit document must not enter positive answer retrieval",
+        )
+        print(f"INFO governance: DZ/T 0430-2023 is {report_limit_status or 'missing'}; report-limit evidence is withheld")
     print("OK search: controlled complex-relation retrieval")
 
 
@@ -575,6 +592,7 @@ def assert_api() -> None:
         any(source.get("source_role") == "parent_policy" for source in basis.get("sources") or []),
         "T018 basis API source should identify parent_policy",
     )
+    report_limit_status = effective_status("DZ/T 0430-2023")
     eligibility_answers = []
     for eligibility_question in (
         "哪些标准、制度规定了详查报告就可以转采？",
@@ -585,14 +603,30 @@ def assert_api() -> None:
             {"question": eligibility_question},
             headers=headers,
         )
-        assert_true(eligibility.get("status") == "answered", "eligibility API question should be answered")
         eligibility_answer = eligibility.get("answer", "")
-        assert_true("经评审备案的矿产资源储量报告" in eligibility_answer, "eligibility answer missing policy precondition")
-        assert_true("不能替代探矿权转采矿权" in eligibility_answer, "eligibility answer missing report limitation")
-        assert_true(eligibility.get("retrieval", {}).get("planner_used") is False, "eligibility should skip planner")
-        assert_true(eligibility.get("retrieval", {}).get("reranker_used") is False, "eligibility should skip reranker")
-        eligibility_answers.append(eligibility_answer)
-    assert_true(len(set(eligibility_answers)) == 1, "eligibility paraphrases should produce one stable answer")
+        if report_limit_status == "current":
+            assert_true(eligibility.get("status") == "answered", "eligibility API question should be answered")
+            assert_true("经评审备案的矿产资源储量报告" in eligibility_answer, "eligibility answer missing policy precondition")
+            assert_true("不能替代探矿权转采矿权" in eligibility_answer, "eligibility answer missing report limitation")
+            assert_true(eligibility.get("retrieval", {}).get("planner_used") is False, "eligibility should skip planner")
+            assert_true(eligibility.get("retrieval", {}).get("reranker_used") is False, "eligibility should skip reranker")
+            eligibility_answers.append(eligibility_answer)
+        else:
+            assert_true(
+                "不能替代探矿权转采矿权" not in eligibility_answer,
+                "API must not use an unverified report-limit document as positive evidence",
+            )
+            assert_true(
+                "DZ/T 0430-2023" not in {source.get("standard_no") for source in eligibility.get("sources") or []},
+                "API sources must not expose an unverified report-limit document as positive evidence",
+            )
+            eligibility_answers.append(
+                (
+                    eligibility.get("status"),
+                    tuple(sorted(source.get("standard_no") or "" for source in eligibility.get("sources") or [])),
+                )
+            )
+    assert_true(len(set(eligibility_answers)) == 1, "eligibility paraphrases should produce one stable governed outcome")
 
     companion = post_json(
         f"{API_URL}/api/ask",

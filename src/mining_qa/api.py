@@ -157,6 +157,46 @@ async def resolve_question(
         await resolver.aclose()
 
 
+def resolution_is_out_of_scope(resolution: QuestionResolution) -> bool:
+    classification = resolution.plan.classification
+    return bool(classification and classification.primary_intent == "out_of_scope")
+
+
+def semantic_out_of_scope_response(
+    resolution: QuestionResolution,
+    *,
+    session_id: str,
+    request_id: str,
+    mode: str,
+    quota: dict[str, object] | None = None,
+) -> AskResponse:
+    quota_info = None
+    if quota is not None:
+        snapshot = dict(quota)
+        snapshot["consumed"] = False
+        snapshot["consumed_units"] = 0
+        quota_info = QuotaInfo(**snapshot)
+    return AskResponse(
+        answer="本服务仅回答矿产资源、地质勘查、矿山设计、自然资源管理及相关标准政策问题，无法处理该问题。",
+        session_id=session_id,
+        request_id=request_id,
+        status="out_of_scope",
+        confidence="low",
+        quota=quota_info,
+        mode="deep" if mode == "deep" else "basic",
+        quota_cost=0,
+        query_classification=(
+            resolution.plan.classification.to_payload()
+            if resolution.plan.classification
+            else None
+        ),
+        limitations={
+            "has_clause_level_evidence": False,
+            "notes": ["问题理解阶段判定为领域外，未执行知识库检索、联网补充或补库任务。"],
+        },
+    )
+
+
 def clarification_response(
     resolution: QuestionResolution,
     *,
@@ -727,6 +767,41 @@ async def ask(
             inherited_plan=inherited_plan,
             resolved_slots=resolved_slots,
         )
+        if resolution_is_out_of_scope(resolution):
+            quota_snapshot = None
+            if principal.user_id and principal.quota_managed:
+                quota_snapshot = store.quota_snapshot(
+                    principal.user_id,
+                    settings.quota_timezone,
+                )
+            result = semantic_out_of_scope_response(
+                resolution,
+                session_id=conversation_id or payload.session_id or str(uuid4()),
+                request_id=request_id,
+                mode="basic",
+                quota=quota_snapshot,
+            )
+            usage_logger.write(
+                {
+                    "user_id": principal.user_id,
+                    "credential_id": principal.credential_id,
+                    "auth_type": principal.auth_type,
+                    "endpoint": "/api/ask",
+                    "method": "POST",
+                    "client_host": http_request.client.host if http_request.client else None,
+                    "request_id": request_id,
+                    "question_chars": len(payload.question),
+                    "status": result.status,
+                    "quota_consumed": False,
+                    "quota_consumed_units": 0,
+                    "quota_remaining": result.quota.remaining if result.quota else None,
+                    "question_resolution_used": resolution.model_used,
+                    "question_resolution_error": resolution.error,
+                    "query_classification": result.query_classification,
+                    "duration_ms": round((perf_counter() - started) * 1000, 2),
+                }
+            )
+            return result
         if resolution.requires_clarification:
             resolution = persist_clarification(
                 store,
@@ -1005,6 +1080,14 @@ async def create_research_task(
             inherited_plan=inherited_plan,
             resolved_slots=resolved_slots,
         )
+        if resolution_is_out_of_scope(resolution):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "OUT_OF_SCOPE",
+                    "message": "深度模式仅处理矿产资源、地质标准规范和相关政策技术问题。",
+                },
+            )
         if resolution.requires_clarification:
             resolution = persist_clarification(
                 store,

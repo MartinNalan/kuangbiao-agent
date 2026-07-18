@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from dataclasses import replace
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
@@ -26,6 +27,7 @@ os.environ["QUESTION_RESOLUTION_ENABLED"] = "false"
 from mining_qa.api import app  # noqa: E402
 from mining_qa.auth import get_account_store  # noqa: E402
 from mining_qa.question_resolution import QuestionResolution  # noqa: E402
+from mining_qa.query_classification import QueryClassification  # noqa: E402
 from mining_qa.query_understanding import understand_query  # noqa: E402
 from mining_qa.schemas import (  # noqa: E402
     AskResponse,
@@ -220,6 +222,38 @@ class ApiAccountTests(unittest.TestCase):
         summary = self.store.account_summary(user["user_id"], "Asia/Shanghai")
         self.assertEqual(summary["quota"]["used"], 0)
         self.assertEqual(summary["quota"]["reserved"], 0)
+
+    def test_semantic_out_of_scope_stops_before_agent_and_quota(self) -> None:
+        user = self.register(self.client, "semantic-out-of-scope@example.com")
+        plan = understand_query("矿产报告怎么写？")
+        out_of_scope_plan = replace(
+            plan,
+            classification=QueryClassification(
+                version="1.0",
+                primary_intent="out_of_scope",
+                confidence=0.95,
+            ),
+        )
+        resolution = QuestionResolution(
+            canonical_question="矿产报告怎么写？",
+            plan=out_of_scope_plan,
+            model_used=True,
+        )
+        with (
+            patch("mining_qa.api.resolve_question", AsyncMock(return_value=resolution)),
+            patch("mining_qa.api.MiningQAAgent") as agent_class,
+        ):
+            response = self.client.post("/api/ask", json={"question": "矿产报告怎么写？"})
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["status"], "out_of_scope")
+        self.assertFalse(payload["quota"]["consumed"])
+        self.assertEqual(payload["quota_cost"], 0)
+        self.assertEqual(payload["query_classification"]["primary_intent"], "out_of_scope")
+        agent_class.assert_not_called()
+        summary = self.store.account_summary(user["user_id"], "Asia/Shanghai")
+        self.assertEqual(summary["quota"]["used"], 0)
 
     def test_deep_clarification_does_not_create_task_or_reserve_quota(self) -> None:
         user = self.register(self.client, "clarification-deep@example.com")

@@ -85,6 +85,23 @@ MMR_ELIGIBLE_INTENTS = {
 }
 
 
+def governed_answer_document_where(alias: str = "d") -> list[str]:
+    """Return the non-bypassable eligibility predicate for answer evidence.
+
+    Status lookup and deletion-effect lookup intentionally use their own
+    queries because they must be able to describe repealed or unverified
+    documents. Every route that retrieves positive evidence for an answer
+    must use this predicate instead.
+    """
+    prefix = f"{alias}." if alias else ""
+    return [
+        f"{prefix}visibility in ('internal', 'public')",
+        f"{prefix}review_status = 'approved_for_service'",
+        f"coalesce({prefix}can_answer, 0) = 1",
+        f"coalesce({prefix}effective_status, '') = 'current'",
+    ]
+
+
 @dataclass(frozen=True)
 class VectorCandidateResult:
     candidates: tuple[tuple[sqlite3.Row, float], ...] = ()
@@ -322,6 +339,12 @@ def ensure_document_source_columns(conn: sqlite3.Connection) -> None:
           else coalesce(effective_status, 'unverified')
         end
         where effective_status is null or effective_status = ''
+        """
+    )
+    conn.execute(
+        """
+        create index if not exists idx_documents_answer_governance
+        on documents(visibility, review_status, can_answer, effective_status)
         """
     )
 
@@ -2263,7 +2286,10 @@ class KnowledgeStore:
         include_full_text = bool(options.get("include_full_text"))
         retrieval_round = max(1, int(options.get("retrieval_round") or 1))
 
-        base_where = ["d.visibility in ('internal', 'public')"]
+        # This predicate is shared by FTS, graph, ANN, explicit reference
+        # recall and policy-condition recall. Do not create a pre-governance
+        # copy for a supplemental retrieval route.
+        base_where = governed_answer_document_where("d")
         base_params: list[Any] = []
         standard_no = filters.get("standard_no")
         if standard_no:
@@ -2280,8 +2306,6 @@ class KnowledgeStore:
             placeholders = ",".join("?" for _ in statuses)
             base_where.append(f"d.status in ({placeholders})")
             base_params.extend(statuses)
-        policy_base_where = list(base_where)
-        policy_base_params = list(base_params)
         requested_doc_types = filters.get("document_types") or []
         if isinstance(requested_doc_types, str):
             requested_doc_types = [requested_doc_types]
@@ -2296,11 +2320,6 @@ class KnowledgeStore:
             placeholders = ",".join("?" for _ in doc_types)
             base_where.append(f"d.document_type in ({placeholders})")
             base_params.extend(doc_types)
-        # Current-use questions must never treat a document whose official
-        # metadata says it has been repealed as positive evidence. Historical
-        # status lookups are handled by _search_document_status above.
-        base_where.append("coalesce(d.effective_status, '') != 'repealed'")
-
         scope_document_ids: list[str] = []
         scope_applied = False
         vector_ran = False
@@ -2367,8 +2386,8 @@ class KnowledgeStore:
                 conn,
                 candidate_rows,
                 plan,
-                policy_base_where,
-                policy_base_params,
+                base_where,
+                base_params,
             )
 
             if not self._evidence_sufficient_without_vectors(candidate_rows, plan, scope_applied):
@@ -2417,6 +2436,23 @@ class KnowledgeStore:
             ]
             if evidence_ranked:
                 ranked = evidence_ranked
+        if plan.intent == "service_materials" and service_application_section_terms(plan):
+            # Once the application type is known, Attachment 4 is the
+            # authoritative typed material inventory. Service guides and the
+            # parent policy remain useful for broad questions, but must not
+            # dilute or truncate a selected type's row-by-row checklist.
+            typed_attachment_rows = [
+                item
+                for item in ranked
+                if item[1]["row"]["document_type"] == "policy_attachment"
+                and item[1]["row"]["chunk_type"] == "application_material_row"
+                and any(
+                    str(item[1]["row"]["section_path"] or "").startswith(term)
+                    for term in service_application_section_terms(plan)
+                )
+            ]
+            if typed_attachment_rows:
+                ranked = typed_attachment_rows
         if plan.intent == "engineering_distance_lookup":
             ranked.sort(
                 key=lambda item: (
@@ -2686,7 +2722,9 @@ class KnowledgeStore:
             if not match or len(results) >= recall_limit:
                 return
             sql = f"""
-                select c.*, d.document_type, d.status, d.official_url, d.source_platform, bm25(chunks_fts) as rank
+                select c.*, d.document_type, d.status, d.official_url, d.source_platform,
+                       d.effective_status, d.status_source, d.status_evidence, d.status_checked_at,
+                       bm25(chunks_fts) as rank
                 from chunks_fts
                 join chunks c on c.chunk_id = chunks_fts.chunk_id
                 join documents d on d.document_id = c.document_id
@@ -2721,7 +2759,9 @@ class KnowledgeStore:
             pattern = f"%{term}%"
             like_params.extend([pattern, pattern, pattern])
         sql = f"""
-            select c.*, d.document_type, d.status, d.official_url, d.source_platform, 0.0 as rank
+            select c.*, d.document_type, d.status, d.official_url, d.source_platform,
+                   d.effective_status, d.status_source, d.status_evidence, d.status_checked_at,
+                   0.0 as rank
             from chunks c
             join documents d on d.document_id = c.document_id
             where c.validation_status != 'empty_source_section' and {' and '.join(where + like_where)}
@@ -2834,7 +2874,9 @@ class KnowledgeStore:
         )
         rows = conn.execute(
             f"""
-            select c.*, d.document_type, d.status, d.official_url, d.source_platform, 0.0 as rank
+            select c.*, d.document_type, d.status, d.official_url, d.source_platform,
+                   d.effective_status, d.status_source, d.status_evidence, d.status_checked_at,
+                   0.0 as rank
             from chunks c
             join documents d on d.document_id = c.document_id
             where {' and '.join(base_where)}
@@ -2864,7 +2906,9 @@ class KnowledgeStore:
             return
         rows = conn.execute(
             f"""
-            select c.*, d.document_type, d.status, d.official_url, d.source_platform, 0.0 as rank
+            select c.*, d.document_type, d.status, d.official_url, d.source_platform,
+                   d.effective_status, d.status_source, d.status_evidence, d.status_checked_at,
+                   0.0 as rank
             from chunks c
             join documents d on d.document_id = c.document_id
             where {' and '.join(where)}
@@ -2893,7 +2937,9 @@ class KnowledgeStore:
         section_where = " or ".join("c.section_path like ?" for _ in section_terms)
         rows = conn.execute(
             f"""
-            select c.*, d.document_type, d.status, d.official_url, d.source_platform, 0.0 as rank
+            select c.*, d.document_type, d.status, d.official_url, d.source_platform,
+                   d.effective_status, d.status_source, d.status_evidence, d.status_checked_at,
+                   0.0 as rank
             from chunks c
             join documents d on d.document_id = c.document_id
             where {' and '.join(base_where)}
@@ -2925,7 +2971,9 @@ class KnowledgeStore:
         placeholders = ",".join("?" for _ in clauses)
         rows = conn.execute(
             f"""
-            select c.*, d.document_type, d.status, d.official_url, d.source_platform, 0.0 as rank
+            select c.*, d.document_type, d.status, d.official_url, d.source_platform,
+                   d.effective_status, d.status_source, d.status_evidence, d.status_checked_at,
+                   0.0 as rank
             from chunks c
             join documents d on d.document_id = c.document_id
             where {' and '.join(base_where)}
@@ -2959,7 +3007,9 @@ class KnowledgeStore:
             params.extend(f"%{term}%" for term in context_terms)
         rows = conn.execute(
             f"""
-            select c.*, d.document_type, d.status, d.official_url, d.source_platform, 0.0 as rank
+            select c.*, d.document_type, d.status, d.official_url, d.source_platform,
+                   d.effective_status, d.status_source, d.status_evidence, d.status_checked_at,
+                   0.0 as rank
             from chunks c
             join documents d on d.document_id = c.document_id
             where {' and '.join(base_where)}
@@ -3320,7 +3370,9 @@ class KnowledgeStore:
                         placeholders = ",".join("?" for _ in chunk_ids)
                         rows = conn.execute(
                             f"""
-                            select c.*, d.document_type, d.status, d.official_url, d.source_platform, 0.0 as rank
+                            select c.*, d.document_type, d.status, d.official_url, d.source_platform,
+                                   d.effective_status, d.status_source, d.status_evidence, d.status_checked_at,
+                                   0.0 as rank
                             from chunks c
                             join documents d on d.document_id = c.document_id
                             where c.chunk_id in ({placeholders}) and {' and '.join(where)}
@@ -3369,7 +3421,9 @@ class KnowledgeStore:
         try:
             rows = conn.execute(
                 f"""
-                select c.*, d.document_type, d.status, d.official_url, d.source_platform, e.vector_json, 0.0 as rank
+                select c.*, d.document_type, d.status, d.official_url, d.source_platform,
+                       d.effective_status, d.status_source, d.status_evidence, d.status_checked_at,
+                       e.vector_json, 0.0 as rank
                 from chunk_embeddings e
                 join chunks c on c.chunk_id = e.chunk_id
                 join documents d on d.document_id = c.document_id
@@ -3497,7 +3551,9 @@ class KnowledgeStore:
         try:
             rows = conn.execute(
                 f"""
-                select c.*, d.document_type, d.status, d.official_url, d.source_platform, v.vector_json, 0.0 as rank
+                select c.*, d.document_type, d.status, d.official_url, d.source_platform,
+                       d.effective_status, d.status_source, d.status_evidence, d.status_checked_at,
+                       v.vector_json, 0.0 as rank
                 from chunk_vectors v
                 join chunks c on c.chunk_id = v.chunk_id
                 join documents d on d.document_id = c.document_id
@@ -3568,7 +3624,9 @@ class KnowledgeStore:
             try:
                 return conn.execute(
                     f"""
-                    select c.*, d.document_type, d.status, d.official_url, d.source_platform, 0.0 as rank,
+                    select c.*, d.document_type, d.status, d.official_url, d.source_platform,
+                           d.effective_status, d.status_source, d.status_evidence, d.status_checked_at,
+                           0.0 as rank,
                            max(r.confidence) as graph_score
                     from (
                       select e.entity_id
@@ -3685,11 +3743,7 @@ class KnowledgeStore:
             if str(value).strip()
         ][:20]
 
-        where = [
-            "visibility in ('internal', 'public')",
-            "review_status = 'approved_for_service'",
-            "can_answer = 1",
-        ]
+        where = governed_answer_document_where("")
         params: list[Any] = []
         if document_types:
             placeholders = ",".join("?" for _ in document_types)
@@ -3725,13 +3779,12 @@ class KnowledgeStore:
                 [*params, limit],
             ).fetchall()
             snapshot_row = conn.execute(
-                """
+                f"""
                 SELECT count(*) AS document_count,
                        coalesce(sum(chunk_count), 0) AS chunk_count,
                        coalesce(max(updated_at), max(ingestion_time), '') AS updated_at
                 FROM documents
-                WHERE visibility in ('internal', 'public')
-                  AND review_status = 'approved_for_service'
+                WHERE {' AND '.join(governed_answer_document_where(''))}
                 """
             ).fetchone()
         snapshot_payload = (

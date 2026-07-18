@@ -134,6 +134,15 @@ class DomainLexiconTests(unittest.TestCase):
         self.assertFalse(DomainGate().check("护照应该去哪里申请").in_scope)
         self.assertTrue(DomainGate().check("采矿证应该去哪里申请").in_scope)
 
+    def test_generic_document_words_do_not_admit_other_domains(self) -> None:
+        for question in (
+            "年度财务报告怎么写？",
+            "HTTP标准是什么？",
+            "软件工程规范有哪些？",
+        ):
+            with self.subTest(question=question):
+                self.assertFalse(DomainGate().check(question).in_scope)
+
 
 if __name__ == "__main__":
     unittest.main()
