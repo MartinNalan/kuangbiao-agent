@@ -575,6 +575,48 @@ class ResearchAnalyzerTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    def test_projection_facts_keep_the_more_complete_duplicate_clause(self) -> None:
+        sources = [
+            (
+                1,
+                Source(
+                    title="测试规范",
+                    standard_no="DZ/T 9999-2020",
+                    chapter="6.2",
+                    quote="无限外推时，边缘见矿工程外无工程控制，按基本工程间距确定外推范围。",
+                    source_type="local_kb",
+                    text_access="ocr_text",
+                ),
+                "doc",
+            ),
+            (
+                2,
+                Source(
+                    title="测试规范",
+                    standard_no="DZ/T 9999-2020",
+                    chapter="6.2",
+                    quote="无限外推时，边缘见矿工程外无工程控制，按基本工程间距的1/2尖推、1/4平推。",
+                    source_type="local_kb",
+                    text_access="ocr_text",
+                ),
+                "doc",
+            ),
+        ]
+
+        facts = ResearchTaskRunner._projection_facts(sources, "比较无限外推规定")
+
+        self.assertEqual(len(facts), 1)
+        self.assertEqual(facts[0]["pointed_ratio"], "1/2")
+        self.assertEqual(facts[0]["flat_ratio"], "1/4")
+
+    def test_projection_fact_preserves_formal_distance_basis(self) -> None:
+        fact = ResearchTaskRunner._projection_fact(
+            "无限外推时，矿体延伸无明显规律可循，一般按相应勘查类型所对应的推断资源量工程间距的1/2尖推、1/4平推。"
+        )
+
+        self.assertIsNotNone(fact)
+        self.assertEqual(fact["distance_basis"], "相应勘查类型对应的推断资源量工程间距")
+
     def test_complete_comparison_allows_irrelevant_candidates(self) -> None:
         status, missing = ResearchTaskRunner._research_final_status(
             ResearchPlan(canonical_question="比较外推", strategy="cross_document_comparison"),

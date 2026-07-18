@@ -1748,6 +1748,7 @@ class ResearchTaskRunner:
     ) -> list[dict[str, Any]]:
         facts: list[dict[str, Any]] = []
         seen: set[tuple[str, str, str, str, str, str]] = set()
+        comparable_fact_positions: dict[tuple[str, str, str, str, str], int] = {}
         finite_focus = "有限外推" in question
         infinite_focus = "无限外推" in question
         for index, source, document_id in indexed_sources:
@@ -1778,16 +1779,41 @@ class ResearchTaskRunner:
                 if key in seen:
                     continue
                 seen.add(key)
-                facts.append(
-                    {
-                        "document_id": document_id,
-                        "classification": "special_provision",
-                        "dimension": f"{projection_type}规则",
-                        "evidence_role": evidence_role,
-                        **fact,
-                        "source_indices": [index],
-                    }
+                structured_fact = {
+                    "document_id": document_id,
+                    "classification": "special_provision",
+                    "dimension": f"{projection_type}规则",
+                    "evidence_role": evidence_role,
+                    **fact,
+                    "source_indices": [index],
+                }
+                comparable_key = (
+                    document_id,
+                    projection_type,
+                    str(fact["trigger_condition"]),
+                    str(fact["distance_basis"]),
+                    str(fact.get("adjacent_engineering_condition") or ""),
                 )
+                existing_position = comparable_fact_positions.get(comparable_key)
+                if existing_position is not None:
+                    existing = facts[existing_position]
+                    existing_ratios = {
+                        str(existing.get(field))
+                        for field in ("pointed_ratio", "flat_ratio")
+                        if existing.get(field)
+                    }
+                    current_ratios = {
+                        str(structured_fact.get(field))
+                        for field in ("pointed_ratio", "flat_ratio")
+                        if structured_fact.get(field)
+                    }
+                    if current_ratios.issubset(existing_ratios):
+                        continue
+                    if existing_ratios.issubset(current_ratios):
+                        facts[existing_position] = structured_fact
+                        continue
+                comparable_fact_positions[comparable_key] = len(facts)
+                facts.append(structured_fact)
         return facts
 
     @staticmethod
@@ -1907,17 +1933,25 @@ class ResearchTaskRunner:
             relationship = "实际工程间距不大于推断资源量工程间距时采用实际工程间距"
 
         bases: list[str] = []
-        for term in (
-            "推断资源量工程间距",
-            "经验工程间距",
-            "基本勘查工程间距",
-            "基本工程间距",
-            "实际工程间距",
-            "相应工程间距",
-            "工程间距",
+        for expression, label in (
+            ("相应勘查类型所对应的推断资源量工程间距", "相应勘查类型对应的推断资源量工程间距"),
+            ("拟推的资源量类型的经验工程间距", "拟推资源量类型的经验工程间距"),
+            ("推断资源量的勘查工程间距", "推断资源量勘查工程间距"),
+            ("推断资源量勘查工程间距", "推断资源量勘查工程间距"),
+            ("推断资源量工程间距", "推断资源量工程间距"),
+            ("经验工程间距", "经验工程间距"),
+            ("基本勘查工程间距", "基本勘查工程间距"),
+            ("基本工程间距", "基本工程间距"),
+            ("实际勘查工程间距", "实际勘查工程间距"),
+            ("实际工程间距", "实际工程间距"),
+            ("相应工程间距", "相应工程间距"),
+            ("工程间距", "工程间距"),
         ):
-            if term in compact and not any(term in current or current in term for current in bases):
-                bases.append(term)
+            if expression in compact and not any(
+                expression in current or current in label or label in current
+                for current in bases
+            ):
+                bases.append(label)
         if relationship:
             distance_basis = relationship
         elif bases:
