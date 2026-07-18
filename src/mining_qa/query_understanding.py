@@ -166,6 +166,25 @@ TECHNICAL_STAGE_REQUIREMENT_TERMS = (
     "选冶要求",
     "加工选冶要求",
     "试验研究程度",
+    "选矿试验",
+    "选矿试验要求",
+    "选矿工艺试验",
+    "选矿技术性能",
+)
+TECHNICAL_STANDARD_SELECTION_TERMS = TECHNICAL_STAGE_REQUIREMENT_TERMS
+STANDARD_SELECTION_PHRASES = (
+    "哪个标准",
+    "哪个规范",
+    "哪个规程",
+    "什么标准",
+    "什么规范",
+    "什么规程",
+    "哪项标准",
+    "哪项规范",
+    "哪项规程",
+    "那个标准",
+    "那个规范",
+    "那个规程",
 )
 TECHNICAL_STUDY_TERMS = (
     "类比研究",
@@ -1119,6 +1138,10 @@ def understand_query(query: str) -> QueryPlan:
         and not has_technical_requirement_sufficiency
         and not has_technical_test_conformity
     )
+    has_technical_standard_selection = (
+        any(term in normalized for term in TECHNICAL_STANDARD_SELECTION_TERMS)
+        and any(term in normalized for term in STANDARD_SELECTION_PHRASES)
+    )
     has_authority = any(term in normalized for term in AUTHORITY_INTENT_TERMS) and any(
         term in normalized for term in AUTHORITY_TOPIC_TERMS
     )
@@ -1303,6 +1326,22 @@ def understand_query(query: str) -> QueryPlan:
                 *stage_requirement_clauses(normalized),
                 "资源量规模",
                 "矿石加工选冶难易程度",
+            ]
+        )
+    elif has_technical_standard_selection:
+        # Questions such as "哪个规范规定了金矿选矿试验要求" ask for the
+        # governing document. They should not fall through to a generic LLM
+        # answer, which can invent plausible-looking standard titles.
+        intent = "standard_selection"
+        search_mode = "catalog"
+        candidate_titles.append(TECHNICAL_REQUIREMENT_STANDARD_TITLE)
+        standards.append(TECHNICAL_REQUIREMENT_STANDARD_NO)
+        retrieval_terms.extend(
+            [
+                TECHNICAL_REQUIREMENT_STANDARD_TITLE,
+                TECHNICAL_REQUIREMENT_STANDARD_NO,
+                "矿石加工选冶技术性能",
+                "选矿试验",
             ]
         )
     elif has_technical_test_conformity:

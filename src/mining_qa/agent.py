@@ -84,6 +84,7 @@ SYSTEM_PROMPT = """你是矿产资源标准知识问答 agent。
 8. 如果用户询问“应使用哪个标准/适用哪个规范/采用哪个标准”，可以根据标准标题、标准号和目录证据回答，不强制要求条款号。
 9. 必须区分勘查程度、报告名称和行政许可条件；不得把“达到详查程度”改写成任何名为“详查报告”的文件都满足转采条件。
 10. 回答通常控制在600个汉字以内；比较类问题只保留代表性差异和直接相关短引文。
+11. 标准号、文号、文件名称、条款号、外部链接和“建议参考的文件”均属于可核验事实；只能引用本次给定证据中的内容。不得根据模型记忆补充、猜测或推荐任何未出现在证据中的文件。
 """
 
 UNRESOLVED_CONFIRMATION_LINE = re.compile(
@@ -458,6 +459,15 @@ class MiningQAAgent:
                 generation_details = {"used": False, "error": "answer_model_unavailable"}
         retrieval.synthesis_ms = round((perf_counter() - synthesis_started) * 1000, 3)
         answer = self._remove_stale_confirmation(answer, plan)
+        if self._answer_has_unverified_document_reference(answer, sources):
+            # Prompting is not a sufficient integrity control. Reject the
+            # entire model draft instead of attempting to delete individual
+            # hallucinated references, which could leave an unsupported claim.
+            answer = self._fast_answer(question, sources, plan) or self._evidence_summary_answer(sources)
+            limitations.notes.append(
+                "已拦截包含本次证据以外文件引用的生成内容，并改用可回溯证据答案。"
+            )
+            generation_details["grounding_guard_triggered"] = True
         answer = self._append_source_links(answer, sources)
         response = AskResponse(
             answer=answer,
@@ -2650,6 +2660,36 @@ class MiningQAAgent:
         if not lines:
             return answer
         return answer.rstrip() + "\n\n来源：\n" + "\n".join(lines)
+
+    @staticmethod
+    def _answer_has_unverified_document_reference(answer: str, sources: list[Source]) -> bool:
+        """Reject generated document references that cannot be traced to sources."""
+        if not answer:
+            return False
+        allowed_numbers = {
+            re.sub(r"\s+", "", source.standard_no or "").upper()
+            for source in sources
+            if source.standard_no
+        }
+        allowed_titles = {
+            re.sub(r"\s+", "", source.title or "")
+            for source in sources
+            if source.title
+        }
+        # Covers GB/T, DZ/T and analogous Chinese standard/document numbers.
+        number_pattern = re.compile(
+            r"\b(?:GB|DZ|MT|YS|HJ|JGJ|SL|TD|AQ|NB|DB)[/／][A-Z]{0,4}\s*[〔\[（(]?\d{2,6}(?:[〕\]）)]|[-.]\d{1,4})?",
+            flags=re.IGNORECASE,
+        )
+        for number in number_pattern.findall(answer):
+            normalized = re.sub(r"\s+", "", number).upper()
+            if normalized not in allowed_numbers:
+                return True
+        for title in re.findall(r"《([^》]{2,120})》", answer):
+            normalized = re.sub(r"\s+", "", title)
+            if normalized and normalized not in allowed_titles:
+                return True
+        return False
 
     def _insufficient_answer(self, question: str, notes: list[str]) -> str:
         details = "\n".join(f"- {note}" for note in notes) if notes else "- 当前没有可用条款级证据。"

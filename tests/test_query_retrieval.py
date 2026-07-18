@@ -83,6 +83,37 @@ def engineering_row() -> dict:
 
 
 class QueryUnderstandingTests(unittest.TestCase):
+    def test_beneficiation_test_standard_selection_routes_to_verified_standard(self) -> None:
+        plan = understand_query("那个规范规定了金矿选矿试验的具体要求？")
+
+        self.assertEqual(plan.intent, "standard_selection")
+        self.assertIn("DZ/T 0340-2020", plan.standard_numbers)
+        self.assertIn("矿产勘查矿石加工选冶技术性能试验研究程度要求", plan.candidate_title_terms)
+
+    def test_answer_guard_rejects_document_not_present_in_evidence(self) -> None:
+        source = Source(
+            title="矿产勘查矿石加工选冶技术性能试验研究程度要求",
+            standard_no="DZ/T 0340-2020",
+            chapter="6.4",
+            quote="详查阶段矿石加工选冶技术性能要求。",
+            source_type="local_kb",
+            text_access="ocr_text",
+        )
+        agent = object.__new__(MiningQAAgent)
+
+        self.assertTrue(
+            agent._answer_has_unverified_document_reference(
+                "建议参考《选矿试验技术规范》（GB/T 38844）。",
+                [source],
+            )
+        )
+        self.assertFalse(
+            agent._answer_has_unverified_document_reference(
+                "依据 DZ/T 0340-2020《矿产勘查矿石加工选冶技术性能试验研究程度要求》。",
+                [source],
+            )
+        )
+
     def test_equivalent_exploration_type_forms_share_one_plan(self) -> None:
         plans = [understand_query(question) for question in QUESTIONS]
 
