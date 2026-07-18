@@ -259,6 +259,7 @@ class QueryUnderstandingTests(unittest.TestCase):
         cases = {
             "采矿证延续需要提交什么材料？": ("service_materials", "自然资规〔2023〕4号"),
             "采矿权申请的前置条件及要件有哪些": ("service_materials", "自然资规〔2023〕4号"),
+            "办理采矿权需要什么手续": ("service_materials", "自然资规〔2023〕4号"),
             "采矿证办理应该依据哪个文件": ("service_procedure_basis", "自然资规〔2023〕4号"),
             "资源量估算中，无限外推是推1/2还是1/4": ("projection_numeric_rule", "DZ/T 0338.1-2020"),
             "根据矿产资源法实施条例，资源储量报告的真实性由谁负责": ("legal_responsibility", "国令第839号"),

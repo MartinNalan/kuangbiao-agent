@@ -2253,6 +2253,12 @@ class KnowledgeStore:
         options = payload.get("options") or {}
         top_k = int(options.get("top_k") or 10)
         top_k = max(1, min(top_k, 50))
+        # Once the applicant has selected new, renewal, change or
+        # cancellation, the answer must enumerate the corresponding
+        # Attachment 4 rows rather than silently truncate the checklist to
+        # the general retrieval default.
+        if plan.intent == "service_materials" and service_application_section_terms(plan):
+            top_k = 50
         recall_limit = retrieval_recall_limit(plan, top_k)
         include_full_text = bool(options.get("include_full_text"))
         retrieval_round = max(1, int(options.get("retrieval_round") or 1))
@@ -2342,6 +2348,13 @@ class KnowledgeStore:
                 plan,
                 where,
                 params,
+            )
+            self._add_service_material_row_candidates(
+                conn,
+                candidate_rows,
+                plan,
+                base_where,
+                base_params,
             )
             self._add_stage_technical_requirement_candidates(
                 conn,
@@ -2862,6 +2875,36 @@ class KnowledgeStore:
                      c.section_path
             """,
             params,
+        ).fetchall()
+        for rank, row in enumerate(rows, start=1):
+            self._add_candidate(candidate_rows, row, "reference", rank, 1.0)
+
+    def _add_service_material_row_candidates(
+        self,
+        conn: sqlite3.Connection,
+        candidate_rows: dict[str, dict[str, Any]],
+        plan: QueryPlan,
+        base_where: list[str],
+        base_params: list[Any],
+    ) -> None:
+        section_terms = service_application_section_terms(plan)
+        if plan.intent != "service_materials" or not section_terms:
+            return
+        section_where = " or ".join("c.section_path like ?" for _ in section_terms)
+        rows = conn.execute(
+            f"""
+            select c.*, d.document_type, d.status, d.official_url, d.source_platform, 0.0 as rank
+            from chunks c
+            join documents d on d.document_id = c.document_id
+            where {' and '.join(base_where)}
+              and d.document_type = 'policy_attachment'
+              and d.standard_no = '自然资规〔2023〕4号附件4'
+              and c.chunk_type = 'application_material_row'
+              and ({section_where})
+            order by cast(substr(c.section_path, instr(c.section_path, '材料') + 2) as integer),
+                     c.section_path
+            """,
+            [*base_params, *(f"{term}%" for term in section_terms)],
         ).fetchall()
         for rank, row in enumerate(rows, start=1):
             self._add_candidate(candidate_rows, row, "reference", rank, 1.0)

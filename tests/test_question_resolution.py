@@ -429,6 +429,21 @@ class QuestionResolverTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    async def test_mining_right_procedure_wording_requests_material_type(self) -> None:
+        resolver = QuestionResolver(
+            Settings(QUESTION_RESOLUTION_ENABLED=True, OPENAI_API_KEY=""),
+        )
+
+        result = await resolver.resolve("办理采矿权需要什么手续")
+
+        self.assertEqual(result.plan.intent, "service_materials")
+        self.assertTrue(result.requires_clarification)
+        self.assertEqual(result.clarification.pending_slot, "application_type")  # type: ignore[union-attr]
+        self.assertEqual(
+            [option.label for option in result.clarification.options],  # type: ignore[union-attr]
+            ["新立申请", "延续申请", "变更申请", "注销申请"],
+        )
+
     async def test_hierarchical_selection_preserves_prior_slots(self) -> None:
         resolver = QuestionResolver(
             Settings(QUESTION_RESOLUTION_ENABLED=True, OPENAI_API_KEY=""),

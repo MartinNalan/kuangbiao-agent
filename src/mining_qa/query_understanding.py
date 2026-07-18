@@ -79,6 +79,14 @@ SERVICE_PROCEDURE_TERMS = (
     "步骤",
     "手续",
 )
+MINING_RIGHT_MATERIAL_BY_PROCEDURE_TERMS = (
+    "需要什么手续",
+    "需要哪些手续",
+    "需办什么手续",
+    "需办哪些手续",
+    "要办什么手续",
+    "要办哪些手续",
+)
 SERVICE_TIME_LIMIT_TERMS = ("办结时限", "办理时限", "需要多久", "多久办结", "多少个工作日", "时限是多久")
 POST_FILING_LICENSE_ACTION_TERMS = (
     "还需要",
@@ -1085,10 +1093,13 @@ def understand_query(query: str) -> QueryPlan:
         term in normalized
         for term in ("扩大范围", "缩小范围", "矿区范围", "开采方式", "开采主矿种", "采矿权人名称", "转让")
     ) and any(term in normalized for term in SERVICE_MATERIAL_TERMS)
+    has_mining_right_materials_by_procedure = has_license and any(
+        term in normalized for term in MINING_RIGHT_MATERIAL_BY_PROCEDURE_TERMS
+    )
     has_service_materials = post_filing_license_steps or has_mining_right_change_materials or (
         (bool(guide_titles) or has_license)
         and any(term in normalized for term in SERVICE_MATERIAL_TERMS)
-    )
+    ) or has_mining_right_materials_by_procedure
     post_filing_workflow = any(
         term in normalized
         for term in ("资源储量评审备案", "储量评审备案", "储量备案", "评审备案")
