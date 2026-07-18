@@ -505,6 +505,32 @@ class ResearchPlanner:
                     "不得以单一高分条款替代其他条件或技术要求。"
                 ),
             )
+        if base.intent == "projection_comparison":
+            # A projection clause normally carries the projection type,
+            # distance basis and ratios together. These are columns of one
+            # structured fact, not independent legal relations that require
+            # model-authored target labels. Keep all governed retrieval
+            # variants in the combined query and let _projection_facts parse
+            # the fields deterministically.
+            fallback = ResearchPlanner._fallback(question, base)
+            return replace(
+                plan,
+                intent=fallback.intent,
+                strategy=fallback.strategy,
+                anchor_titles=fallback.anchor_titles,
+                anchor_standard_numbers=fallback.anchor_standard_numbers,
+                corpus_title_terms=fallback.corpus_title_terms,
+                corpus_standard_numbers=fallback.corpus_standard_numbers,
+                document_types=fallback.document_types,
+                comparison_dimensions=fallback.comparison_dimensions,
+                evidence_queries=fallback.evidence_queries,
+                evidence_targets=(),
+                required_evidence_groups=fallback.required_evidence_groups,
+                scope_note=(
+                    "按外推类型、距离基准、尖推/平推比例和触发条件逐条提取结构化事实；"
+                    "这些字段共同构成同一外推规则，不作为彼此独立的证据目标。"
+                ),
+            )
         focus = _projection_focus(question)
         if not focus:
             return plan
@@ -1460,10 +1486,9 @@ class ResearchTaskRunner:
                         24
                         if plan.intent == "service_materials"
                         else 1
-                        if plan.intent in {
-                            "exploration_to_mining_eligibility",
-                            "projection_comparison",
-                        }
+                        if plan.intent == "exploration_to_mining_eligibility"
+                        else 3
+                        if plan.intent == "projection_comparison"
                         else 8
                         if plan.intent == "technical_stage_requirement"
                         else 2

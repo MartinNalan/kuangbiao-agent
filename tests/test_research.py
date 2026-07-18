@@ -73,6 +73,27 @@ class BadServicePlannerLLM:
         )
 
 
+class BadProjectionTargetPlannerLLM:
+    enabled = True
+
+    async def complete_json(self, messages, *, max_tokens=None):
+        return json.dumps(
+            {
+                "canonical_question": "比较不同标准的无限外推规则",
+                "corpus_title_terms": ["矿产地质勘查规范"],
+                "document_types": ["industry_standard"],
+                "comparison_dimensions": ["外推类型", "所依据的工程间距", "尖推和平推比例"],
+                "evidence_queries": ["无限外推 工程间距"],
+                "evidence_targets": [
+                    {"label": "外推类型", "query": "无限外推 工程间距", "required": True},
+                    {"label": "所依据的工程间距", "query": "1/2尖推 1/4平推", "required": True},
+                    {"label": "尖推和平推比例", "query": "边缘见矿工程外", "required": True},
+                ],
+            },
+            ensure_ascii=False,
+        )
+
+
 class TruncatingResearchLLM:
     enabled = True
 
@@ -142,6 +163,22 @@ class ResearchPlannerTests(unittest.IsolatedAsyncioTestCase):
             ),
         }
         self.assertTrue(ResearchTaskRunner._hit_matches_research_plan(geometry, plan))
+
+    async def test_projection_plan_rejects_model_authored_dimension_targets(self) -> None:
+        planner = ResearchPlanner(
+            Settings(OPENAI_API_KEY="configured"),
+            BadProjectionTargetPlannerLLM(),  # type: ignore[arg-type]
+        )
+
+        plan = await planner.plan("不同标准对矿体无限外推所依据的间距有何差异？")
+
+        self.assertEqual(plan.intent, "projection_comparison")
+        self.assertEqual(plan.evidence_targets, ())
+        self.assertTrue(any("无限外推" in query for query in plan.evidence_queries))
+        self.assertEqual(
+            plan.comparison_dimensions,
+            ("外推类型", "所依据的工程间距", "尖推和平推比例", "适用条件和例外"),
+        )
 
     async def test_service_material_plan_cannot_drop_policy_attachment_scope(self) -> None:
         planner = ResearchPlanner(
