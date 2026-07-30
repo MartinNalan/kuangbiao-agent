@@ -1,5 +1,6 @@
 import json
 from datetime import datetime, timezone
+import os
 from pathlib import Path
 from typing import Any
 
@@ -9,7 +10,12 @@ from .config import PROJECT_ROOT
 
 class UsageLogger:
     def __init__(self, path: Path | None = None):
-        self.path = path or PROJECT_ROOT / "data" / "api_calls.jsonl"
+        configured = os.getenv("USAGE_LOG_PATH", "").strip()
+        self.path = path or (
+            Path(configured)
+            if configured
+            else PROJECT_ROOT / "data" / "api_calls.jsonl"
+        )
 
     def write(self, record: dict[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)

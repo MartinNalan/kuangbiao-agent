@@ -1,0 +1,46 @@
+{
+  "schema_version": "geowiki-v4-governed-concept-families.v1",
+  "aggregation": "max_variant_once_per_concept",
+  "citation_text_rewrite_allowed": false,
+  "families": [
+    {
+      "family_id": "exploration_plan",
+      "label": "勘查方案",
+      "variants": [
+        "勘查实施方案",
+        "勘查方案"
+      ],
+      "basis": "user_approved_retrieval_equivalence_2026-07-27",
+      "scope": "query_ranking_only",
+      "status": "active"
+    },
+    {
+      "family_id": "mining_license",
+      "label": "采矿许可证",
+      "variants": [
+        "采矿证",
+        "采矿许可证"
+      ],
+      "basis": "existing_governed_domain_lexicon_and_t032_safe_normalization",
+      "scope": "query_ranking_only",
+      "status": "active"
+    },
+    {
+      "family_id": "exploration_type_one",
+      "label": "Ⅰ类型",
+      "variants": [
+        "1类型",
+        "I类型",
+        "Ⅰ类型",
+        "一类型",
+        "类型1",
+        "类型I",
+        "类型Ⅰ",
+        "类型一"
+      ],
+      "basis": "existing_t032_safe_normalization_and_prd_numeric_lookup_contract",
+      "scope": "query_ranking_only",
+      "status": "active"
+    }
+  ]
+}

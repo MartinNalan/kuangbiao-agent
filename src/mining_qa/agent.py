@@ -6,6 +6,14 @@ from dataclasses import replace
 from time import perf_counter
 from uuid import uuid4
 
+from .authority_anchor import (
+    AuthorityAnchor,
+    AuthorityCatalogDecision,
+    classify_authority_anchor,
+    evaluate_authority_catalog,
+    filter_sources_to_anchor,
+    strict_sources_satisfy_anchor,
+)
 from .config import Settings
 from .domain_gate import DomainGate
 from .evidence_reranker import EvidenceReranker, RerankResult
@@ -53,6 +61,8 @@ SERVICE_CHANGE_SECTIONS = {
     "holder_name": "采矿权人名称",
     "transfer": "转让",
 }
+OIL_GAS_CLASSIFICATION_STANDARD_NO = "GB/T 19492-2020"
+OIL_GAS_CLASSIFICATION_CLAUSES = ("4.1", "4.2", "4.3", "4.7", "4.8")
 DETERMINISTIC_FAST_INTENTS = {
     "engineering_distance_lookup",
     "projection_numeric_rule",
@@ -85,6 +95,7 @@ SYSTEM_PROMPT = """你是矿产资源标准知识问答 agent。
 9. 必须区分勘查程度、报告名称和行政许可条件；不得把“达到详查程度”改写成任何名为“详查报告”的文件都满足转采条件。
 10. 回答通常控制在600个汉字以内；比较类问题只保留代表性差异和直接相关短引文。
 11. 标准号、文号、文件名称、条款号、外部链接和“建议参考的文件”均属于可核验事实；只能引用本次给定证据中的内容。不得根据模型记忆补充、猜测或推荐任何未出现在证据中的文件。
+12. 矿石加工选冶试验程度问题必须同时核对适用矿种勘查规范和 DZ/T 0340-2020：前者用于确定矿种、阶段要求，后者用于核对试验分类和层级。只有给定条款明确显示前置或包含关系时，才可认定高级试验覆盖低级试验；两类规范不一致时应并列说明，不得自行消解。
 """
 
 UNRESOLVED_CONFIRMATION_LINE = re.compile(
@@ -177,6 +188,36 @@ class MiningQAAgent:
             response.retrieval.total_ms = round((perf_counter() - started) * 1000, 3)
             self._write_trace(trace_id, question, base_plan, response, {})
             return response
+
+        authority_anchor = classify_authority_anchor(
+            question,
+            base_plan.standard_numbers,
+            scope_origin=base_plan.scope_origin,
+        )
+        authority_decision = await self._authority_anchor_preflight(authority_anchor)
+        if authority_anchor.is_strict and not authority_decision.proceed:
+            response = self._authority_anchor_rejection_response(
+                request.question,
+                session_id,
+                base_plan,
+                authority_decision,
+                started,
+            )
+            self._write_trace(
+                trace_id,
+                question,
+                base_plan,
+                response,
+                {"authority_anchor": authority_decision.to_payload()},
+            )
+            return response
+        if authority_decision.filter_standard_numbers:
+            filters = dict(filters)
+            if len(authority_decision.filter_standard_numbers) == 1:
+                filters["standard_no"] = authority_decision.filter_standard_numbers[0]
+            else:
+                filters["standard_no"] = list(authority_decision.filter_standard_numbers)
+
         planner_result = await self.planner.plan(question, base_plan)
         plan = planner_result.plan
         evidence_targets = planner_result.evidence_targets
@@ -204,6 +245,7 @@ class MiningQAAgent:
         logical_rounds = 1
         multi_query_count = 0
         supplemental_error_count = 0
+        knowledge_errors: list[dict[str, object]] = []
 
         kb_started = perf_counter()
         initial_plans = self._initial_retrieval_plans(plan, planner_result.query_variants)
@@ -220,19 +262,46 @@ class MiningQAAgent:
             return_exceptions=True,
         )
         knowledge_ms += (perf_counter() - kb_started) * 1000
-        primary_result = initial_results[0]
-        if isinstance(primary_result, Exception):
-            raise primary_result
-        kb_result = primary_result
-        kb_results.append(kb_result)
-        merged_hits = self._merge_hits(merged_hits, kb_result.results)
-        for result in initial_results[1:]:
+        for index, result in enumerate(initial_results):
             if isinstance(result, Exception):
                 supplemental_error_count += 1
+                knowledge_errors.append(
+                    {
+                        "phase": "initial",
+                        "route_index": index,
+                        "primary": index == 0,
+                        "error_type": type(result).__name__,
+                    }
+                )
                 continue
             kb_results.append(result)
             merged_hits = self._merge_hits(merged_hits, result.results)
         multi_query_count = max(0, len(initial_plans) - 1)
+        if not kb_results:
+            response = self._knowledge_unavailable_response(
+                session_id=session_id,
+                plan=plan,
+                planner_result=planner_result,
+                started=started,
+                knowledge_ms=knowledge_ms,
+                planned_query_count=len(initial_plans),
+            )
+            self._write_trace(
+                trace_id,
+                question,
+                plan,
+                response,
+                self._trace_details(
+                    planner_result,
+                    [],
+                    None,
+                    {"used": False, "reason": "knowledge_unavailable"},
+                    authority_decision,
+                    knowledge_errors,
+                ),
+            )
+            return response
+        kb_result = kb_results[0]
         use_model_evidence = semantic_evidence_required or self.reranker.needs_model(plan)
         audit_hits = self._evidence_audit_hits(
             merged_hits,
@@ -272,9 +341,17 @@ class MiningQAAgent:
                         return_exceptions=True,
                     )
                     knowledge_ms += (perf_counter() - batch_started) * 1000
-                    for result in batch_results:
+                    for index, result in enumerate(batch_results):
                         if isinstance(result, Exception):
                             supplemental_error_count += 1
+                            knowledge_errors.append(
+                                {
+                                    "phase": "supplemental",
+                                    "route_index": index,
+                                    "primary": False,
+                                    "error_type": type(result).__name__,
+                                }
+                            )
                             continue
                         kb_results.append(result)
                         merged_hits = self._merge_hits(merged_hits, result.results)
@@ -311,6 +388,11 @@ class MiningQAAgent:
             evidence_hits = self._select_evidence_hits(merged_hits, question, plan)
         sources = [self._source_from_hit(hit) for hit in evidence_hits]
         sources = self._trim_source_quotes(question, sources, plan)
+        sources = filter_sources_to_anchor(authority_anchor, sources)
+        authority_evidence_consistent = strict_sources_satisfy_anchor(
+            authority_anchor,
+            sources,
+        )
         if rerank_result is not None and use_model_evidence:
             deterministic_usable, deterministic_clause = self._evaluate_evidence(
                 question,
@@ -336,6 +418,9 @@ class MiningQAAgent:
                 sources,
                 plan,
             )
+        if authority_anchor.is_strict and not authority_evidence_consistent:
+            has_usable_evidence = False
+            has_clause_evidence = False
         notes = list(dict.fromkeys(
             note
             for result in kb_results
@@ -353,11 +438,15 @@ class MiningQAAgent:
                 + "；".join(rerank_result.missing_targets)
             )
         if supplemental_error_count:
-            notes.append("部分补充查询执行失败，已使用其余检索结果继续完成证据审查。")
+            notes.append("部分检索查询执行失败，已使用其余成功结果继续完成证据审查。")
         if planner_result.error:
             notes.append("查询规划器不可用，本次已使用确定性理解方案降级检索。")
         if rerank_result and rerank_result.error:
             notes.append("证据审查器不可用，本次已使用证据关系组进行确定性审查。")
+        if authority_anchor.is_strict and not authority_evidence_consistent:
+            notes.append(
+                "检索结果未同时满足用户指定的标准号和条款锚点，已禁止使用其他依据替代作答。"
+            )
 
         retrieval = RetrievalStats(
             full_text_hits=sum(int(result.retrieval.get("full_text_hits", 0)) for result in kb_results),
@@ -433,7 +522,14 @@ class MiningQAAgent:
                 question,
                 plan,
                 response,
-                self._trace_details(planner_result, kb_results, rerank_result, generation_details),
+                self._trace_details(
+                    planner_result,
+                    kb_results,
+                    rerank_result,
+                    generation_details,
+                    authority_decision,
+                    knowledge_errors,
+                ),
             )
             return response
 
@@ -442,7 +538,10 @@ class MiningQAAgent:
             None
             if semantic_evidence_required
             else self._fast_answer(question, sources, plan)
-            if plan.intent in DETERMINISTIC_FAST_INTENTS
+            if (
+                plan.intent in DETERMINISTIC_FAST_INTENTS
+                or self._is_oil_gas_resource_classification_question(question)
+            )
             else None
         )
         if answer is not None:
@@ -542,8 +641,127 @@ class MiningQAAgent:
             question,
             plan,
             response,
-            self._trace_details(planner_result, kb_results, rerank_result, generation_details),
+            self._trace_details(
+                planner_result,
+                kb_results,
+                rerank_result,
+                generation_details,
+                authority_decision,
+                knowledge_errors,
+            ),
         )
+        return response
+
+    async def _authority_anchor_preflight(
+        self,
+        anchor: AuthorityAnchor,
+    ) -> AuthorityCatalogDecision:
+        if not anchor.is_strict:
+            return evaluate_authority_catalog(anchor, ())
+        try:
+            responses = await asyncio.gather(
+                *(
+                    self.knowledge.standards(
+                        {
+                            "standard_no": standard_no,
+                            "page": 1,
+                            "page_size": 100,
+                        }
+                    )
+                    for standard_no in anchor.standard_numbers
+                )
+            )
+        except Exception:
+            return AuthorityCatalogDecision(
+                anchor=anchor,
+                proceed=False,
+                blocked_standard_numbers=anchor.standard_numbers,
+                reason="标准目录验证失败，无法确认用户指定依据的存在性和治理状态。",
+            )
+        items = [item for response in responses for item in response.items]
+        return evaluate_authority_catalog(anchor, items)
+
+    @staticmethod
+    def _authority_anchor_rejection_response(
+        original_question: str,
+        session_id: str,
+        plan: QueryPlan,
+        decision: AuthorityCatalogDecision,
+        started: float,
+    ) -> AskResponse:
+        numbers = "、".join(decision.anchor.standard_numbers)
+        clauses = "、".join(decision.anchor.clause_refs)
+        if decision.missing_standard_numbers:
+            answer = (
+                f"当前知识库无法核验用户指定的标准号 **{numbers}**，"
+                f"因此不能依据该标准{f'第{clauses}条' if clauses else ''}给出结论。"
+                "请核对标准号，或提供正式文本供核验。"
+            )
+        elif decision.blocked_standard_numbers:
+            answer = (
+                f"当前知识库已收录用户指定的标准 **{numbers}**，"
+                "但其治理状态不允许作为现行回答依据，因此本次不形成肯定结论，"
+                "也不会改用其他标准替代。"
+            )
+        else:
+            answer = (
+                f"当前无法完成对用户指定标准 **{numbers}** 的目录和治理状态核验，"
+                "因此本次停止作答。"
+            )
+        notes = [decision.reason or "用户指定依据未通过确定性权威锚点验证。"]
+        response = AskResponse(
+            answer=answer,
+            session_id=session_id,
+            status="insufficient_evidence",
+            sources=[],
+            retrieval=RetrievalStats(retrieval_rounds=0, query_count=0),
+            limitations=Limitations(has_clause_level_evidence=False, notes=notes),
+            confidence="low",
+            query_classification=(
+                plan.classification.to_payload() if plan.classification else None
+            ),
+        )
+        response.retrieval.total_ms = round((perf_counter() - started) * 1000, 3)
+        return response
+
+    @staticmethod
+    def _knowledge_unavailable_response(
+        *,
+        session_id: str,
+        plan: QueryPlan,
+        planner_result,
+        started: float,
+        knowledge_ms: float,
+        planned_query_count: int,
+    ) -> AskResponse:
+        notes = [
+            "知识库检索服务暂时不可用或超过安全等待时限；本次未取得可核验条款证据，"
+            "未生成结论，也未将基础设施故障登记为知识缺口。"
+        ]
+        response = AskResponse(
+            answer="当前知识库检索暂时不可用，无法取得可核验的条款证据，因此本次停止作答。请稍后重试。",
+            session_id=session_id,
+            status="insufficient_evidence",
+            sources=[],
+            retrieval=RetrievalStats(
+                retrieval_rounds=1,
+                planner_used=planner_result.used,
+                query_count=0,
+                multi_query_used=planned_query_count > 1,
+                multi_query_count=max(0, planned_query_count - 1),
+                planner_ms=round(planner_result.elapsed_ms, 3),
+                knowledge_ms=round(knowledge_ms, 3),
+            ),
+            limitations=Limitations(
+                has_clause_level_evidence=False,
+                notes=notes,
+            ),
+            confidence="low",
+            query_classification=(
+                plan.classification.to_payload() if plan.classification else None
+            ),
+        )
+        response.retrieval.total_ms = round((perf_counter() - started) * 1000, 3)
         return response
 
     @staticmethod
@@ -566,6 +784,12 @@ class MiningQAAgent:
         """Build independent first-round searches for model-identified evidence goals."""
         plans = [plan]
         if not self.settings.controlled_multi_query_enabled:
+            return plans
+        # A simple deterministic lookup has one evidence objective.  A model
+        # paraphrase of that same objective must not launch a second copy of
+        # the primary v4 fixed-20 search.  Independent multi-part objectives
+        # still retain their separate routes below.
+        if plan.intent in DETERMINISTIC_FAST_INTENTS and len(variants) <= 1:
             return plans
 
         limit = max(1, min(3, int(self.settings.controlled_multi_query_max)))
@@ -742,8 +966,13 @@ class MiningQAAgent:
         kb_results: list,
         rerank_result: RerankResult | None,
         generation: dict[str, object] | None = None,
+        authority_decision: AuthorityCatalogDecision | None = None,
+        knowledge_errors: list[dict[str, object]] | None = None,
     ) -> dict:
         return {
+            "authority_anchor": (
+                authority_decision.to_payload() if authority_decision else None
+            ),
             "planner": {
                 "used": planner_result.used,
                 "elapsed_ms": round(planner_result.elapsed_ms, 3),
@@ -771,6 +1000,7 @@ class MiningQAAgent:
                 {
                     "retrieval": result.retrieval,
                     "coverage": result.coverage,
+                    "candidate_count_returned": len(result.results),
                     "candidate_sources": [
                         {
                             "document_id": hit.get("document_id"),
@@ -780,11 +1010,12 @@ class MiningQAAgent:
                             "score": hit.get("score"),
                             "routes": hit.get("hit_type") or [],
                         }
-                        for hit in result.results[:12]
+                        for hit in result.results
                     ],
                 }
                 for result in kb_results
             ],
+            "knowledge_errors": knowledge_errors or [],
             "reranker": {
                 "used": rerank_result.used,
                 "elapsed_ms": round(rerank_result.elapsed_ms, 3),
@@ -838,6 +1069,25 @@ class MiningQAAgent:
         plan: QueryPlan | None = None,
     ) -> tuple[bool, bool]:
         effective_plan = plan or understand_query(question)
+        if self._is_oil_gas_resource_classification_question(question):
+            clauses = {
+                source.chapter
+                for source in sources
+                if self._normalized_standard_no(source.standard_no)
+                == self._normalized_standard_no(OIL_GAS_CLASSIFICATION_STANDARD_NO)
+            }
+            found = set(OIL_GAS_CLASSIFICATION_CLAUSES).issubset(clauses)
+            return found, found
+        if self._is_general_basic_analysis_sample_length_question(question):
+            found = any(
+                self._normalized_standard_no(source.standard_no) == "GB/T13908-2020"
+                and source.chapter == "8.7.2.3"
+                and "基本分析取样的样品长度应根据" in re.sub(
+                    r"\s+", "", source.quote or ""
+                )
+                for source in sources
+            )
+            return found, found
         if effective_plan.intent == "definition_explanation":
             matched = {
                 term
@@ -857,15 +1107,18 @@ class MiningQAAgent:
             has_policy = any(
                 "自然资规〔2023〕4号" in (source.standard_no or "")
                 and "经评审备案的矿产资源储量报告" in (source.quote or "")
-                and "详查（含）以上程度" in (source.quote or "")
+                and (
+                    "详查（含）以上程度" in (source.quote or "")
+                    or "详查(含)以上程度" in (source.quote or "")
+                )
                 for source in sources
             )
-            has_report_limit = any(
-                "不能替代探矿权转采矿权" in (source.quote or "")
-                for source in sources
-            )
-            found = has_policy and has_report_limit
-            return found, found
+            # The policy clause itself states the report prerequisite and the
+            # complete stage matrix. DZ/T 0430-2023 may clarify that a reserve
+            # verification report cannot replace the required exploration
+            # report, but that clarification is optional evidence, not a
+            # prerequisite for answering the user's stage question.
+            return has_policy, has_policy
 
         if effective_plan.intent == "companion_resource_type":
             clauses = {source.chapter for source in sources}
@@ -1118,6 +1371,48 @@ class MiningQAAgent:
             ]
             if direct_hits:
                 hits = direct_hits
+        if self._is_oil_gas_resource_classification_question(question):
+            selected = []
+            for clause in OIL_GAS_CLASSIFICATION_CLAUSES:
+                candidates = [
+                    hit
+                    for hit in hits
+                    if self._normalized_standard_no(hit.get("standard_no"))
+                    == self._normalized_standard_no(OIL_GAS_CLASSIFICATION_STANDARD_NO)
+                    and str(hit.get("clause_no") or hit.get("section_path") or "") == clause
+                ]
+                if candidates:
+                    selected.append(
+                        max(
+                            candidates,
+                            key=lambda hit: (
+                                float(hit.get("score") or 0.0),
+                                len(self._hit_evidence_text(hit)),
+                            ),
+                        )
+                    )
+            if selected:
+                return selected
+        if self._is_general_basic_analysis_sample_length_question(question):
+            candidates = [
+                hit
+                for hit in hits
+                if self._normalized_standard_no(hit.get("standard_no")) == "GB/T13908-2020"
+                and str(hit.get("clause_no") or hit.get("section_path") or "") == "8.7.2.3"
+                and "基本分析取样的样品长度应根据" in re.sub(
+                    r"\s+", "", self._hit_evidence_text(hit)
+                )
+            ]
+            if candidates:
+                return [
+                    max(
+                        candidates,
+                        key=lambda hit: (
+                            float(hit.get("score") or 0.0),
+                            len(self._hit_evidence_text(hit)),
+                        ),
+                    )
+                ]
         if effective_plan.intent == "definition_explanation" and effective_plan.definition_slots:
             selected: list[dict] = []
             for slot in effective_plan.definition_slots:
@@ -1212,20 +1507,45 @@ class MiningQAAgent:
                     )
             if selected:
                 return selected
-        if effective_plan.intent == "engineering_distance_lookup" and effective_plan.target_exploration_type:
+        if effective_plan.intent == "engineering_distance_lookup":
             required_labels = ("坑探-穿脉", "坑探-沿脉", "钻探-走向", "钻探-倾斜")
-            for hit in hits:
-                quote = hit.get("quote") or ""
-                title = hit.get("title") or ""
-                title_matches = not effective_plan.candidate_title_terms or any(
-                    term in title for term in effective_plan.candidate_title_terms
-                )
-                if (
-                    title_matches
-                    and f"{effective_plan.target_exploration_type}类型" in quote
-                    and all(label in quote for label in required_labels)
-                ):
-                    return [hit]
+            if effective_plan.target_exploration_type:
+                for hit in hits:
+                    quote = hit.get("quote") or ""
+                    title = hit.get("title") or ""
+                    title_matches = not effective_plan.candidate_title_terms or any(
+                        term in title for term in effective_plan.candidate_title_terms
+                    )
+                    if (
+                        title_matches
+                        and f"{effective_plan.target_exploration_type}类型" in quote
+                        and all(label in quote for label in required_labels)
+                    ):
+                        return [hit]
+
+            # The v4 fixed-20 pool can contain a complete normative table below
+            # higher-ranked tables from a similarly named mineral family.  Once
+            # the deterministic plan identifies rock gold, select the complete
+            # F.1 evidence from the whole pool instead of following the first
+            # document blindly.  A missing I/II/III type is not a corpus gap:
+            # the complete matrix is itself a valid answerable evidence unit.
+            matched = [
+                hit
+                for hit in hits
+                if self._is_engineering_distance_source(self._source_from_hit(hit))
+            ]
+            if matched:
+                def engineering_distance_quality(hit: dict) -> tuple[int, int, int, float]:
+                    quote = self._hit_evidence_text(hit)
+                    chapter = str(hit.get("clause_no") or hit.get("section_path") or "")
+                    return (
+                        int(chapter == "F.1"),
+                        int(all(value in quote for value in ("80~160", "40~80", "20~40"))),
+                        len(quote),
+                        float(hit.get("score") or 0.0),
+                    )
+
+                return [max(matched, key=engineering_distance_quality)]
         if (
             effective_plan.intent == "standard_selection"
             and self._is_standard_selection_question(question)
@@ -1241,7 +1561,10 @@ class MiningQAAgent:
                     for hit in hits
                     if "自然资规〔2023〕4号" in str(hit.get("standard_no") or "")
                     and "经评审备案的矿产资源储量报告" in self._hit_evidence_text(hit)
-                    and "详查（含）以上程度" in self._hit_evidence_text(hit)
+                    and (
+                        "详查（含）以上程度" in self._hit_evidence_text(hit)
+                        or "详查(含)以上程度" in self._hit_evidence_text(hit)
+                    )
                 ),
                 None,
             )
@@ -1478,6 +1801,30 @@ class MiningQAAgent:
     @staticmethod
     def _hit_evidence_text(hit: dict) -> str:
         return str(hit.get("quote") or hit.get("evidence_text") or hit.get("text") or "")
+
+    @staticmethod
+    def _normalized_standard_no(value: object) -> str:
+        return re.sub(r"\s+", "", str(value or "")).upper()
+
+    @staticmethod
+    def _is_oil_gas_resource_classification_question(question: str) -> bool:
+        compact = re.sub(r"\s+", "", question or "")
+        return bool(
+            any(term in compact for term in ("油气", "石油天然气"))
+            and any(term in compact for term in ("资源储量", "资源量和储量"))
+            and any(term in compact for term in ("分类", "划分", "类型", "怎么分"))
+            and "规模" not in compact
+        )
+
+    @staticmethod
+    def _is_general_basic_analysis_sample_length_question(question: str) -> bool:
+        compact = re.sub(r"\s+", "", question or "")
+        return bool(
+            "固体矿产" in compact
+            and "基本分析" in compact
+            and any(term in compact for term in ("样品长度", "样长"))
+            and any(term in compact for term in ("哪些因素", "根据", "合理确定"))
+        )
 
     @staticmethod
     def _is_transfer_equivalent_evidence(text: str) -> bool:
@@ -1967,6 +2314,31 @@ class MiningQAAgent:
         plan: QueryPlan | None = None,
     ) -> str | None:
         effective_plan = plan or understand_query(question)
+        if self._is_oil_gas_resource_classification_question(question):
+            by_clause = {
+                source.chapter: source
+                for source in sources
+                if self._normalized_standard_no(source.standard_no)
+                == self._normalized_standard_no(OIL_GAS_CLASSIFICATION_STANDARD_NO)
+                and source.chapter in OIL_GAS_CLASSIFICATION_CLAUSES
+            }
+            if set(OIL_GAS_CLASSIFICATION_CLAUSES).issubset(by_clause):
+                return "\n".join(
+                    [
+                        "根据 **GB/T 19492-2020《油气矿产资源储量分类》**，油气资源量和储量按地质可靠程度及开采技术经济条件分类：",
+                        "",
+                        "- **资源量**：不再分级。",
+                        "- **地质储量**：分为预测地质储量、控制地质储量和探明地质储量三级。",
+                        "- **技术可采储量**：分别在控制地质储量、探明地质储量中，按开采技术条件估算控制技术可采储量和探明技术可采储量。",
+                        "- **经济可采储量**：分别在控制技术可采储量、探明技术可采储量中，按经济可行性评价估算控制经济可采储量和探明经济可采储量。",
+                        "",
+                        f"- **4.1 分类依据**：{by_clause['4.1'].quote}",
+                        f"- **4.2 资源量**：{by_clause['4.2'].quote}",
+                        f"- **4.3 地质储量**：{by_clause['4.3'].quote}",
+                        f"- **4.7 技术可采储量**：{by_clause['4.7'].quote}",
+                        f"- **4.8 经济可采储量**：{by_clause['4.8'].quote}",
+                    ]
+                )
         definition_answer = self._definition_answer(effective_plan, sources)
         if definition_answer:
             return definition_answer

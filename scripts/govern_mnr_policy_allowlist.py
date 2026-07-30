@@ -20,10 +20,10 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from mining_qa.mnr_policy_allowlist import (  # noqa: E402
     DEFAULT_ALLOWLIST_ARTIFACT,
     DEFAULT_POLICY_CUTOFF,
-    allowlist_numbers,
     load_allowlist_artifact,
     normalize_document_number,
     parse_document_date,
+    policy_is_allowed,
 )
 
 
@@ -305,7 +305,6 @@ def referenced_files(row: sqlite3.Row, metadata: dict[str, Any]) -> list[str]:
 
 
 def analyze(conn: sqlite3.Connection, artifact: dict[str, Any]) -> dict[str, Any]:
-    allow_numbers = allowlist_numbers(artifact)
     allow_by_number = {
         entry["normalized_document_number"]: entry for entry in artifact.get("entries") or []
     }
@@ -325,22 +324,28 @@ def analyze(conn: sqlite3.Connection, artifact: dict[str, Any]) -> dict[str, Any
         for path in referenced_files(row, metadata):
             path_owners[path].add(row["document_id"])
 
-        if published >= DEFAULT_POLICY_CUTOFF:
+        authority_level = metadata["bibliographic"].get("效力级别", "")
+        effective_status = metadata["bibliographic"].get("时效状态") or row["status"]
+        allowed, reason = policy_is_allowed(
+            number,
+            metadata["publication_date"],
+            artifact,
+            authority_level=authority_level,
+            document_type=row["document_type"],
+            effective_status=effective_status,
+            official_source_verified=bool(metadata["source_url"]),
+        )
+        if reason == "departmental_document_published_on_or_after_allowlist_cutoff":
             decision = "retain_post_cutoff_untouched"
-            reason = "publication_date_on_or_after_2026-01-01"
             post_cutoff_fingerprints[row["document_id"]] = hashlib.sha256(
                 json.dumps(dict(row), ensure_ascii=False, sort_keys=True).encode("utf-8")
             ).hexdigest()
-        elif normalized and normalized in allow_numbers:
+        elif reason == "pre_cutoff_departmental_document_number_allowlisted":
             decision = "retain_allowlisted"
-            reason = "normalized_document_number_present_in_workbook"
+        elif allowed:
+            decision = "retain_authority_governed"
         else:
             decision = "delete"
-            reason = (
-                "pre_2026_no_public_document_number"
-                if not normalized
-                else "pre_2026_normalized_document_number_absent_from_workbook"
-            )
 
         workbook_entry = allow_by_number.get(normalized)
         title_conflict = bool(
@@ -358,6 +363,7 @@ def analyze(conn: sqlite3.Connection, artifact: dict[str, Any]) -> dict[str, Any
                 "normalized_document_number": normalized,
                 "canonical_allowlist_document_number": canonical_number if workbook_entry else "",
                 "publication_date": metadata["publication_date"],
+                "authority_level": authority_level,
                 "source_url": metadata["source_url"],
                 "decision": decision,
                 "deletion_reason": reason if decision == "delete" else "",
@@ -393,6 +399,9 @@ def analyze(conn: sqlite3.Connection, artifact: dict[str, Any]) -> dict[str, Any
         "rows": analyses,
         "in_scope_count": len(analyses),
         "retained_allowlisted_count": sum(item["decision"] == "retain_allowlisted" for item in analyses),
+        "retained_authority_governed_count": sum(
+            item["decision"] == "retain_authority_governed" for item in analyses
+        ),
         "deleted_count": sum(item["decision"] == "delete" for item in analyses),
         "post_cutoff_untouched_count": sum(item["decision"] == "retain_post_cutoff_untouched" for item in analyses),
         "metadata_repaired_count": sum(item["metadata_repair"] for item in analyses),
@@ -663,7 +672,6 @@ def apply_cleanup(
 
 def validate(db_path: Path, artifact_path: Path, validation_ids_path: Path | None = None) -> dict[str, Any]:
     artifact = load_allowlist_artifact(artifact_path)
-    allowed = allowlist_numbers(artifact)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
@@ -673,15 +681,27 @@ def validate(db_path: Path, artifact_path: Path, validation_ids_path: Path | Non
         for row in rows:
             metadata = resolve_row_metadata(row)
             published = date.fromisoformat(metadata["publication_date"])
-            normalized = normalize_document_number(metadata["document_number"])
-            if published >= DEFAULT_POLICY_CUTOFF:
+            authority_level = metadata["bibliographic"].get("效力级别", "")
+            effective_status = metadata["bibliographic"].get("时效状态") or row["status"]
+            is_allowed, reason = policy_is_allowed(
+                metadata["document_number"],
+                metadata["publication_date"],
+                artifact,
+                authority_level=authority_level,
+                document_type=row["document_type"],
+                effective_status=effective_status,
+                official_source_verified=bool(metadata["source_url"]),
+            )
+            if reason == "departmental_document_published_on_or_after_allowlist_cutoff":
                 post_cutoff.append(row["document_id"])
-            elif normalized not in allowed:
+            if not is_allowed:
                 invalid_remaining.append(
                     {
                         "document_id": row["document_id"],
                         "title": row["title"],
                         "document_number": metadata["document_number"],
+                        "authority_level": authority_level,
+                        "governance_reason": reason,
                     }
                 )
         residuals = {

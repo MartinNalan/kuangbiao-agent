@@ -114,6 +114,34 @@ class DomainLexiconTests(unittest.TestCase):
         self.assertTrue(decision.in_scope)
         self.assertIn("探转采", decision.matched_terms)
 
+    def test_geological_sample_preparation_passes_domain_gate(self) -> None:
+        decision = DomainGate().check("样品制备过程中对样品损失率和缩分误差有何要求？")
+
+        self.assertTrue(decision.in_scope)
+        self.assertIn("样品制备", decision.matched_terms)
+
+    def test_canonical_placer_gold_passes_domain_gate_without_forcing_intent(self) -> None:
+        decision = DomainGate().check("砂金有什么要求？")
+
+        self.assertTrue(decision.in_scope)
+        self.assertIn("砂金", decision.matched_terms)
+        self.assertFalse(
+            matched_lexicon_entries(
+                "砂金有什么要求？",
+                intent_label="general",
+                purpose="intent",
+            )
+        )
+
+    def test_sample_preparation_from_explicit_other_domains_is_not_admitted(self) -> None:
+        for question in (
+            "食品样品制备有哪些规范？",
+            "药品样品制备的标准是什么？",
+            "金相样品制备流程是什么？",
+        ):
+            with self.subTest(question=question):
+                self.assertFalse(DomainGate().check(question).in_scope)
+
     def test_goaf_terms_pass_domain_gate_without_a_generic_mining_word(self) -> None:
         questions = (
             "采空区怎么处理",

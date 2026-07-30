@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass, replace
 from typing import Any
 
 from .domain_lexicon import matched_lexicon_entries
+from .governed_query_routing import route_governed_query
 from .query_classification import (
     QueryClassification,
     build_classification,
@@ -356,6 +357,19 @@ class QueryPlan:
     definition_slots: tuple[str, ...] = ()
     preferred_definition_sources: tuple[str, ...] = ()
     classification: QueryClassification | None = None
+    # Governed routing fields intentionally remain at the end. QueryPlan had
+    # historical positional callers, so inserting new defaults above legacy
+    # fields would silently reinterpret their arguments.
+    lexical_query: str = ""
+    semantic_query: str = ""
+    governed_intent: str = "other"
+    governed_mapping_id: str | None = None
+    governed_mapping_applied: bool = False
+    retrieval_allowed: bool = True
+    confirmation_question: str | None = None
+    # A separately validated question for deterministic evidence-structure
+    # completion. It must never replace lexical_query or semantic_query.
+    structural_query: str = ""
 
     @property
     def has_candidate_scope(self) -> bool:
@@ -861,6 +875,18 @@ def query_plan_from_payload(query: str, payload: dict[str, Any] | None) -> Query
         and classification.primary_intent == "technical_method"
     ):
         resolved_intent = plan.intent
+    expected_structural_query = broad_classification_structural_query(query, plan)
+    requested_structural_query = normalize_user_query(
+        str(payload.get("structural_query") or "")
+    )
+    structural_query = (
+        expected_structural_query
+        if (
+            not semantic_target_query
+            and requested_structural_query == expected_structural_query
+        )
+        else ""
+    )
     return replace(
         plan,
         intent=resolved_intent,
@@ -881,6 +907,7 @@ def query_plan_from_payload(query: str, payload: dict[str, Any] | None) -> Query
             if protected
             else bool(payload.get("exhaustive_search", plan.exhaustive_search))
         ),
+        structural_query=structural_query,
     )
 
 
@@ -898,6 +925,7 @@ def normalize_user_query(query: str) -> str:
         .replace("工程距离", "工程间距")
         .replace("实验室流程实验", "实验室流程试验")
         .replace("相差报告", "储量报告")
+        .replace("沙金", "砂金")
     )
     normalized = re.sub(r"\s+", " ", normalized).strip()
 
@@ -908,6 +936,53 @@ def normalize_user_query(query: str) -> str:
     normalized = _TYPE_PATTERN.sub(replace_type, normalized)
     if "勘查" in normalized and any(term in normalized for term in ENGINEERING_DISTANCE_TERMS):
         normalized = _SHORT_TYPE_PATTERN.sub(replace_type, normalized)
+    return normalized
+
+
+_BROAD_CLASSIFICATION_PATTERNS = (
+    "怎么划分",
+    "如何划分",
+    "分为哪些",
+    "分为哪",
+    "有哪些类型",
+    "哪些类型",
+    "分类体系",
+    "组成体系",
+)
+
+
+def broad_classification_structural_query(
+    question: str,
+    plan: QueryPlan | None = None,
+) -> str:
+    """Return the governed structural selector text for broad classifications.
+
+    The selector is deliberately narrower than ordinary query rewriting. It
+    only preserves an already-recognizable classification-system request and
+    excludes bare work-stage questions, the boundary accepted in T061.
+    """
+
+    normalized = normalize_user_query(question)
+    compact = re.sub(r"\s+", "", normalized)
+    if "阶段" in compact and not any(
+        anchor in compact for anchor in ("分类体系", "组成体系", "类型", "类别")
+    ):
+        return ""
+    classification = plan.classification if plan else None
+    broad_subject = any(
+        term in compact
+        for term in ("资源储量", "资源量和储量", "分类体系", "组成体系")
+    ) or bool(
+        classification
+        and classification.output_shape == "definition_and_classification"
+    )
+    broad_wording = any(
+        pattern in compact for pattern in _BROAD_CLASSIFICATION_PATTERNS
+    ) or any(term in compact for term in ("分类", "划分", "类型", "怎么分"))
+    if not broad_subject or not broad_wording:
+        return ""
+    if "分类体系" not in compact and "组成体系" not in compact:
+        normalized = f"{normalized} 分类体系".strip()
     return normalized
 
 
@@ -1079,6 +1154,8 @@ def extract_definition_request(
 def understand_query(query: str) -> QueryPlan:
     original = (query or "").strip()
     normalized = normalize_user_query(original)
+    governed_route = route_governed_query(normalized)
+    normalized = governed_route.canonical_question
     target_type_match = re.search(r"([ⅠⅡⅢ])类型", normalized)
     target_type = target_type_match.group(1) if target_type_match else None
 
@@ -1126,8 +1203,30 @@ def understand_query(query: str) -> QueryPlan:
     has_exploration_type_factors = "勘查类型" in normalized and any(
         term in normalized for term in EXPLORATION_FACTOR_TERMS
     )
-    has_basic_analysis_items = any(term in normalized for term in BASIC_ANALYSIS_TERMS) and any(
-        term in normalized for term in ("项目", "哪些", "什么", "包括", "内容", "需要测", "测哪些", "测定")
+    # “基本分析样”也会出现在样长、采样和制备问题中。只有问题明确询问
+    # 分析项目/测定对象时才进入 basic_analysis_items，不能用裸“什么/哪些”
+    # 把“什么情况下取小值”误判为分析项目清单。
+    has_basic_analysis_items = (
+        any(term in normalized for term in ("基本分析项目", "基本分析的项目"))
+        or (
+            "基本分析" in normalized
+            and any(
+                marker in normalized
+                for marker in (
+                    "分析什么",
+                    "分析哪些",
+                    "测什么",
+                    "测哪些",
+                    "测定什么",
+                    "测定哪些",
+                    "需要测",
+                    "项目包括",
+                    "包括什么项目",
+                    "包括哪些项目",
+                    "分析内容",
+                )
+            )
+        )
     )
     has_technical_requirement_sufficiency = (
         any(term in normalized for term in TECHNICAL_REQUIREMENT_SATISFACTION_TERMS)
@@ -1472,12 +1571,8 @@ def understand_query(query: str) -> QueryPlan:
         search_mode = "exhaustive"
         retrieval_terms.extend(["项目阶段", "专业", "文件清单", normalized])
 
-    if any(term in normalized for term in ("沙金", "砂金")) and any(
-        term in normalized for term in ("哪个标准", "哪个规范", "使用", "适用", "采用")
-    ):
+    if governed_route.governed_intent == "standard_applicability":
         intent = "standard_selection"
-        candidate_titles.append("金属砂矿类")
-        retrieval_terms.extend(["金属砂矿类", "砂金", "DZ/T 0208-2020"])
 
     # The lexicon expands retrieval only after deterministic/LLM intent selection.
     # Background and retrieval-only entries may enrich any in-scope plan, but never
@@ -1573,11 +1668,28 @@ def understand_query(query: str) -> QueryPlan:
         document_types=document_types,
         license_issuer_level=license_issuer,
     )
+    legacy_retrieval_query = " ".join(deduped_terms)
+    governed_retrieval_query = (
+        governed_route.lexical_query
+        if governed_route.alias_triggered
+        else legacy_retrieval_query
+    )
     return QueryPlan(
         original_query=original,
         normalized_query=normalized,
-        retrieval_query=" ".join(deduped_terms),
+        retrieval_query=governed_retrieval_query,
         intent=intent,
+        lexical_query=(
+            governed_route.lexical_query if governed_route.alias_triggered else ""
+        ),
+        semantic_query=(
+            governed_route.semantic_query if governed_route.alias_triggered else ""
+        ),
+        governed_intent=governed_route.governed_intent,
+        governed_mapping_id=governed_route.mapping_id,
+        governed_mapping_applied=governed_route.mapping_applied,
+        retrieval_allowed=governed_route.retrieval_allowed,
+        confirmation_question=governed_route.confirmation_prompt,
         target_exploration_type=target_type,
         candidate_title_terms=tuple(dict.fromkeys(candidate_titles)),
         standard_numbers=tuple(dict.fromkeys(standards)),

@@ -1,0 +1,732 @@
+{
+  "$defs": {
+    "Ambiguity": {
+      "additionalProperties": false,
+      "properties": {
+        "field": {
+          "title": "Field",
+          "type": "string"
+        },
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "material": {
+          "default": true,
+          "title": "Material",
+          "type": "boolean"
+        },
+        "confirmation_question": {
+          "default": "",
+          "title": "Confirmation Question",
+          "type": "string"
+        }
+      },
+      "required": [
+        "field",
+        "description"
+      ],
+      "title": "Ambiguity",
+      "type": "object"
+    },
+    "Anchor": {
+      "additionalProperties": false,
+      "properties": {
+        "anchor_id": {
+          "title": "Anchor Id",
+          "type": "string"
+        },
+        "type": {
+          "title": "Type",
+          "type": "string"
+        },
+        "raw_text": {
+          "title": "Raw Text",
+          "type": "string"
+        },
+        "canonical_text": {
+          "title": "Canonical Text",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/AnchorState"
+        },
+        "origin": {
+          "$ref": "#/$defs/AnchorOrigin"
+        },
+        "needs_confirmation": {
+          "default": false,
+          "title": "Needs Confirmation",
+          "type": "boolean"
+        },
+        "retrieval_actions": {
+          "items": {
+            "$ref": "#/$defs/RetrievalAction"
+          },
+          "title": "Retrieval Actions",
+          "type": "array"
+        }
+      },
+      "required": [
+        "anchor_id",
+        "type",
+        "raw_text",
+        "canonical_text",
+        "state",
+        "origin"
+      ],
+      "title": "Anchor",
+      "type": "object"
+    },
+    "AnchorOrigin": {
+      "enum": [
+        "original_explicit",
+        "program_detected",
+        "program_normalized",
+        "model_inferred",
+        "user_confirmed"
+      ],
+      "title": "AnchorOrigin",
+      "type": "string"
+    },
+    "AnchorState": {
+      "enum": [
+        "locked",
+        "candidate",
+        "confirmed",
+        "rejected"
+      ],
+      "title": "AnchorState",
+      "type": "string"
+    },
+    "ConfirmationItem": {
+      "additionalProperties": false,
+      "properties": {
+        "item_id": {
+          "title": "Item Id",
+          "type": "string"
+        },
+        "target_type": {
+          "title": "Target Type",
+          "type": "string"
+        },
+        "target_id": {
+          "title": "Target Id",
+          "type": "string"
+        },
+        "question": {
+          "title": "Question",
+          "type": "string"
+        }
+      },
+      "required": [
+        "item_id",
+        "target_type",
+        "target_id",
+        "question"
+      ],
+      "title": "ConfirmationItem",
+      "type": "object"
+    },
+    "ConfirmationState": {
+      "additionalProperties": false,
+      "properties": {
+        "required": {
+          "default": false,
+          "title": "Required",
+          "type": "boolean"
+        },
+        "mode": {
+          "default": "deferred_parallel_search",
+          "title": "Mode",
+          "type": "string"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/ConfirmationItem"
+          },
+          "title": "Items",
+          "type": "array"
+        }
+      },
+      "title": "ConfirmationState",
+      "type": "object"
+    },
+    "EvidenceRequirement": {
+      "additionalProperties": false,
+      "properties": {
+        "requirement_id": {
+          "title": "Requirement Id",
+          "type": "string"
+        },
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "required_elements": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Required Elements",
+          "type": "array"
+        },
+        "must_have_clause_level_evidence": {
+          "default": true,
+          "title": "Must Have Clause Level Evidence",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "requirement_id",
+        "description"
+      ],
+      "title": "EvidenceRequirement",
+      "type": "object"
+    },
+    "HardFilter": {
+      "additionalProperties": false,
+      "properties": {
+        "field": {
+          "title": "Field",
+          "type": "string"
+        },
+        "value": {
+          "title": "Value",
+          "type": "string"
+        },
+        "scope": {
+          "default": "exact_route_only",
+          "title": "Scope",
+          "type": "string"
+        },
+        "anchor_id": {
+          "title": "Anchor Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "field",
+        "value",
+        "anchor_id"
+      ],
+      "title": "HardFilter",
+      "type": "object"
+    },
+    "Normalization": {
+      "additionalProperties": false,
+      "properties": {
+        "source_text": {
+          "title": "Source Text",
+          "type": "string"
+        },
+        "target_text": {
+          "title": "Target Text",
+          "type": "string"
+        },
+        "status": {
+          "default": "approved_one_to_one",
+          "title": "Status",
+          "type": "string"
+        },
+        "origin": {
+          "$ref": "#/$defs/AnchorOrigin",
+          "default": "program_normalized"
+        }
+      },
+      "required": [
+        "source_text",
+        "target_text"
+      ],
+      "title": "Normalization",
+      "type": "object"
+    },
+    "ParallelQuery": {
+      "additionalProperties": false,
+      "properties": {
+        "query": {
+          "title": "Query",
+          "type": "string"
+        },
+        "purpose": {
+          "title": "Purpose",
+          "type": "string"
+        },
+        "hypothesis_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Hypothesis Id"
+        }
+      },
+      "required": [
+        "query",
+        "purpose"
+      ],
+      "title": "ParallelQuery",
+      "type": "object"
+    },
+    "PrivacyPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "raw_question_storage": {
+          "default": "runtime_or_private_evaluation_only",
+          "title": "Raw Question Storage",
+          "type": "string"
+        },
+        "production_log_policy": {
+          "default": "hash_and_structural_metadata_only",
+          "title": "Production Log Policy",
+          "type": "string"
+        },
+        "sensitive_data_detected": {
+          "default": false,
+          "title": "Sensitive Data Detected",
+          "type": "boolean"
+        },
+        "detected_categories": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Detected Categories",
+          "type": "array"
+        }
+      },
+      "title": "PrivacyPolicy",
+      "type": "object"
+    },
+    "ProtectedCandidate": {
+      "additionalProperties": false,
+      "properties": {
+        "anchor_id": {
+          "title": "Anchor Id",
+          "type": "string"
+        },
+        "value": {
+          "title": "Value",
+          "type": "string"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "anchor_id",
+        "value",
+        "reason"
+      ],
+      "title": "ProtectedCandidate",
+      "type": "object"
+    },
+    "QueryMetadata": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "default": "query_analysis.v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "prompt_version": {
+          "default": "query-analysis-deepseek-v2",
+          "title": "Prompt Version",
+          "type": "string"
+        },
+        "prompt_sha256": {
+          "title": "Prompt Sha256",
+          "type": "string"
+        },
+        "model": {
+          "title": "Model",
+          "type": "string"
+        },
+        "generated_at": {
+          "title": "Generated At",
+          "type": "string"
+        },
+        "original_question_sha256": {
+          "title": "Original Question Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "prompt_sha256",
+        "model",
+        "generated_at",
+        "original_question_sha256"
+      ],
+      "title": "QueryMetadata",
+      "type": "object"
+    },
+    "QuerySelfCheck": {
+      "additionalProperties": false,
+      "properties": {
+        "preserved_original_facts": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Preserved Original Facts",
+          "type": "array"
+        },
+        "missing_original_facts": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Missing Original Facts",
+          "type": "array"
+        },
+        "added_assumptions": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Added Assumptions",
+          "type": "array"
+        },
+        "answer_generated": {
+          "default": false,
+          "title": "Answer Generated",
+          "type": "boolean"
+        }
+      },
+      "title": "QuerySelfCheck",
+      "type": "object"
+    },
+    "RetrievalAction": {
+      "enum": [
+        "hard_filter_exact_route",
+        "candidate_retention",
+        "ranking_boost",
+        "parallel_search_only",
+        "evidence_verification"
+      ],
+      "title": "RetrievalAction",
+      "type": "string"
+    },
+    "RetrievalPlan": {
+      "additionalProperties": false,
+      "properties": {
+        "original_query": {
+          "title": "Original Query",
+          "type": "string"
+        },
+        "exact_queries": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Exact Queries",
+          "type": "array"
+        },
+        "lexical_query": {
+          "title": "Lexical Query",
+          "type": "string"
+        },
+        "lexical_terms": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Lexical Terms",
+          "type": "array"
+        },
+        "semantic_queries": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Semantic Queries",
+          "type": "array"
+        },
+        "parallel_queries": {
+          "items": {
+            "$ref": "#/$defs/ParallelQuery"
+          },
+          "title": "Parallel Queries",
+          "type": "array"
+        },
+        "hard_filters": {
+          "items": {
+            "$ref": "#/$defs/HardFilter"
+          },
+          "title": "Hard Filters",
+          "type": "array"
+        },
+        "protected_candidates": {
+          "items": {
+            "$ref": "#/$defs/ProtectedCandidate"
+          },
+          "title": "Protected Candidates",
+          "type": "array"
+        },
+        "confirmation_pending": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Confirmation Pending",
+          "type": "array"
+        },
+        "original_route_independent": {
+          "default": true,
+          "title": "Original Route Independent",
+          "type": "boolean"
+        },
+        "source_preferences_are_filters": {
+          "default": false,
+          "title": "Source Preferences Are Filters",
+          "type": "boolean"
+        },
+        "governed_intent": {
+          "default": "other",
+          "title": "Governed Intent",
+          "type": "string"
+        },
+        "governed_mapping_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Governed Mapping Id"
+        },
+        "governed_mapping_applied": {
+          "default": false,
+          "title": "Governed Mapping Applied",
+          "type": "boolean"
+        },
+        "retrieval_allowed": {
+          "default": true,
+          "title": "Retrieval Allowed",
+          "type": "boolean"
+        },
+        "confirmation_question": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confirmation Question"
+        }
+      },
+      "required": [
+        "original_query",
+        "lexical_query"
+      ],
+      "title": "RetrievalPlan",
+      "type": "object"
+    },
+    "SearchHypothesis": {
+      "additionalProperties": false,
+      "properties": {
+        "hypothesis_id": {
+          "title": "Hypothesis Id",
+          "type": "string"
+        },
+        "query": {
+          "title": "Query",
+          "type": "string"
+        },
+        "purpose": {
+          "title": "Purpose",
+          "type": "string"
+        },
+        "status": {
+          "default": "unverified",
+          "title": "Status",
+          "type": "string"
+        },
+        "search_only": {
+          "default": true,
+          "title": "Search Only",
+          "type": "boolean"
+        },
+        "needs_confirmation": {
+          "default": false,
+          "title": "Needs Confirmation",
+          "type": "boolean"
+        },
+        "origin": {
+          "$ref": "#/$defs/AnchorOrigin",
+          "default": "model_inferred"
+        }
+      },
+      "required": [
+        "hypothesis_id",
+        "query",
+        "purpose"
+      ],
+      "title": "SearchHypothesis",
+      "type": "object"
+    },
+    "SourcePreferences": {
+      "additionalProperties": false,
+      "properties": {
+        "primary": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Primary",
+          "type": "array"
+        },
+        "supplementary": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Supplementary",
+          "type": "array"
+        },
+        "exclude_by_type": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Exclude By Type",
+          "type": "array"
+        },
+        "routing_mode": {
+          "default": "prefer_not_exclude",
+          "title": "Routing Mode",
+          "type": "string"
+        }
+      },
+      "title": "SourcePreferences",
+      "type": "object"
+    },
+    "ValidationReport": {
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "title": "Status",
+          "type": "string"
+        },
+        "errors": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Errors",
+          "type": "array"
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Warnings",
+          "type": "array"
+        },
+        "checks": {
+          "additionalProperties": {
+            "type": "boolean"
+          },
+          "title": "Checks",
+          "type": "object"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "ValidationReport",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "query_id": {
+      "title": "Query Id",
+      "type": "string"
+    },
+    "original_question": {
+      "title": "Original Question",
+      "type": "string"
+    },
+    "rewritten_question": {
+      "title": "Rewritten Question",
+      "type": "string"
+    },
+    "question_type": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Question Type",
+      "type": "array"
+    },
+    "metadata": {
+      "$ref": "#/$defs/QueryMetadata"
+    },
+    "privacy": {
+      "$ref": "#/$defs/PrivacyPolicy"
+    },
+    "normalizations": {
+      "items": {
+        "$ref": "#/$defs/Normalization"
+      },
+      "title": "Normalizations",
+      "type": "array"
+    },
+    "anchors": {
+      "items": {
+        "$ref": "#/$defs/Anchor"
+      },
+      "title": "Anchors",
+      "type": "array"
+    },
+    "ambiguities": {
+      "items": {
+        "$ref": "#/$defs/Ambiguity"
+      },
+      "title": "Ambiguities",
+      "type": "array"
+    },
+    "search_hypotheses": {
+      "items": {
+        "$ref": "#/$defs/SearchHypothesis"
+      },
+      "title": "Search Hypotheses",
+      "type": "array"
+    },
+    "source_preferences": {
+      "$ref": "#/$defs/SourcePreferences"
+    },
+    "evidence_requirements": {
+      "items": {
+        "$ref": "#/$defs/EvidenceRequirement"
+      },
+      "title": "Evidence Requirements",
+      "type": "array"
+    },
+    "self_check": {
+      "$ref": "#/$defs/QuerySelfCheck"
+    },
+    "retrieval_plan": {
+      "$ref": "#/$defs/RetrievalPlan"
+    },
+    "confirmation": {
+      "$ref": "#/$defs/ConfirmationState"
+    },
+    "validation": {
+      "$ref": "#/$defs/ValidationReport"
+    }
+  },
+  "required": [
+    "query_id",
+    "original_question",
+    "rewritten_question",
+    "metadata",
+    "privacy",
+    "source_preferences",
+    "self_check",
+    "retrieval_plan",
+    "confirmation",
+    "validation"
+  ],
+  "title": "GeoWiki Query Analysis v1",
+  "type": "object",
+  "$id": "https://geowiki.local/schemas/query_analysis.v1.schema.json"
+}

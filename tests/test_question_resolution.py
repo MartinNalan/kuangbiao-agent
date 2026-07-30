@@ -285,6 +285,36 @@ class QuestionResolverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.plan.target_exploration_type, "Ⅰ")
         self.assertEqual(llm.calls, 1)
 
+    async def test_engineering_distance_matrix_ignores_model_branch_clarification(self) -> None:
+        llm = FakeResolutionLLM(
+            {
+                "canonical_question": "金矿的勘查工程间距要求",
+                "intent": "engineering_distance_lookup",
+                "primary_intent": "numeric_table_lookup",
+                "target_entity": "勘查工程间距",
+                "mineral": "金",
+                "document_types": ["standard", "industry_standard"],
+                "evidence_slots": ["勘查类型", "工程间距要求"],
+                "output_shape": "requirements_and_advice",
+                "is_ambiguous": True,
+                "confidence": 0.94,
+                "missing_slots": ["勘查类型"],
+                "reason": "模型要求先选择勘查类型。",
+                "interpretations": [
+                    {"label": "Ⅰ类型", "question": "金矿Ⅰ类型的勘查工程间距是多少？"},
+                    {"label": "Ⅱ类型", "question": "金矿Ⅱ类型的勘查工程间距是多少？"},
+                ],
+            }
+        )
+        resolver = QuestionResolver(self.settings(), llm=llm)  # type: ignore[arg-type]
+
+        result = await resolver.resolve("金矿的勘查间距")
+
+        self.assertFalse(result.requires_clarification)
+        self.assertEqual(result.plan.intent, "engineering_distance_lookup")
+        self.assertIsNone(result.plan.target_exploration_type)
+        self.assertIn("勘查工程间距", result.canonical_question)
+
     async def test_condition_matrix_is_answered_without_forcing_a_branch_confirmation(self) -> None:
         llm = FakeResolutionLLM(
             {

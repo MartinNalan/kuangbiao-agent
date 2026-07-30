@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     rate_limit_enabled: bool = Field(default=True, alias="RATE_LIMIT_ENABLED")
     rate_limit_per_minute: int = Field(default=30, alias="RATE_LIMIT_PER_MINUTE")
     request_timeout_seconds: float = Field(default=60.0, alias="REQUEST_TIMEOUT_SECONDS")
+    knowledge_request_timeout_seconds: float = Field(
+        default=20.0,
+        gt=0.0,
+        alias="KNOWLEDGE_REQUEST_TIMEOUT_SECONDS",
+    )
     dashscope_api_key: str = Field(default="", alias="DASHSCOPE_API_KEY")
     embedding_provider: str = Field(default="", alias="EMBEDDING_PROVIDER")
     embedding_api_key: str = Field(default="", alias="EMBEDDING_API_KEY")
@@ -31,6 +36,23 @@ class Settings(BaseSettings):
     embedding_model: str = Field(default="", alias="EMBEDDING_MODEL")
     embedding_dimensions: int = Field(default=0, alias="EMBEDDING_DIMENSIONS")
     embedding_batch_size: int = Field(default=10, alias="EMBEDDING_BATCH_SIZE")
+    v4_embedding_timeout_seconds: float = Field(
+        default=3.0,
+        gt=0.0,
+        alias="V4_EMBEDDING_TIMEOUT_SECONDS",
+    )
+    v4_embedding_max_retries: int = Field(
+        default=1,
+        ge=0,
+        le=2,
+        alias="V4_EMBEDDING_MAX_RETRIES",
+    )
+    v4_query_embedding_cache_size: int = Field(
+        default=256,
+        ge=1,
+        le=4096,
+        alias="V4_QUERY_EMBEDDING_CACHE_SIZE",
+    )
     query_planner_enabled: bool = Field(default=True, alias="QUERY_PLANNER_ENABLED")
     evidence_reranker_enabled: bool = Field(default=True, alias="EVIDENCE_RERANKER_ENABLED")
     question_resolution_enabled: bool = Field(default=True, alias="QUESTION_RESOLUTION_ENABLED")

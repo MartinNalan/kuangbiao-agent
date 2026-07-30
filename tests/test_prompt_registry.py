@@ -38,6 +38,17 @@ class PromptRegistryTests(unittest.TestCase):
         self.assertEqual(manifest["version"], PROMPT_REGISTRY_VERSION)
         self.assertTrue({"question_resolution", "retrieval_planner", "answer", "research_summary"}.issubset(manifest["stages"]))
 
+    def test_technical_method_requires_both_standard_roles_and_preserves_conflicts(self) -> None:
+        content = prompt_text(
+            Settings(PROMPT_REGISTRY_ENABLED=True),
+            "answer",
+            primary_intent="technical_method",
+        )
+
+        self.assertIn("适用矿种勘查规范", content)
+        self.assertIn("DZ/T 0340-2020", content)
+        self.assertIn("显示冲突", content)
+
 
 if __name__ == "__main__":
     unittest.main()

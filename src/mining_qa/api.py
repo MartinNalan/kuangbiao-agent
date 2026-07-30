@@ -38,7 +38,7 @@ from .config import PROJECT_ROOT, get_settings
 from .email_sender import EmailDeliveryError, send_verification_email
 from .domain_gate import DomainGate
 from .feedback_log import FeedbackLogger
-from .knowledge_client import KnowledgeClient
+from .knowledge_client import KnowledgeClient, primary_retrieval_question
 from .lexicon_governance import (
     LexiconGovernanceError,
     LexiconRecordNotFoundError,
@@ -872,7 +872,11 @@ async def ask(
                 }
             )
             return result
-        payload._retrieval_question = resolution.canonical_question
+        payload._retrieval_question = primary_retrieval_question(
+            payload.retrieval_question,
+            resolution.canonical_question,
+            resolution.plan,
+        )
         payload._query_plan = resolution.plan
 
     if principal.user_id and principal.quota_managed:
@@ -1151,7 +1155,11 @@ async def create_research_task(
                 }
             )
             return result
-        retrieval_question = resolution.canonical_question
+        retrieval_question = primary_retrieval_question(
+            retrieval_question,
+            resolution.canonical_question,
+            resolution.plan,
+        )
         reserved_units = store.research_upgrade_quota_cost(
             principal.user_id,
             payload.source_request_id,

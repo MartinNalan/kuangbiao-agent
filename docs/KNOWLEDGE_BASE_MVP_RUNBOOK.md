@@ -104,6 +104,30 @@ Health check:
 curl http://127.0.0.1:18081/knowledge/health
 ```
 
+### v4 local production shadow
+
+The service keeps the legacy v3 store as its default and rollback path. The historical `hybrid_fixed20_v1` bundle remains frozen for T076/T077 replay. The active local v4 profile is `hybrid_fixed20_v2`, which reuses the same corpus, FTS and document vectors while adding bounded query-Embedding fallback and duplicate-query single-flight. Validate it and then select v4 explicitly:
+
+```bash
+cd /home/nalanmading/My-project/my-1st-agent
+PYTHONPATH=src .venv/bin/python scripts/promote_v4_local_production_runtime.py --validate-only \
+  --runtime-id v4-hybrid-fixed20-resilient-v2 \
+  --runtime-fts data/knowledge_base_v4/runtime_private/hybrid_fixed20_v1/fts.sqlite \
+  --manifest data/knowledge_base_v4/runtime_private/hybrid_fixed20_v2/runtime_manifest.json \
+  --adapter src/mining_qa/v4_retrieval_store_v2.py \
+  --base-adapter src/mining_qa/v4_retrieval_store.py
+KNOWLEDGE_RUNTIME_VERSION=v4 \
+V4_RUNTIME_MANIFEST=data/knowledge_base_v4/runtime_private/hybrid_fixed20_v2/runtime_manifest.json \
+KNOWLEDGE_REQUEST_TIMEOUT_SECONDS=20 \
+V4_EMBEDDING_TIMEOUT_SECONDS=3 \
+V4_EMBEDDING_MAX_RETRIES=1 \
+PYTHONPATH=src .venv/bin/python -m uvicorn mining_qa.knowledge_service:app --host 127.0.0.1 --port 18082
+```
+
+Check the selected runtime at `http://127.0.0.1:18082/knowledge/health`; `runtime_id` must be `v4-hybrid-fixed20-resilient-v2`. The v4 adapter uses the accepted keyword-plus-Qwen-vector fixed-20 route and preserves the existing Knowledge API response contract. Query Embedding has a separate short budget and falls back to keywords on failure; identical concurrent searches are computed once. It does not use an ANN index or knowledge graph.
+
+Rollback is explicit and immediate: stop the local shadow process, or start the service without `KNOWLEDGE_RUNTIME_VERSION=v4`; the default value is `v3`. This local switch is not authorization to edit a cloud environment, deploy v4 data or restart the online service.
+
 ## Connect The QA API
 
 ```bash

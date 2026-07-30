@@ -1,10 +1,63 @@
+from dataclasses import replace
 from typing import Any
 
 import httpx
 
 from .config import Settings
-from .query_understanding import QueryPlan, understand_query
+from .query_understanding import (
+    QueryPlan,
+    broad_classification_structural_query,
+    understand_query,
+)
 from .schemas import KnowledgeSearchResponse, StandardsResponse
+
+
+def is_broad_classification_question(question: str, plan: QueryPlan) -> bool:
+    return bool(broad_classification_structural_query(question, plan))
+
+
+def primary_retrieval_question(
+    original_question: str,
+    canonical_question: str,
+    plan: QueryPlan,
+) -> str:
+    """Keep the primary v4 retrieval route bound to the user's question.
+
+    The accepted v4 fixed-20 baseline was evaluated from the original question.
+    Question resolution may still provide intent, classification and structural
+    metadata, but substituting its rewrite as the lexical/dense query creates a
+    different candidate pool from the locally accepted runtime.  Canonical text
+    therefore cannot replace the primary retrieval text.
+    """
+
+    del canonical_question, plan
+    return original_question
+
+
+def structural_evidence_plan(question: str, plan: QueryPlan) -> QueryPlan:
+    """Expose broad-classification identity only to the structural selector.
+
+    The canonical question remains unchanged for lexical and dense retrieval.
+    This marker lets the already-accepted same-section completion rule survive
+    harmless model paraphrases such as “分类划分标准是什么”.
+    """
+
+    structural = broad_classification_structural_query(question, plan)
+    if not structural or plan.scope_origin == "semantic_target":
+        return plan
+    return replace(plan, structural_query=structural)
+
+
+def evidence_window_top_k(question: str, plan: QueryPlan) -> int:
+    """Return the complete candidate window accepted by the v4 baseline.
+
+    The v4 runtime already builds a fixed pool of twenty candidates. Asking the
+    Knowledge API for only ten rows does not save retrieval work; it only clips
+    evidence before the Agent can validate it and breaks local/API parity.
+    """
+
+    del question, plan
+    return 20
 
 
 class KnowledgeClient:
@@ -19,7 +72,7 @@ class KnowledgeClient:
     def _http_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
             self._client = httpx.AsyncClient(
-                timeout=self.settings.request_timeout_seconds,
+                timeout=self.settings.knowledge_request_timeout_seconds,
                 trust_env=False,
             )
         return self._client
@@ -48,19 +101,15 @@ class KnowledgeClient:
             )
 
         effective_plan = plan or understand_query(question)
+        kb_plan = structural_evidence_plan(question, effective_plan)
         payload = {
             "query": question,
             "filters": filters,
-            "retrieval_plan": effective_plan.to_payload(),
+            "retrieval_plan": kb_plan.to_payload(),
             "options": {
                 "top_k": top_k
                 if top_k is not None
-                else (
-                    20
-                    if effective_plan.search_mode in {"comparison", "exhaustive"}
-                    or effective_plan.exhaustive_search
-                    else 10
-                ),
+                else evidence_window_top_k(question, effective_plan),
                 "include_full_text": False,
                 "allow_web_supplement": allow_web_supplement,
                 "retrieval_round": retrieval_round,

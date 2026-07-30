@@ -10,6 +10,7 @@ from .llm_client import LLMClient
 from .prompt_registry import prompt_text
 from .query_understanding import (
     QueryPlan,
+    TRANSFER_REPORT_OBJECT_TERMS,
     apply_semantic_plan,
     normalize_user_query,
 )
@@ -218,6 +219,7 @@ class RetrievalPlanner:
                 classification=base_plan.classification,
             )
             variants = self._query_variants(payload.get("subqueries"), plan)
+            variants = self._govern_query_variants(question, plan, variants)
             return PlannerResult(
                 plan=plan,
                 used=True,
@@ -260,6 +262,28 @@ class RetrievalPlanner:
                 alternative_terms=plan.alternative_terms[:4],
             ),
         )
+
+    @staticmethod
+    def _govern_query_variants(
+        question: str,
+        plan: QueryPlan,
+        variants: tuple[QueryVariant, ...],
+    ) -> tuple[QueryVariant, ...]:
+        """Reject a model-created report target that the user never asked for.
+
+        A stage-only transfer question is directly answered by the current
+        policy clause that states both the report prerequisite and the stage
+        matrix.  DZ/T 0430-2023's report-type limitation remains optional
+        supporting context and must not become a second required target unless
+        the user explicitly asks about a report object.
+        """
+
+        if plan.intent != "exploration_to_mining_eligibility":
+            return variants
+        normalized = normalize_user_query(question)
+        if any(term in normalized for term in TRANSFER_REPORT_OBJECT_TERMS):
+            return variants
+        return ()
 
     @staticmethod
     def _query_variants(values: object, plan: QueryPlan) -> tuple[QueryVariant, ...]:

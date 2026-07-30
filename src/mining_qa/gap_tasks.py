@@ -1,5 +1,6 @@
 import json
 from datetime import datetime, timezone
+import os
 from pathlib import Path
 from uuid import uuid4
 
@@ -10,7 +11,12 @@ from .schemas import KnowledgeGapTask
 
 class KnowledgeGapTaskStore:
     def __init__(self, path: Path | None = None):
-        self.path = path or PROJECT_ROOT / "data" / "knowledge_gap_tasks.jsonl"
+        configured = os.getenv("KNOWLEDGE_GAP_TASKS_PATH", "").strip()
+        self.path = path or (
+            Path(configured)
+            if configured
+            else PROJECT_ROOT / "data" / "knowledge_gap_tasks.jsonl"
+        )
 
     def create(self, question: str, decision: DomainDecision, source_count: int) -> KnowledgeGapTask:
         task = KnowledgeGapTask(

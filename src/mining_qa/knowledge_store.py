@@ -2266,12 +2266,61 @@ class KnowledgeStore:
         started = perf_counter()
         query = str(payload.get("query") or "").strip()
         plan = query_plan_from_payload(query, payload.get("retrieval_plan"))
+        if not plan.retrieval_allowed:
+            total_ms = (perf_counter() - started) * 1000
+            return {
+                "query": query,
+                "results": [],
+                "retrieval": {
+                    "full_text_hits": 0,
+                    "vector_hits": 0,
+                    "graph_hits": 0,
+                    "web_hits": 0,
+                    "scoped_search": 0,
+                    "vector_skipped": 1,
+                    "direct_evidence_hits": 0,
+                    "candidate_count": 0,
+                    "ann_used": 0,
+                    "mmr_used": 0,
+                    "mmr_lambda": None,
+                    "duplicate_ratio_before": 0.0,
+                    "duplicate_ratio_after": 0.0,
+                    "vector_route": "none",
+                    "vector_error": None,
+                    "retrieval_round": 0,
+                    "timings_ms": {
+                        "lexical_graph": 0.0,
+                        "embedding": 0.0,
+                        "vector_search": 0.0,
+                        "vector_total": 0.0,
+                        "mmr": 0.0,
+                        "total": round(total_ms, 3),
+                    },
+                },
+                "coverage": {
+                    "has_clause_level_evidence": False,
+                    "has_page_level_evidence": False,
+                    "needs_web_supplement": False,
+                    "notes": [
+                        plan.confirmation_question
+                        or "问题范围尚未确认，本次未执行知识库检索。"
+                    ],
+                    "query_plan": {
+                        "normalized_query": plan.normalized_query,
+                        "intent": plan.intent,
+                        "governed_intent": plan.governed_intent,
+                        "retrieval_allowed": False,
+                    },
+                },
+            }
         if self._is_status_verification(plan, query):
             return self._search_document_status(query, plan, started)
         deleted_effects = self._search_deleted_clause_effects(query, plan, started)
         if deleted_effects is not None:
             return deleted_effects
         retrieval_query = plan.retrieval_query or plan.normalized_query or query
+        lexical_query = plan.lexical_query or retrieval_query
+        semantic_query = plan.semantic_query or retrieval_query
         filters = payload.get("filters") or {}
         options = payload.get("options") or {}
         top_k = int(options.get("top_k") or 10)
@@ -2337,7 +2386,7 @@ class KnowledgeStore:
             lexical_started = perf_counter()
             candidate_rows = self._lexical_and_graph_candidates(
                 conn,
-                retrieval_query,
+                lexical_query,
                 plan,
                 where,
                 params,
@@ -2353,7 +2402,7 @@ class KnowledgeStore:
                 lexical_started = perf_counter()
                 candidate_rows = self._lexical_and_graph_candidates(
                     conn,
-                    retrieval_query,
+                    lexical_query,
                     plan,
                     where,
                     params,
@@ -2395,7 +2444,7 @@ class KnowledgeStore:
                 vector_started = perf_counter()
                 vector_result = self._vector_candidates(
                     conn,
-                    retrieval_query,
+                    semantic_query,
                     plan,
                     where,
                     params,
@@ -2532,7 +2581,7 @@ class KnowledgeStore:
                     plan=plan,
                 )
                 if row["chunk_type"] == "table"
-                else quote_text(row["text"], plan.retrieval_query, limit=quote_limit)
+                else quote_text(row["text"], semantic_query, limit=quote_limit)
             )
             item = {
                 "chunk_id": row["chunk_id"],
@@ -2549,14 +2598,14 @@ class KnowledgeStore:
                     table_quote(
                         row["table_json"],
                         row["text"],
-                        plan.retrieval_query,
+                        semantic_query,
                         limit=evidence_limit,
                         plan=plan,
                     )
                     if row["chunk_type"] == "table"
                     else quote_text(
                         row["text"],
-                        plan.retrieval_query,
+                        semantic_query,
                         limit=evidence_limit,
                         max_sentences=6,
                     )
@@ -2654,6 +2703,12 @@ class KnowledgeStore:
                     "exhaustive_search": plan.exhaustive_search,
                     "planner_used": plan.planner_used,
                     "search_mode": plan.search_mode,
+                    "lexical_query": lexical_query,
+                    "semantic_query": semantic_query,
+                    "governed_intent": plan.governed_intent,
+                    "governed_mapping_id": plan.governed_mapping_id,
+                    "governed_mapping_applied": plan.governed_mapping_applied,
+                    "retrieval_allowed": plan.retrieval_allowed,
                     "required_evidence_groups": plan.required_evidence_groups,
                     "target_terms": plan.target_terms,
                     "definition_mode": plan.definition_mode,

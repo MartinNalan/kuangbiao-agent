@@ -347,6 +347,10 @@ def main() -> int:
                 meta.get("文号"),
                 meta.get("成文时间") or meta.get("发布日期"),
                 allowlist_artifact,
+                authority_level=meta.get("效力级别"),
+                document_type=document_type_from_policy_level(meta.get("效力级别", "")),
+                effective_status=meta.get("时效状态"),
+                official_source_verified=bool(entry.get("url")),
             )
             if not allowed:
                 skipped_rows.append(

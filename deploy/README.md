@@ -10,15 +10,55 @@ The current single-server deployment uses:
 
 The Nginx configuration explicitly returns 404 for `/knowledge/*`.
 
-## Deploy by IP
+## Current v4 production cutover
 
-Fill `.cloud.env`, keep it outside Git, then run:
+The production knowledge service now runs the hash-pinned v4 runtime. For an
+in-place update of that runtime, fill the ignored `.cloud.env` and run:
+
+```bash
+bash scripts/deploy_v4_cloud.sh deploy
+```
+
+This workflow preserves the remote `.env` values and
+`data/app/application.sqlite`, creates a timestamped rollback point before any
+upload, transfers only code and the explicit private v4 runtime assets,
+verifies every manifest hash remotely, preloads the v4 store before changing
+the service environment, and then restarts the KB service before the public
+API. It does not upload raw PDFs, OCR sources, `.cloud.env`, Git metadata or
+other private source-evidence directories.
+
+The mutable candidate-staging endpoint uses its own v4-only SQLite file. The
+old v3 database is retained on disk solely for rollback and is not opened by
+the active KB process.
+
+To restore a recorded pre-cutover state, use the exact backup ID printed by
+the deployment command:
+
+```bash
+bash scripts/deploy_v4_cloud.sh rollback BACKUP_ID
+```
+
+Rollback restores the saved service environment, code and systemd units and
+reactivates the retained v3 files. It deliberately does not overwrite the live
+application database, because doing so could discard registrations or account
+activity created after the backup; a point-in-time application-database copy
+is kept inside the rollback directory for explicit disaster recovery.
+
+## Legacy v3 bootstrap
+
+`scripts/sync_cloud.sh` is the legacy v3 bootstrap/synchronization workflow. It
+copies the old v3 database and ANN files and replaces the remote `.env`; using
+it against the current v4 production instance can reactivate v3. Do not use it
+for routine v4 deployment.
+
+For a deliberately authorized legacy v3 bootstrap only, fill `.cloud.env`,
+keep it outside Git, then run:
 
 ```bash
 bash scripts/sync_cloud.sh
 ```
 
-The script synchronizes code, the private knowledge database, and the local runtime `.env`, then installs system dependencies and systemd services. It also uses the configured AgentMail token on the server to create or reuse the `geowiki` registration inbox. It does not upload `.git`, `.venv`, logs, PDFs, Office files, or other `data/` content.
+The legacy script synchronizes code, the v3 private knowledge database, and the local runtime `.env`, then installs system dependencies and systemd services. It also uses the configured AgentMail token on the server to create or reuse the `geowiki` registration inbox. It does not upload `.git`, `.venv`, logs, PDFs, Office files, or other `data/` content.
 
 When deploying code while the KB specialist is rebuilding the local private database, skip only the DB transfer:
 

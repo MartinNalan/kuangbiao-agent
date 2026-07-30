@@ -9,6 +9,10 @@ from pydantic import BaseModel, Field, ValidationError
 
 from .config import Settings
 from .domain_gate import DomainGate
+from .governed_query_routing import (
+    route_governed_query,
+    sand_gold_confirmation_options,
+)
 from .llm_client import LLMClient
 from .prompt_registry import prompt_text
 from .query_classification import (
@@ -407,6 +411,12 @@ class QuestionResolver:
 
     @staticmethod
     def _can_answer_as_condition_matrix(plan: QueryPlan) -> bool:
+        if plan.intent == "engineering_distance_lookup":
+            # Engineering-distance standards expose exploration types and
+            # directions as one table.  Omitting I/II/III does not make the
+            # question unanswerable; the complete matrix can be returned and
+            # the user may narrow it afterwards.
+            return True
         classification = plan.classification
         if classification is None:
             return False
@@ -757,6 +767,22 @@ class QuestionResolver:
         model_options: list[ClarificationOption],
     ) -> Clarification | None:
         classification = base_plan.classification
+        governed_route = route_governed_query(original)
+        if governed_route.confirmation_required:
+            return Clarification(
+                pending_slot="sand_gold_requirement_scope",
+                resolved_slots=(classification.resolved_slots if classification else {}),
+                interpreted_question=governed_route.canonical_question,
+                reason=(
+                    governed_route.confirmation_prompt
+                    or "当前问题存在会改变检索范围的技术方向，需要先确认。"
+                ),
+                options=[
+                    ClarificationOption(**option)
+                    for option in sand_gold_confirmation_options()
+                ],
+                allow_free_text=True,
+            )
         if (
             classification
             and classification.primary_intent == "service_materials"
@@ -930,6 +956,7 @@ class QuestionResolver:
             ("采矿正", "采矿证"),
             ("采矿症", "采矿证"),
             ("采矿政", "采矿证"),
+            ("勘查间距", "勘查工程间距"),
         ):
             corrected = corrected.replace(source, target)
         return corrected
@@ -1026,6 +1053,11 @@ class QuestionResolver:
         require_missing_slot_resolution: bool = False,
     ) -> bool:
         candidate_plan = understand_query(candidate)
+        if (
+            "砂金" in base_plan.normalized_query
+            and "砂金" not in candidate_plan.normalized_query
+        ):
+            return False
         if (
             base_plan.scope_origin == "user"
             and base_plan.standard_numbers
