@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import secrets
 from dataclasses import replace
@@ -36,6 +37,10 @@ from .auth import (
 )
 from .config import PROJECT_ROOT, get_settings
 from .email_sender import EmailDeliveryError, send_verification_email
+from .fast_path_shadow import (
+    get_fast_path_shadow_service,
+    shutdown_fast_path_shadow_service,
+)
 from .domain_gate import DomainGate
 from .feedback_log import FeedbackLogger
 from .knowledge_client import KnowledgeClient, primary_retrieval_question
@@ -45,12 +50,13 @@ from .lexicon_governance import (
     LexiconReviewError,
     get_lexicon_governance_store,
 )
-from .query_understanding import contextualize_follow_up, query_plan_from_payload
+from .query_understanding import contextualize_follow_up, query_plan_from_payload, understand_query
 from .question_resolution import (
     QuestionResolution,
     QuestionResolver,
     clarification_answer,
 )
+from .retrieval_planner import RetrievalPlanner
 from .rate_limit import RateLimiter
 from .schemas import (
     ApiKeyCreateRequest,
@@ -145,16 +151,43 @@ async def resolve_question(
     resolved_slots: dict[str, str] | None = None,
 ) -> QuestionResolution:
     resolver = QuestionResolver(settings)
+    planner = None
     try:
-        return await resolver.resolve(
+        resolution_call = resolver.resolve(
             question,
             mode=mode,
             conversation_context=conversation_context,
             inherited_plan=inherited_plan,
             resolved_slots=resolved_slots,
         )
+        if not settings.parallel_query_analysis_enabled:
+            return await resolution_call
+
+        planner = RetrievalPlanner(settings)
+        resolution, preliminary = await asyncio.gather(
+            resolution_call,
+            planner.plan(question, understand_query(question)),
+        )
+        if (
+            resolution.requires_clarification
+            or resolution_is_out_of_scope(resolution)
+            or not preliminary.used
+        ):
+            return resolution
+        prepared = RetrievalPlanner.rebase_result(
+            resolution.canonical_question,
+            resolution.plan,
+            preliminary,
+        )
+        return replace(
+            resolution,
+            plan=prepared.plan,
+            prepared_planner_result=prepared,
+        )
     finally:
         await resolver.aclose()
+        if planner is not None:
+            await planner.aclose()
 
 
 def resolution_is_out_of_scope(resolution: QuestionResolution) -> bool:
@@ -308,6 +341,11 @@ async def recover_research_queue() -> None:
         research_runner.schedule(task_id)
 
 
+@app.on_event("shutdown")
+async def shutdown_shadow_tasks() -> None:
+    await shutdown_fast_path_shadow_service()
+
+
 def set_session_cookie(response: Response, token: str) -> None:
     settings = get_settings()
     response.set_cookie(
@@ -459,6 +497,7 @@ async def health() -> dict[str, object]:
         "qa_modes": {"basic": 1, "deep": 3},
         "research_max_documents": settings.research_max_documents,
         "research_global_concurrency": settings.research_global_concurrency,
+        "fast_path_shadow": get_fast_path_shadow_service(settings).health(),
         "domain_lexicon": lexicon_summary,
     }
 
@@ -878,6 +917,7 @@ async def ask(
             resolution.plan,
         )
         payload._query_plan = resolution.plan
+        payload._prepared_planner_result = resolution.prepared_planner_result
 
     if principal.user_id and principal.quota_managed:
         try:
@@ -988,6 +1028,14 @@ async def ask(
             "query_classification": result.query_classification,
             "duration_ms": round((perf_counter() - started) * 1000, 2),
         }
+    )
+    # The public answer is complete before this call. submit() only captures a
+    # bounded, de-identified evidence locator set and schedules at most one
+    # background comparison; it never awaits retrieval on the response path.
+    get_fast_path_shadow_service(settings).submit(
+        payload.retrieval_question,
+        result,
+        payload.filters,
     )
     return result
 

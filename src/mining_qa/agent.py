@@ -218,7 +218,11 @@ class MiningQAAgent:
             else:
                 filters["standard_no"] = list(authority_decision.filter_standard_numbers)
 
-        planner_result = await self.planner.plan(question, base_plan)
+        planner_result = (
+            request.prepared_planner_result
+            if request.prepared_planner_result is not None
+            else await self.planner.plan(question, base_plan)
+        )
         plan = planner_result.plan
         evidence_targets = planner_result.evidence_targets
         # A single direct clause can support a simple lookup. Once the model
@@ -592,6 +596,16 @@ class MiningQAAgent:
                 answer = self._fast_answer(question, sources, plan) or self._evidence_summary_answer(sources)
                 limitations.notes.append("回答模型调用超时或不可用，已按审查通过的证据生成确定性降级答案。")
                 generation_details = {"used": False, "error": "answer_model_unavailable"}
+        if not str(answer or "").strip():
+            # Some OpenAI-compatible providers can consume the full token
+            # budget in hidden reasoning and return an empty visible body with
+            # finish_reason=length. Never expose an empty answer when the
+            # evidence gate has already passed.
+            answer = self._fast_answer(question, sources, plan) or self._evidence_summary_answer(sources)
+            limitations.notes.append(
+                "回答模型未返回可见正文，已按审查通过的证据生成确定性答案。"
+            )
+            generation_details["empty_completion_fallback"] = True
         retrieval.synthesis_ms = round((perf_counter() - synthesis_started) * 1000, 3)
         answer = self._remove_stale_confirmation(answer, plan)
         if self._answer_has_unverified_document_reference(answer, sources):

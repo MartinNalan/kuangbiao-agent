@@ -300,6 +300,14 @@ updates = {
     "V4_EMBEDDING_TIMEOUT_SECONDS": "3",
     "V4_EMBEDDING_MAX_RETRIES": "1",
     "V4_QUERY_EMBEDDING_CACHE_SIZE": "256",
+    "FAST_PATH_SHADOW_ENABLED": "true",
+    "FAST_PATH_SHADOW_SAMPLE_RATE": "0.2",
+    "FAST_PATH_SHADOW_LOG_PATH": str(Path(sys.argv[2]).parents[3] / "app" / "fast_path_shadow.jsonl"),
+    "FAST_PATH_SHADOW_MAX_BYTES": "2097152",
+    "FAST_PATH_SHADOW_BACKUP_COUNT": "2",
+    "FAST_PATH_SHADOW_DEDUP_TTL_SECONDS": "86400",
+    "FAST_PATH_SHADOW_DEDUP_MAX_ENTRIES": "4096",
+    "FAST_PATH_SHADOW_MAX_CONCURRENCY": "1",
 }
 obsolete = {"KNOWLEDGE_LEGACY_DB_PATH"}
 lines = path.read_text(encoding="utf-8").splitlines()

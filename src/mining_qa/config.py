@@ -54,6 +54,62 @@ class Settings(BaseSettings):
         alias="V4_QUERY_EMBEDDING_CACHE_SIZE",
     )
     query_planner_enabled: bool = Field(default=True, alias="QUERY_PLANNER_ENABLED")
+    unified_query_planning_enabled: bool = Field(
+        default=False,
+        alias="UNIFIED_QUERY_PLANNING_ENABLED",
+    )
+    parallel_query_analysis_enabled: bool = Field(
+        default=False,
+        alias="PARALLEL_QUERY_ANALYSIS_ENABLED",
+    )
+    fast_path_shadow_enabled: bool = Field(
+        default=False,
+        alias="FAST_PATH_SHADOW_ENABLED",
+    )
+    fast_path_shadow_sample_rate: float = Field(
+        default=0.2,
+        ge=0.0,
+        le=1.0,
+        alias="FAST_PATH_SHADOW_SAMPLE_RATE",
+    )
+    fast_path_shadow_log_path: str = Field(
+        default=str(PROJECT_ROOT / "data" / "app" / "fast_path_shadow.jsonl"),
+        alias="FAST_PATH_SHADOW_LOG_PATH",
+    )
+    fast_path_shadow_max_bytes: int = Field(
+        default=2 * 1024 * 1024,
+        ge=1024,
+        le=64 * 1024 * 1024,
+        alias="FAST_PATH_SHADOW_MAX_BYTES",
+    )
+    fast_path_shadow_backup_count: int = Field(
+        default=2,
+        ge=1,
+        le=10,
+        alias="FAST_PATH_SHADOW_BACKUP_COUNT",
+    )
+    fast_path_shadow_dedup_ttl_seconds: int = Field(
+        default=24 * 60 * 60,
+        ge=60,
+        le=30 * 24 * 60 * 60,
+        alias="FAST_PATH_SHADOW_DEDUP_TTL_SECONDS",
+    )
+    fast_path_shadow_dedup_max_entries: int = Field(
+        default=4096,
+        ge=128,
+        le=100_000,
+        alias="FAST_PATH_SHADOW_DEDUP_MAX_ENTRIES",
+    )
+    fast_path_shadow_max_concurrency: int = Field(
+        default=1,
+        ge=1,
+        le=4,
+        alias="FAST_PATH_SHADOW_MAX_CONCURRENCY",
+    )
+    fast_path_shadow_hash_key: str = Field(
+        default="",
+        alias="FAST_PATH_SHADOW_HASH_KEY",
+    )
     evidence_reranker_enabled: bool = Field(default=True, alias="EVIDENCE_RERANKER_ENABLED")
     question_resolution_enabled: bool = Field(default=True, alias="QUESTION_RESOLUTION_ENABLED")
     question_resolution_max_tokens: int = Field(

@@ -35,6 +35,7 @@ class AskRequest(BaseModel):
     filters: AskFilters = Field(default_factory=AskFilters)
     _retrieval_question: str | None = PrivateAttr(default=None)
     _query_plan: Any = PrivateAttr(default=None)
+    _prepared_planner_result: Any = PrivateAttr(default=None)
 
     @model_validator(mode="after")
     def validate_question_or_clarification(self) -> "AskRequest":
@@ -52,6 +53,10 @@ class AskRequest(BaseModel):
     @property
     def query_plan(self) -> Any:
         return self._query_plan
+
+    @property
+    def prepared_planner_result(self) -> Any:
+        return self._prepared_planner_result
 
 
 class QuotaInfo(BaseModel):

@@ -37,6 +37,8 @@ EXPLORATION_TYPE_LABELS = {
 COMPARISON_TERMS = ("不一致", "差异", "不同", "比较", "列举", "哪些标准", "哪些规范", "哪些规程")
 ENGINEERING_DISTANCE_TERMS = (
     "工程间距",
+    "勘查间距",
+    "基本勘查间距",
     "基本工程间距",
     "勘查工程间距",
     "工程距离",

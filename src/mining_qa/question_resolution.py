@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, replace
+from time import perf_counter
 from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError
@@ -33,6 +34,7 @@ from .query_understanding import (
     normalize_user_query,
     understand_query,
 )
+from .retrieval_planner import PlannerResult, RetrievalPlanner
 from .schemas import Clarification, ClarificationOption
 
 
@@ -91,6 +93,13 @@ class ResolutionOptionPayload(BaseModel):
     slot_updates: dict[str, str] = Field(default_factory=dict)
 
 
+class ResolutionSubqueryPayload(BaseModel):
+    target: str = Field(min_length=1, max_length=120)
+    query: str = Field(min_length=2, max_length=500)
+    document_types: list[str] = Field(default_factory=list, max_length=12)
+    alternative_terms: list[str] = Field(default_factory=list, max_length=6)
+
+
 class ResolutionPayload(BaseModel):
     canonical_question: str = Field(min_length=1, max_length=600)
     intent: str = Field(default="general", max_length=80)
@@ -116,6 +125,18 @@ class ResolutionPayload(BaseModel):
     license_issuer_level: str = Field(default="unknown", max_length=20)
     comparison_topic: str | None = Field(default=None, max_length=160)
     comparison_scope: str | None = Field(default=None, max_length=80)
+    search_mode: str = Field(default="default", max_length=20)
+    subject_terms: list[str] = Field(default_factory=list, max_length=12)
+    required_terms: list[str] = Field(default_factory=list, max_length=12)
+    alternative_terms: list[str] = Field(default_factory=list, max_length=16)
+    negative_terms: list[str] = Field(default_factory=list, max_length=12)
+    candidate_titles: list[str] = Field(default_factory=list, max_length=8)
+    standard_numbers: list[str] = Field(default_factory=list, max_length=8)
+    required_evidence_groups: list[list[str]] = Field(default_factory=list, max_length=8)
+    comparison_dimensions: list[str] = Field(default_factory=list, max_length=8)
+    output_mode: str = Field(default="default", max_length=20)
+    mining_right_granting_level: str = Field(default="unknown", max_length=20)
+    subqueries: list[ResolutionSubqueryPayload] = Field(default_factory=list, max_length=3)
 
 
 @dataclass(frozen=True)
@@ -125,6 +146,7 @@ class QuestionResolution:
     model_used: bool = False
     clarification: Clarification | None = None
     error: str | None = None
+    prepared_planner_result: PlannerResult | None = None
 
     @property
     def requires_clarification(self) -> bool:
@@ -200,6 +222,18 @@ class QuestionResolver:
                 else None
             ),
         )
+        unified_instruction = ""
+        if self.settings.unified_query_planning_enabled:
+            unified_instruction = (
+                "同时在本次JSON中制定本地知识库检索计划，但不要实际检索或回答问题。"
+                "问题若包含多个需要分别核验的事实槽位、条件、法律关系或并列对象分支，"
+                "必须将其拆成最多3个相互独立的subqueries；每个子查询只服务一个证据目标，"
+                "不能只是同义改写。问题若只有一个证据目标，subqueries返回空数组。"
+                "每个子查询给出2至4个可独立全文匹配的alternative_terms。"
+                "不得用模型记忆预填标准号、文号、条款号或结论；candidate_titles和"
+                "standard_numbers只保留用户明确提供且未被改写的锚点。"
+                "required_evidence_groups的外层为AND、每个内层为OR。"
+            )
         messages = [
             {
                 "role": "system",
@@ -240,6 +274,7 @@ class QuestionResolver:
                     "最多给出4个候选，不得在候选中预设答案。转采、权限、材料等已确认业务规则不能被改写。"
                     "只给出专业主题并询问‘怎么处理、怎么办、处理方法’而未说明目标、阶段或事项时，"
                     "应判为歧义，并按实质不同的专业任务给出候选方向。"
+                    f"{unified_instruction}"
                     "只返回 JSON。\n"
                     f"{registry_instruction}"
                 ),
@@ -285,12 +320,38 @@ class QuestionResolver:
                                     "slot_updates": {"待确认槽位": "选择后的值"},
                                 }
                             ],
+                            **(
+                                {
+                                    "search_mode": "default|scoped|comparison|exhaustive|catalog",
+                                    "subject_terms": ["核心对象"],
+                                    "required_terms": ["必须优先检索的短语"],
+                                    "alternative_terms": ["同义或相关专业术语"],
+                                    "negative_terms": ["语义相近但不回答问题的内容"],
+                                    "candidate_titles": [],
+                                    "standard_numbers": [],
+                                    "required_evidence_groups": [["每组至少命中一个术语"]],
+                                    "comparison_dimensions": [],
+                                    "output_mode": "default|table",
+                                    "mining_right_granting_level": "unknown|ministry|province",
+                                    "subqueries": [
+                                        {
+                                            "target": "独立证据槽位、条件、关系或对象分支",
+                                            "query": "只用于本地知识库检索的子查询",
+                                            "document_types": ["优先文件类型"],
+                                            "alternative_terms": ["正式替代表述"],
+                                        }
+                                    ],
+                                }
+                                if self.settings.unified_query_planning_enabled
+                                else {}
+                            ),
                         },
                     },
                     ensure_ascii=False,
                 ),
             },
         ]
+        model_started = perf_counter()
         try:
             raw = await self.llm.complete_json(
                 messages,
@@ -312,6 +373,7 @@ class QuestionResolver:
                 clarification=schema_fallback,
                 error=type(error).__name__,
             )
+        model_elapsed_ms = (perf_counter() - model_started) * 1000
         try:
             payload = ResolutionPayload.model_validate_json(raw)
         except ValidationError as error:
@@ -403,10 +465,27 @@ class QuestionResolver:
                 model_used=True,
                 clarification=clarification,
             )
+        prepared_planner_result = None
+        final_plan = canonical_plan
+        if self.settings.unified_query_planning_enabled:
+            planner_payload = payload.model_dump(mode="json")
+            planner_payload["canonical_query"] = canonical
+            try:
+                prepared_planner_result = RetrievalPlanner.result_from_payload(
+                    canonical,
+                    canonical_plan,
+                    planner_payload,
+                    elapsed_ms=model_elapsed_ms,
+                )
+            except (TypeError, ValueError):
+                prepared_planner_result = None
+            if prepared_planner_result is not None:
+                final_plan = prepared_planner_result.plan
         return QuestionResolution(
             canonical_question=canonical,
-            plan=canonical_plan,
+            plan=final_plan,
             model_used=True,
+            prepared_planner_result=prepared_planner_result,
         )
 
     @staticmethod
@@ -494,6 +573,18 @@ class QuestionResolver:
             "license_issuer_level": str(value.get("license_issuer_level") or "unknown")[:20],
             "comparison_topic": str(value.get("comparison_topic") or "")[:160] or None,
             "comparison_scope": str(value.get("comparison_scope") or "")[:80] or None,
+            "search_mode": str(value.get("search_mode") or "default")[:20],
+            "subject_terms": [str(item)[:120] for item in (value.get("subject_terms") or [])][:12],
+            "required_terms": [str(item)[:120] for item in (value.get("required_terms") or [])][:12],
+            "alternative_terms": [str(item)[:120] for item in (value.get("alternative_terms") or [])][:16],
+            "negative_terms": [str(item)[:120] for item in (value.get("negative_terms") or [])][:12],
+            "candidate_titles": [str(item)[:160] for item in (value.get("candidate_titles") or [])][:8],
+            "standard_numbers": [str(item)[:80] for item in (value.get("standard_numbers") or [])][:8],
+            "required_evidence_groups": value.get("required_evidence_groups") or [],
+            "comparison_dimensions": [str(item)[:120] for item in (value.get("comparison_dimensions") or [])][:8],
+            "output_mode": str(value.get("output_mode") or "default")[:20],
+            "mining_right_granting_level": str(value.get("mining_right_granting_level") or "unknown")[:20],
+            "subqueries": value.get("subqueries") or [],
         }
         try:
             return ResolutionPayload.model_validate(sanitized)

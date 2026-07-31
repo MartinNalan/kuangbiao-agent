@@ -82,6 +82,9 @@ class RetrievalPlanner:
         self.settings = settings
         self.llm = llm or LLMClient(settings)
 
+    async def aclose(self) -> None:
+        await self.llm.aclose()
+
     async def plan(self, question: str, base_plan: QueryPlan) -> PlannerResult:
         started = perf_counter()
         if not self.settings.query_planner_enabled or not self.llm.enabled:
@@ -248,6 +251,120 @@ class RetrievalPlanner:
                 error=type(error).__name__,
                 evidence_targets=self._primary_evidence_target(plan),
             )
+
+    @classmethod
+    def result_from_payload(
+        cls,
+        question: str,
+        base_plan: QueryPlan,
+        payload: dict[str, object],
+        *,
+        elapsed_ms: float = 0.0,
+    ) -> PlannerResult:
+        """Compile a validated model payload without making another model call.
+
+        The unified question-understanding experiment emits the same planning
+        fields as the dedicated planner. Keeping compilation here gives both
+        paths identical allow-lists, protected intents and query-variant
+        governance.
+        """
+
+        if not isinstance(payload, dict):
+            raise TypeError("planner response must be a JSON object")
+        value = dict(payload)
+        allowed_intents = set(get_args(PlannerIntent))
+        allowed_search_modes = set(get_args(SearchMode))
+        semantic_intent = str(value.get("intent") or "")
+        semantic_search_mode = str(value.get("search_mode") or "")
+        value["canonical_query"] = str(
+            value.get("canonical_query") or base_plan.normalized_query
+        )
+        value["intent"] = (
+            semantic_intent if semantic_intent in allowed_intents else base_plan.intent
+        )
+        value["search_mode"] = (
+            semantic_search_mode
+            if semantic_search_mode in allowed_search_modes
+            else "default"
+        )
+        raw_document_types = value.get("document_types")
+        if not isinstance(raw_document_types, list):
+            raw_document_types = []
+        value["document_types"] = [
+            str(document_type)
+            for document_type in raw_document_types
+            if str(document_type) in ALLOWED_DOCUMENT_TYPES
+        ]
+        for role_field in ("license_issuer_level", "mining_right_granting_level"):
+            role_value = str(value.get(role_field) or "unknown").strip().lower()
+            value[role_field] = (
+                role_value
+                if role_value in {"unknown", "ministry", "province"}
+                else "unknown"
+            )
+        plan = apply_semantic_plan(base_plan, value)
+        plan = replace(
+            plan,
+            intent=base_plan.intent,
+            classification=base_plan.classification,
+        )
+        variants = cls._query_variants(value.get("subqueries"), plan)
+        variants = cls._govern_query_variants(question, plan, variants)
+        return PlannerResult(
+            plan=plan,
+            used=True,
+            elapsed_ms=elapsed_ms,
+            query_variants=variants,
+            evidence_targets=variants or cls._primary_evidence_target(plan),
+        )
+
+    @classmethod
+    def rebase_result(
+        cls,
+        question: str,
+        resolved_plan: QueryPlan,
+        preliminary: PlannerResult,
+    ) -> PlannerResult:
+        """Apply a parallel planner result to the semantically resolved plan."""
+
+        if not preliminary.used:
+            raise ValueError("cannot rebase an unavailable planner result")
+        source = preliminary.plan
+        payload: dict[str, object] = {
+            "canonical_query": source.normalized_query,
+            "intent": source.intent,
+            "search_mode": source.search_mode,
+            "subject_terms": list(source.subject_terms),
+            "required_terms": list(source.required_terms),
+            "alternative_terms": list(source.alternative_terms),
+            "negative_terms": list(source.negative_terms),
+            "candidate_titles": list(source.candidate_title_terms),
+            "standard_numbers": list(source.standard_numbers),
+            "document_types": list(source.document_types),
+            "output_mode": source.output_mode,
+            "required_evidence_groups": [
+                list(group) for group in source.required_evidence_groups
+            ],
+            "comparison_dimensions": list(source.comparison_dimensions),
+            "license_issuer_level": source.license_issuer_level,
+            "mining_right_granting_level": source.mining_right_granting_level,
+            "confidence": source.planner_confidence,
+            "subqueries": [
+                {
+                    "target": variant.target,
+                    "query": variant.query,
+                    "document_types": list(variant.document_types),
+                    "alternative_terms": list(variant.alternative_terms),
+                }
+                for variant in preliminary.query_variants
+            ],
+        }
+        return cls.result_from_payload(
+            question,
+            resolved_plan,
+            payload,
+            elapsed_ms=preliminary.elapsed_ms,
+        )
 
     @staticmethod
     def _primary_evidence_target(plan: QueryPlan) -> tuple[QueryVariant, ...]:
