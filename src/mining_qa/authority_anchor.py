@@ -48,6 +48,19 @@ _STRICT_MARKERS = (
     "按照该标准",
     "根据该标准",
 )
+_BOUND_AUTHORITY_DIRECTIVES = (
+    "严格依据",
+    "仅依据",
+    "只依据",
+    "必须依据",
+    "请依据",
+    "请根据",
+    "依据",
+    "根据",
+    "按照",
+    "按",
+    "以",
+)
 _DIRECT_PROVISION_MARKERS = (
     "如何规定",
     "怎么规定",
@@ -124,6 +137,7 @@ def classify_authority_anchor(
         mode = AUTHORITY_ANCHOR_RELATION
     elif (
         any(marker in compact for marker in _STRICT_MARKERS)
+        or _has_bound_authority_directive(compact, numbers)
         or bool(clauses)
         or (
             any(marker in compact for marker in _DIRECT_PROVISION_MARKERS)
@@ -187,6 +201,30 @@ def evaluate_authority_catalog(
         blocked_standard_numbers=tuple(blocked),
         reason=reason,
     )
+
+
+def _has_bound_authority_directive(compact: str, standard_numbers: Iterable[str]) -> bool:
+    """Detect instructions that directly bind an action to a named document.
+
+    A bare document mention remains incidental. Phrases such as ``根据DZ/T``
+    and ``按照《GB/T...》`` are strict because falling back to another document
+    would silently change the user's requested authority.
+    """
+
+    for standard_no in standard_numbers:
+        target = re.sub(r"\s+", "", str(standard_no or ""))
+        if not target:
+            continue
+        offset = 0
+        while True:
+            index = compact.find(target, offset)
+            if index < 0:
+                break
+            prefix = compact[max(0, index - 12) : index].rstrip("《（([【")
+            if any(prefix.endswith(marker) for marker in _BOUND_AUTHORITY_DIRECTIVES):
+                return True
+            offset = index + len(target)
+    return False
 
 
 def strict_sources_satisfy_anchor(

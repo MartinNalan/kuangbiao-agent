@@ -47,6 +47,16 @@ class AuthorityAnchorClassificationTests(unittest.TestCase):
         self.assertEqual(anchor.standard_numbers, ("DZ/T 9999-2099",))
         self.assertEqual(anchor.clause_refs, ("7.7",))
 
+    def test_plain_directive_bound_to_standard_number_is_also_strict(self) -> None:
+        for question in (
+            "请根据DZ/T 9999-2099回答金矿勘查间距。",
+            "按照《DZ/T 9999-2099》回答金矿勘查间距。",
+        ):
+            with self.subTest(question=question):
+                anchor = self._anchor(question)
+                self.assertEqual(anchor.mode, AUTHORITY_ANCHOR_STRICT)
+                self.assertEqual(anchor.standard_numbers, ("DZ/T 9999-2099",))
+
     def test_non_strict_anchor_modes_are_not_hard_filtered(self) -> None:
         cases = {
             "DZ/T 0208-2020是否现行？": AUTHORITY_ANCHOR_STATUS,
@@ -150,6 +160,27 @@ class _InProcessV4Knowledge:
 
 
 class AuthorityAnchorAgentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_plain_missing_authority_directive_stops_before_retrieval(self) -> None:
+        settings = Settings(
+            KNOWLEDGE_BASE_URL="http://unused.test",
+            OPENAI_API_KEY="",
+            RETRIEVAL_TRACE_ENABLED=False,
+        )
+        agent = MiningQAAgent(settings)
+        knowledge = _MissingCatalogKnowledge()
+        agent.knowledge = knowledge
+        agent.planner = _FailIfPlanned()
+        agent.trace = _TraceSink()
+
+        response = await agent.ask(
+            AskRequest(question="请根据DZ/T 9999-2099回答金矿勘查间距。")
+        )
+
+        self.assertEqual(response.status, "insufficient_evidence")
+        self.assertEqual(response.sources, [])
+        self.assertEqual(response.retrieval.query_count, 0)
+        self.assertEqual(knowledge.search_calls, 0)
+
     async def test_missing_authority_stops_before_planner_and_retrieval(self) -> None:
         settings = Settings(
             KNOWLEDGE_BASE_URL="http://unused.test",
