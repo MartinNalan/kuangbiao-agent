@@ -9,6 +9,11 @@ from typing import Any
 
 from .auth import get_account_store
 from .config import Settings, get_settings
+from .engineering_distance import (
+    engineering_distance_row,
+    parse_engineering_distance_matrix,
+    render_engineering_distance_answer,
+)
 from .knowledge_client import KnowledgeClient
 from .llm_client import LLMClient
 from .prompt_registry import prompt_text
@@ -404,6 +409,27 @@ class ResearchPlanner:
     ) -> ResearchPlan:
         base = base_plan or understand_query(question)
         if (
+            base.intent == "engineering_distance_lookup"
+            and not ResearchPlanner._requests_cross_document_comparison(question)
+        ):
+            fallback = ResearchPlanner._fallback(question, base)
+            return replace(
+                plan,
+                intent=fallback.intent,
+                strategy="direct_evidence",
+                anchor_titles=fallback.anchor_titles,
+                anchor_standard_numbers=fallback.anchor_standard_numbers,
+                corpus_title_terms=fallback.corpus_title_terms,
+                corpus_standard_numbers=fallback.corpus_standard_numbers,
+                document_types=fallback.document_types,
+                comparison_dimensions=fallback.comparison_dimensions,
+                evidence_queries=fallback.evidence_queries,
+                evidence_targets=fallback.evidence_targets,
+                required_evidence_groups=fallback.required_evidence_groups,
+                scope_note=fallback.scope_note,
+                query_classification=fallback.query_classification,
+            )
+        if (
             base.intent == "authority_responsibility"
             and not ResearchPlanner._requests_cross_document_comparison(question)
         ):
@@ -597,11 +623,18 @@ class ResearchPlanner:
             base.intent == "authority_responsibility"
             and not ResearchPlanner._requests_cross_document_comparison(question)
         )
+        direct_engineering_distance = (
+            base.intent == "engineering_distance_lookup"
+            and not ResearchPlanner._requests_cross_document_comparison(question)
+        )
         title_terms: list[str] = []
         document_types = list(base.document_types or default_document_types(base.intent))
         if direct_authority:
             title_terms.append("深化矿产资源管理改革若干事项")
             document_types = ["policy_document", "law", "regulation", "department_rule"]
+        elif direct_engineering_distance:
+            title_terms.extend(base.candidate_title_terms)
+            document_types = ["standard", "national_standard", "industry_standard"]
         elif base.intent == "service_materials":
             if post_filing_steps:
                 title_terms.append("采矿权变更（续期）登记临时服务指南")
@@ -680,6 +713,19 @@ class ResearchPlanner:
                     "自然资源部负责本级已颁发勘查许可证或采矿许可证",
                     "其他由省级自然资源主管部门负责",
                 ),
+            )
+        elif direct_engineering_distance:
+            dimensions = (
+                "沿矿体走向线工程间距",
+                "沿矿体倾斜线工程间距",
+                "工程类别明细",
+                "适用资源量类型和调整条件",
+            )
+            evidence_queries = (base.retrieval_query or base.normalized_query,)
+            required_evidence_groups = (
+                ("表 F.1", "表F.1", "参考基本勘查工程间距"),
+                ("走向", "走 向"),
+                ("倾斜", "倾 斜"),
             )
         elif base.intent == "service_materials":
             if post_filing_steps:
@@ -778,7 +824,7 @@ class ResearchPlanner:
             intent=base.intent,
             strategy=(
                 "direct_evidence"
-                if direct_authority
+                if direct_authority or direct_engineering_distance
                 else "document_inventory"
                 if base.intent == "service_materials"
                 else "relation_discovery"
@@ -855,6 +901,9 @@ class ResearchPlanner:
                 "以现行权威文件中直接规定许可证颁发机关与储量评审备案责任部门关系的条款为准；"
                 "单一权威条款覆盖责任主体、权限事项和决定条件时即可形成结论。"
                 if direct_authority
+                else "以目标矿种现行勘查规范中的工程间距表为准；指定勘查类型的表格行同时覆盖"
+                "走向、倾斜及对应工程类别时，单一标准的直接表格证据即可形成结论。"
+                if direct_engineering_distance
                 else "按采矿权变更（续期）登记办事指南核对评审备案后至领证前的材料和手续。"
                 if post_filing_steps
                 else "按知识库目录中的受控文件范围逐份检索。"
@@ -1360,6 +1409,8 @@ class ResearchTaskRunner:
                 facts = self._transfer_facts(indexed_sources)
             elif plan.intent == "authority_responsibility" and plan.strategy == "direct_evidence":
                 facts = self._authority_facts(plan, indexed_sources)
+            elif plan.intent == "engineering_distance_lookup" and plan.strategy == "direct_evidence":
+                facts = self._engineering_distance_facts(plan, indexed_sources)
             elif plan.intent == "projection_comparison":
                 facts = self._projection_facts(indexed_sources, task["retrieval_question"])
             elif plan.intent == "technical_stage_requirement":
@@ -1388,6 +1439,11 @@ class ResearchTaskRunner:
                 )
                 return
             if plan.strategy == "direct_evidence" and not facts:
+                missing_direct_evidence = (
+                    "已召回候选条款，但未命中同时保留目标勘查类型、走向、倾斜及单位的完整工程间距表格行。"
+                    if plan.intent == "engineering_distance_lookup"
+                    else "已召回候选条款，但未命中可直接确定责任部门、权限事项和决定条件的完整规定。"
+                )
                 await self._finish_insufficient(
                     store,
                     task,
@@ -1395,7 +1451,7 @@ class ResearchTaskRunner:
                     snapshot,
                     total_documents,
                     candidate_truncated,
-                    "已召回候选条款，但未命中可直接确定责任部门、权限事项和决定条件的完整规定。",
+                    missing_direct_evidence,
                     settings,
                     examined_documents=len(documents),
                 )
@@ -1815,6 +1871,38 @@ class ResearchTaskRunner:
                     "source_indices": [index],
                 }
             )
+        return facts
+
+    @staticmethod
+    def _engineering_distance_facts(
+        plan: ResearchPlan,
+        indexed_sources: list[tuple[int, Source, str]],
+    ) -> list[dict[str, Any]]:
+        target_type = understand_query(plan.canonical_question).target_exploration_type
+        facts: list[dict[str, Any]] = []
+        for index, source, document_id in indexed_sources:
+            if target_type:
+                row = engineering_distance_row(source, target_type)
+                rows = [row] if row else []
+            else:
+                rows = list(parse_engineering_distance_matrix(source.quote or "").items())
+            if not rows:
+                continue
+            for type_label, values in rows:
+                pit_crosscut, pit_drift, drill_strike, drill_dip = values
+                facts.append(
+                    {
+                        "document_id": document_id,
+                        "classification": "special_provision",
+                        "dimension": f"{type_label}类型走向与倾斜工程间距",
+                        "finding": (
+                            f"{type_label}类型控制资源量：沿走向{drill_strike} m，"
+                            f"沿倾斜{drill_dip} m；坑探穿脉{pit_crosscut} m，"
+                            f"坑探沿脉{pit_drift} m。"
+                        ),
+                        "source_indices": [index],
+                    }
+                )
         return facts
 
     @staticmethod
@@ -2283,6 +2371,15 @@ class ResearchTaskRunner:
         requirements_matrix = plan.strategy == "requirements_matrix"
         if plan.intent == "authority_responsibility" and plan.strategy == "direct_evidence":
             return self._render_authority_answer(question, plan, sources)
+        if plan.intent == "engineering_distance_lookup" and plan.strategy == "direct_evidence":
+            target_type = understand_query(question).target_exploration_type
+            answer = render_engineering_distance_answer(
+                sources,
+                target_type,
+                research_heading=True,
+            )
+            if answer:
+                return answer
         if plan.intent == "service_materials":
             return self._render_service_material_answer(plan, sources)
         if plan.intent == "exploration_to_mining_eligibility":

@@ -139,6 +139,30 @@ class CountingSummaryLLM:
 
 
 class ResearchPlannerTests(unittest.IsolatedAsyncioTestCase):
+    def test_engineering_distance_fallback_uses_single_direct_evidence_contract(self) -> None:
+        plan = ResearchPlanner._fallback(
+            "金矿勘查Ⅰ类型的推荐工程间距是多少？"
+        )
+
+        self.assertEqual(plan.intent, "engineering_distance_lookup")
+        self.assertEqual(plan.strategy, "direct_evidence")
+        self.assertIn("岩金", plan.corpus_title_terms)
+        self.assertIn("沿矿体走向线工程间距", plan.comparison_dimensions)
+        self.assertIn("沿矿体倾斜线工程间距", plan.comparison_dimensions)
+
+    async def test_model_plan_cannot_turn_engineering_lookup_into_cross_document_research(self) -> None:
+        planner = ResearchPlanner(
+            Settings(OPENAI_API_KEY="configured"),
+            GenericPlannerLLM(),  # type: ignore[arg-type]
+        )
+
+        plan = await planner.plan("金矿勘查Ⅰ类型的推荐工程间距是多少？")
+
+        self.assertEqual(plan.intent, "engineering_distance_lookup")
+        self.assertEqual(plan.strategy, "direct_evidence")
+        self.assertEqual(plan.corpus_title_terms, ("岩金",))
+        self.assertEqual(len(plan.evidence_queries), 1)
+
     def test_authority_fallback_uses_single_direct_evidence_contract(self) -> None:
         plan = ResearchPlanner._fallback(
             "自然资源部颁发采矿许可证的矿山，储量评审备案由哪个部门负责？"
@@ -685,6 +709,48 @@ class ResearchAnalyzerTests(unittest.IsolatedAsyncioTestCase):
             failed_documents=0,
         )
 
+        self.assertEqual(status, "completed")
+        self.assertFalse(missing)
+
+    async def test_single_engineering_table_renders_two_dimensions_and_completes(self) -> None:
+        question = "金矿勘查Ⅰ类型的推荐工程间距是多少？"
+        plan = ResearchPlanner._fallback(question)
+        source = Source(
+            title="矿产地质勘查规范 岩金",
+            standard_no="DZ/T 0205-2020",
+            chapter="附录F(资料性附录)",
+            quote=(
+                "表 F.1 参考基本勘查工程间距\n"
+                "控制资源量勘查工程间距/m\n坑探\n钻探\n勘查类型\n"
+                "穿脉\n沿脉\n走向\n倾斜\n"
+                "I\n80~160\n80~160\n80~160\n80~160\n"
+                "II\n40~80\n40~80\n40~80\n40~80\n"
+                "III\n20~40\n20~40\n20~40\n20~40"
+            ),
+            source_type="local_kb",
+            text_access="ocr_text",
+        )
+        runner = ResearchTaskRunner()
+        facts = runner._engineering_distance_facts(plan, [(1, source, "rock-gold")])
+
+        answer = await runner._render_answer(
+            question,
+            plan,
+            facts,
+            [source],
+            DisabledResearchLLM(),  # type: ignore[arg-type]
+            Settings(),
+        )
+        status, missing = runner._research_final_status(
+            plan,
+            facts,
+            candidate_truncated=False,
+            failed_documents=0,
+        )
+
+        self.assertIn("**沿矿体走向线：80～160 m**", answer)
+        self.assertIn("**沿矿体倾斜线：80～160 m**", answer)
+        self.assertNotIn("两份来源", answer)
         self.assertEqual(status, "completed")
         self.assertFalse(missing)
 

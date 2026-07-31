@@ -16,6 +16,7 @@ from .authority_anchor import (
 )
 from .config import Settings
 from .domain_gate import DomainGate
+from .engineering_distance import render_engineering_distance_answer
 from .evidence_reranker import EvidenceReranker, RerankResult
 from .gap_tasks import KnowledgeGapTaskStore
 from .knowledge_client import KnowledgeClient
@@ -3039,85 +3040,10 @@ class MiningQAAgent:
     def _engineering_distance_answer(self, plan: QueryPlan, sources: list[Source]) -> str | None:
         if plan.intent != "engineering_distance_lookup":
             return None
-        labels = {
-            "坑探-穿脉": "穿脉",
-            "坑探-沿脉": "沿脉",
-            "钻探-走向": "走向",
-            "钻探-倾斜": "倾斜",
-        }
-        distance_pattern = r"(\d+(?:\.\d+)?\s*[~～-]\s*\d+(?:\.\d+)?)\s*m?"
-        for source in sources:
-            quote = source.quote or ""
-            if plan.target_exploration_type:
-                if f"{plan.target_exploration_type}类型" not in quote:
-                    continue
-                values: dict[str, str] = {}
-                for evidence_label, display_label in labels.items():
-                    match = re.search(rf"{re.escape(evidence_label)}\s*{distance_pattern}", quote)
-                    if match:
-                        values[display_label] = re.sub(r"\s*[~～-]\s*", "～", match.group(1))
-                if len(values) != len(labels):
-                    continue
-
-                chapter = source.chapter or "附录F表F.1"
-                return "\n".join(
-                    [
-                        f"根据 **{source.standard_no or '未知标准号'}《{source.title}》**（{chapter}），"
-                        f"金矿（岩金）勘查 **{plan.target_exploration_type}类型**的参考基本勘查工程间距为：",
-                        "",
-                        f"- **坑探**：穿脉 {values['穿脉']} m；沿脉 {values['沿脉']} m",
-                        f"- **钻探**：走向 {values['走向']} m；倾斜 {values['倾斜']} m",
-                        "",
-                        "该表给出的是控制资源量勘查工程间距的参考值。",
-                    ]
-                )
-
-            # A question that does not name type I/II/III asks for the whole
-            # normative matrix.  The v4 citation leaf preserves the flattened
-            # table text, but sending that text to the answer model produces a
-            # visually broken list of headers and values.  Parse only the three
-            # explicit four-value rows and render deterministic Markdown.
-            compact = re.sub(r"\s+", " ", quote).strip()
-            type_patterns = {
-                "Ⅰ": r"(?:Ⅰ|I|工)",
-                "Ⅱ": r"(?:Ⅱ|II)",
-                "Ⅲ": r"(?:Ⅲ|III)",
-            }
-            matrix: dict[str, list[str]] = {}
-            for type_label, type_pattern in type_patterns.items():
-                row = re.search(
-                    rf"(?<![A-Za-z0-9]){type_pattern}(?![A-Za-z0-9])\s+"
-                    rf"{distance_pattern}\s+{distance_pattern}\s+"
-                    rf"{distance_pattern}\s+{distance_pattern}",
-                    compact,
-                )
-                if row:
-                    matrix[type_label] = [
-                        re.sub(r"\s*[~～-]\s*", "～", row.group(index))
-                        for index in range(1, 5)
-                    ]
-            if set(matrix) != set(type_patterns):
-                continue
-
-            rows = [
-                "| 勘查类型 | 坑探—穿脉（m） | 坑探—沿脉（m） | 钻探—走向（m） | 钻探—倾斜（m） |",
-                "| --- | ---: | ---: | ---: | ---: |",
-            ]
-            rows.extend(
-                f"| {type_label} | {values[0]} | {values[1]} | {values[2]} | {values[3]} |"
-                for type_label, values in matrix.items()
-            )
-            return "\n".join(
-                [
-                    f"根据 **{source.standard_no or '未知标准号'}《{source.title}》**（表 F.1），"
-                    "金矿（岩金）控制资源量的参考基本勘查工程间距如下：",
-                    "",
-                    *rows,
-                    "",
-                    "以上数值为控制资源量勘查工程间距的参考值。",
-                ]
-            )
-        return None
+        return render_engineering_distance_answer(
+            sources,
+            plan.target_exploration_type,
+        )
 
     @staticmethod
     def _projection_type(quote: str) -> str:
