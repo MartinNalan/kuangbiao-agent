@@ -403,6 +403,27 @@ class ResearchPlanner:
         base_plan: QueryPlan | None = None,
     ) -> ResearchPlan:
         base = base_plan or understand_query(question)
+        if (
+            base.intent == "authority_responsibility"
+            and not ResearchPlanner._requests_cross_document_comparison(question)
+        ):
+            fallback = ResearchPlanner._fallback(question, base)
+            return replace(
+                plan,
+                intent=fallback.intent,
+                strategy="direct_evidence",
+                anchor_titles=fallback.anchor_titles,
+                anchor_standard_numbers=fallback.anchor_standard_numbers,
+                corpus_title_terms=fallback.corpus_title_terms,
+                corpus_standard_numbers=fallback.corpus_standard_numbers,
+                document_types=fallback.document_types,
+                comparison_dimensions=fallback.comparison_dimensions,
+                evidence_queries=fallback.evidence_queries,
+                evidence_targets=fallback.evidence_targets,
+                required_evidence_groups=fallback.required_evidence_groups,
+                scope_note=fallback.scope_note,
+                query_classification=fallback.query_classification,
+            )
         if base.intent == "service_materials":
             fallback = ResearchPlanner._fallback(question, base)
             if is_post_filing_license_steps_query(question):
@@ -572,9 +593,16 @@ class ResearchPlanner:
         base = base_plan or understand_query(question)
         requirements_matrix = ResearchPlanner._is_requirements_matrix(base)
         post_filing_steps = is_post_filing_license_steps_query(question)
+        direct_authority = (
+            base.intent == "authority_responsibility"
+            and not ResearchPlanner._requests_cross_document_comparison(question)
+        )
         title_terms: list[str] = []
         document_types = list(base.document_types or default_document_types(base.intent))
-        if base.intent == "service_materials":
+        if direct_authority:
+            title_terms.append("深化矿产资源管理改革若干事项")
+            document_types = ["policy_document", "law", "regulation", "department_rule"]
+        elif base.intent == "service_materials":
             if post_filing_steps:
                 title_terms.append("采矿权变更（续期）登记临时服务指南")
                 document_types = ["service_guide", "administrative_service_guide"]
@@ -639,7 +667,21 @@ class ResearchPlanner:
         )
         evidence_queries = (base.retrieval_query or base.normalized_query,)
         required_evidence_groups: tuple[tuple[str, ...], ...] = ()
-        if base.intent == "service_materials":
+        if direct_authority:
+            dimensions = ("责任部门", "权限事项", "许可证颁发机关条件", "适用范围")
+            evidence_queries = (
+                "自然资规〔2023〕6号 矿产资源储量评审备案范围和权限 "
+                "自然资源部负责本级已颁发勘查许可证或采矿许可证 "
+                "其他由省级自然资源主管部门负责",
+            )
+            required_evidence_groups = (
+                ("矿产资源储量评审备案", "评审备案范围和权限"),
+                (
+                    "自然资源部负责本级已颁发勘查许可证或采矿许可证",
+                    "其他由省级自然资源主管部门负责",
+                ),
+            )
+        elif base.intent == "service_materials":
             if post_filing_steps:
                 dimensions = ("下一步办理事项", "对应申请材料", "适用条件", "缴费或有偿处置")
                 evidence_queries = (
@@ -735,7 +777,9 @@ class ResearchPlanner:
             canonical_question=base.normalized_query,
             intent=base.intent,
             strategy=(
-                "document_inventory"
+                "direct_evidence"
+                if direct_authority
+                else "document_inventory"
                 if base.intent == "service_materials"
                 else "relation_discovery"
                 if base.intent == "exploration_to_mining_eligibility"
@@ -757,7 +801,9 @@ class ResearchPlanner:
             ),
             anchor_standard_numbers=tuple(
                 dict.fromkeys(
-                    (() if post_filing_steps else ("自然资规〔2023〕4号附件4", *base.standard_numbers))
+                    ("自然资规〔2023〕6号", *base.standard_numbers)
+                    if direct_authority
+                    else (() if post_filing_steps else ("自然资规〔2023〕4号附件4", *base.standard_numbers))
                     if base.intent == "service_materials"
                     else (
                         *TRANSFER_ANCHOR_STANDARD_NUMBERS,
@@ -777,21 +823,39 @@ class ResearchPlanner:
             corpus_title_terms=tuple(dict.fromkeys(title_terms)),
             corpus_standard_numbers=(
                 ()
-                if base.intent in {"service_materials", "exploration_to_mining_eligibility"}
+                if base.intent in {
+                    "authority_responsibility",
+                    "service_materials",
+                    "exploration_to_mining_eligibility",
+                }
                 else base.standard_numbers if not title_terms else ()
             ),
             document_types=tuple(dict.fromkeys(document_types)),
             comparison_dimensions=tuple(dimensions),
             evidence_queries=evidence_queries,
             evidence_targets=_clean_evidence_targets(
-                None,
+                (
+                    [
+                        {
+                            "label": "矿产资源储量评审备案权限关系",
+                            "query": evidence_queries[0],
+                            "document_types": document_types,
+                            "required": True,
+                        }
+                    ]
+                    if direct_authority
+                    else None
+                ),
                 evidence_queries,
                 tuple(dimensions),
                 tuple(dict.fromkeys(document_types)),
             ),
             required_evidence_groups=required_evidence_groups,
             scope_note=(
-                "按采矿权变更（续期）登记办事指南核对评审备案后至领证前的材料和手续。"
+                "以现行权威文件中直接规定许可证颁发机关与储量评审备案责任部门关系的条款为准；"
+                "单一权威条款覆盖责任主体、权限事项和决定条件时即可形成结论。"
+                if direct_authority
+                else "按采矿权变更（续期）登记办事指南核对评审备案后至领证前的材料和手续。"
                 if post_filing_steps
                 else "按知识库目录中的受控文件范围逐份检索。"
             ),
@@ -799,6 +863,23 @@ class ResearchPlanner:
             query_classification=(
                 base.classification.to_payload() if base.classification else None
             ),
+        )
+
+    @staticmethod
+    def _requests_cross_document_comparison(question: str) -> bool:
+        return any(
+            term in question
+            for term in (
+                "比较",
+                "对比",
+                "差异",
+                "有何不同",
+                "冲突",
+                "不一致",
+                "是否一致",
+                "分别如何规定",
+                "跨文件",
+            )
         )
 
     @staticmethod
@@ -1277,6 +1358,8 @@ class ResearchTaskRunner:
                 facts = self._service_material_facts(indexed_sources)
             elif plan.intent == "exploration_to_mining_eligibility":
                 facts = self._transfer_facts(indexed_sources)
+            elif plan.intent == "authority_responsibility" and plan.strategy == "direct_evidence":
+                facts = self._authority_facts(plan, indexed_sources)
             elif plan.intent == "projection_comparison":
                 facts = self._projection_facts(indexed_sources, task["retrieval_question"])
             elif plan.intent == "technical_stage_requirement":
@@ -1300,6 +1383,19 @@ class ResearchTaskRunner:
                     total_documents,
                     candidate_truncated,
                     "已召回候选条款，但未能抽取可直接支持问题条件的结构化事实。",
+                    settings,
+                    examined_documents=len(documents),
+                )
+                return
+            if plan.strategy == "direct_evidence" and not facts:
+                await self._finish_insufficient(
+                    store,
+                    task,
+                    plan,
+                    snapshot,
+                    total_documents,
+                    candidate_truncated,
+                    "已召回候选条款，但未命中可直接确定责任部门、权限事项和决定条件的完整规定。",
                     settings,
                     examined_documents=len(documents),
                 )
@@ -1522,6 +1618,7 @@ class ResearchTaskRunner:
                             intent=(
                                 plan.intent
                                 if plan.intent in {
+                                    "authority_responsibility",
                                     "service_materials",
                                     "exploration_to_mining_eligibility",
                                     "technical_stage_requirement",
@@ -1696,6 +1793,52 @@ class ResearchTaskRunner:
                 }
             )
         return facts
+
+    @classmethod
+    def _authority_facts(
+        cls,
+        plan: ResearchPlan,
+        indexed_sources: list[tuple[int, Source, str]],
+    ) -> list[dict[str, Any]]:
+        issuer = str((plan.query_classification or {}).get("license_issuer_level") or "unknown")
+        facts: list[dict[str, Any]] = []
+        for index, source, document_id in indexed_sources:
+            quote = cls._authority_direct_quote(source.quote or "", issuer)
+            if not quote:
+                continue
+            facts.append(
+                {
+                    "document_id": document_id,
+                    "classification": "special_provision",
+                    "dimension": "矿产资源储量评审备案权限关系",
+                    "finding": quote,
+                    "source_indices": [index],
+                }
+            )
+        return facts
+
+    @staticmethod
+    def _authority_direct_quote(text: str, issuer: str = "unknown") -> str:
+        clean = re.sub(r"\s+", " ", text or "").strip()
+        full = re.search(
+            r"(自然资源部负责本级已颁发勘查许可证或采矿许可证的矿产资源储量评审备案工作，"
+            r"其他由省级自然资源主管部门负责。)",
+            clean,
+        )
+        if full:
+            return full.group(1)
+        if issuer == "ministry":
+            ministry = re.search(
+                r"(自然资源部负责本级已颁发勘查许可证或采矿许可证的矿产资源储量评审备案工作[。；;]?)",
+                clean,
+            )
+            if ministry:
+                return ministry.group(1)
+        if issuer == "province":
+            province = re.search(r"(其他由省级自然资源主管部门负责[。；;]?)", clean)
+            if province:
+                return province.group(1)
+        return ""
 
     @staticmethod
     def _service_material_facts(
@@ -2138,6 +2281,8 @@ class ResearchTaskRunner:
         settings: Settings,
     ) -> str:
         requirements_matrix = plan.strategy == "requirements_matrix"
+        if plan.intent == "authority_responsibility" and plan.strategy == "direct_evidence":
+            return self._render_authority_answer(question, plan, sources)
         if plan.intent == "service_materials":
             return self._render_service_material_answer(plan, sources)
         if plan.intent == "exploration_to_mining_eligibility":
@@ -2293,6 +2438,72 @@ class ResearchTaskRunner:
             )
 
         return "\n".join(lines).strip()
+
+    @classmethod
+    def _render_authority_answer(
+        cls,
+        question: str,
+        plan: ResearchPlan,
+        sources: list[Source],
+    ) -> str:
+        classification = plan.query_classification or {}
+        issuer = str(classification.get("license_issuer_level") or "unknown")
+        if issuer not in {"ministry", "province"}:
+            issuer = understand_query(question).license_issuer_level
+
+        authority_source: Source | None = None
+        direct_quote = ""
+        for source in sources:
+            quote = cls._authority_direct_quote(source.quote or "", issuer)
+            if quote:
+                authority_source = source
+                direct_quote = quote
+                break
+
+        if authority_source is None:
+            return "**结论**\n\n现有证据不能直接确定矿产资源储量评审备案的责任部门。"
+
+        if issuer == "ministry":
+            conclusion = (
+                "自然资源部本级颁发勘查许可证或采矿许可证的，"
+                "其矿产资源储量评审备案工作由 **自然资源部** 负责。"
+            )
+            scope = "本结论适用于许可证由自然资源部本级颁发的情形。"
+            if "其他由省级自然资源主管部门负责" in direct_quote:
+                scope += "其他情形由省级自然资源主管部门负责。"
+            else:
+                scope += "其他层级颁发许可证的情形不在本条直接依据的覆盖范围内。"
+        elif issuer == "province":
+            conclusion = (
+                "许可证不是由自然资源部本级颁发的，"
+                "其矿产资源储量评审备案工作由 **省级自然资源主管部门** 负责。"
+            )
+            scope = (
+                "本结论适用于现有勘查许可证或采矿许可证由省级机关颁发的情形；"
+                "判断时应以许可证记载的颁发机关为准。"
+            )
+        else:
+            conclusion = (
+                "矿产资源储量评审备案机关按现有许可证的颁发机关确定："
+                "自然资源部本级颁发的，由 **自然资源部** 负责；"
+                "其他由 **省级自然资源主管部门** 负责。"
+            )
+            scope = "需以现有勘查许可证或采矿许可证记载的颁发机关确定具体责任部门。"
+
+        return "\n".join(
+            [
+                "**结论**",
+                "",
+                conclusion,
+                "",
+                "**依据及适用范围**",
+                "",
+                f"- **依据文件**：{authority_source.standard_no or '未知文号'}《{authority_source.title}》",
+                f"- **依据条款**：{authority_source.chapter or '相关条款'}",
+                f"- **直接依据**：{direct_quote}",
+                f"- **适用范围**：{scope}",
+            ]
+        ).strip()
 
     @staticmethod
     def _stage_requirement_quote(text: str, clause: str) -> str:

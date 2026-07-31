@@ -127,7 +127,45 @@ class DisabledResearchLLM:
     enabled = False
 
 
+class CountingSummaryLLM:
+    enabled = True
+
+    def __init__(self):
+        self.calls = 0
+
+    async def complete_detailed(self, messages, **kwargs):
+        self.calls += 1
+        return SimpleNamespace(content="不应调用通用研究摘要器")
+
+
 class ResearchPlannerTests(unittest.IsolatedAsyncioTestCase):
+    def test_authority_fallback_uses_single_direct_evidence_contract(self) -> None:
+        plan = ResearchPlanner._fallback(
+            "自然资源部颁发采矿许可证的矿山，储量评审备案由哪个部门负责？"
+        )
+
+        self.assertEqual(plan.intent, "authority_responsibility")
+        self.assertEqual(plan.strategy, "direct_evidence")
+        self.assertIn("自然资规〔2023〕6号", plan.anchor_standard_numbers)
+        self.assertEqual(len(plan.evidence_targets), 1)
+        self.assertIn("责任部门", plan.comparison_dimensions)
+        self.assertIn("许可证", plan.required_evidence_groups[1][0])
+
+    async def test_authority_plan_cannot_become_cross_document_comparison(self) -> None:
+        planner = ResearchPlanner(
+            Settings(OPENAI_API_KEY="configured"),
+            GenericPlannerLLM(),  # type: ignore[arg-type]
+        )
+
+        plan = await planner.plan(
+            "自然资源部颁发采矿许可证的矿山，储量评审备案由哪个部门负责？"
+        )
+
+        self.assertEqual(plan.intent, "authority_responsibility")
+        self.assertEqual(plan.strategy, "direct_evidence")
+        self.assertEqual(plan.anchor_standard_numbers, ("自然资规〔2023〕6号",))
+        self.assertEqual(len(plan.evidence_targets), 1)
+
     def test_projection_fallback_uses_relation_evidence_groups(self) -> None:
         plan = ResearchPlanner._fallback("不同标准对矿体无限外推所依据的间距有何差异？")
 
@@ -630,6 +668,67 @@ class ResearchAnalyzerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(status, "completed")
         self.assertFalse(missing)
+
+    def test_single_authority_document_completes_direct_evidence_research(self) -> None:
+        status, missing = ResearchTaskRunner._research_final_status(
+            ResearchPlanner._fallback(
+                "自然资源部颁发采矿许可证的矿山，储量评审备案由哪个部门负责？"
+            ),
+            [
+                {
+                    "document_id": "policy-2023-6",
+                    "classification": "special_provision",
+                    "dimension": "矿产资源储量评审备案权限关系",
+                }
+            ],
+            candidate_truncated=False,
+            failed_documents=0,
+        )
+
+        self.assertEqual(status, "completed")
+        self.assertFalse(missing)
+
+    async def test_authority_answer_uses_deterministic_user_facing_renderer(self) -> None:
+        question = "自然资源部颁发采矿许可证的矿山，储量评审备案由哪个部门负责？"
+        plan = ResearchPlanner._fallback(question)
+        source = Source(
+            title="自然资源部关于深化矿产资源管理改革若干事项的意见",
+            standard_no="自然资规〔2023〕6号",
+            chapter="十、",
+            quote=(
+                "自然资源部负责本级已颁发勘查许可证或采矿许可证的矿产资源储量评审备案工作，"
+                "其他由省级自然资源主管部门负责。"
+            ),
+            source_type="local_kb",
+            text_access="html_text",
+        )
+        facts = ResearchTaskRunner._authority_facts(
+            plan,
+            [(1, source, "policy-2023-6")],
+        )
+        llm = CountingSummaryLLM()
+
+        answer = await ResearchTaskRunner()._render_answer(
+            question,
+            plan,
+            facts,
+            [source],
+            llm,  # type: ignore[arg-type]
+            Settings(),
+        )
+
+        self.assertEqual(llm.calls, 0)
+        self.assertIn("**结论**", answer)
+        self.assertIn("由 **自然资源部** 负责", answer)
+        self.assertIn("**依据及适用范围**", answer)
+        self.assertIn("自然资规〔2023〕6号", answer)
+        for hidden_phrase in (
+            "**对比结果**",
+            "单一文件依据",
+            "未与其他文件交叉验证",
+            "事实表述明确",
+        ):
+            self.assertNotIn(hidden_phrase, answer)
 
     async def test_projection_rendering_has_explicit_difference_summary(self) -> None:
         sources = [
