@@ -356,13 +356,16 @@ class ApiAccountTests(unittest.TestCase):
     def test_follow_up_uses_previous_user_question_before_domain_gate(self) -> None:
         client = TestClient(app, raise_server_exceptions=False)
         self.register(client, "follow-up@example.com")
+        api_key = client.post("/api/account/api-keys", json={"name": "follow-up sync"}).json()["api_key"]
         with patch("mining_qa.api.MiningQAAgent", EchoRetrievalQuestionAgent):
             first = client.post(
                 "/api/ask",
+                headers={"X-API-Key": api_key},
                 json={"question": "勘查实施方案的评审或审查是怎么规定的？"},
             )
             second = client.post(
                 "/api/ask",
+                headers={"X-API-Key": api_key},
                 json={
                     "question": "是否还有其他文件规定了相关内容？",
                     "session_id": first.json()["session_id"],
@@ -604,6 +607,75 @@ class ApiAccountTests(unittest.TestCase):
         self.assertEqual(cancelled.json()["quota"]["reserved"], 0)
         self.assertEqual(cancelled.json()["quota"]["remaining"], 5)
 
+    def test_browser_ask_automatically_routes_complex_plan_to_research(self) -> None:
+        user = self.register(self.client, "automatic-research@example.com")
+        self.store.set_daily_limit(
+            user["user_id"],
+            5,
+            "automatic research routing test",
+            self.admin["user_id"],
+            "Asia/Shanghai",
+        )
+        question = "请比较不同矿种规范中的矿体外推规定。"
+        plan = replace(understand_query(question), search_mode="comparison")
+        resolution = QuestionResolution(
+            canonical_question=question,
+            plan=plan,
+            model_used=True,
+        )
+        with (
+            patch("mining_qa.api.resolve_question", AsyncMock(return_value=resolution)),
+            patch("mining_qa.api.MiningQAAgent") as agent_class,
+            patch("mining_qa.api.research_runner.schedule") as schedule,
+        ):
+            created = self.client.post("/api/ask", json={"question": question})
+
+        self.assertEqual(created.status_code, 202, created.text)
+        payload = created.json()
+        self.assertEqual(payload["mode"], "deep")
+        self.assertEqual(payload["status"], "queued")
+        self.assertEqual(payload["quota_cost"], 3)
+        self.assertEqual(payload["reserved_quota_units"], 3)
+        self.assertEqual(payload["quota"]["reserved"], 3)
+        schedule.assert_called_once_with(payload["task_id"])
+        agent_class.assert_not_called()
+        self.client.post(f"/api/research/tasks/{payload['task_id']}/cancel")
+
+    def test_api_key_ask_keeps_synchronous_contract_for_complex_plan(self) -> None:
+        user = self.register(self.client, "api-key-sync-routing@example.com")
+        self.store.set_daily_limit(
+            user["user_id"],
+            5,
+            "API key synchronous contract test",
+            self.admin["user_id"],
+            "Asia/Shanghai",
+        )
+        key = self.client.post("/api/account/api-keys", json={"name": "sync contract"}).json()["api_key"]
+        question = "请比较不同矿种规范中的矿体外推规定。"
+        plan = replace(understand_query(question), search_mode="comparison")
+        resolution = QuestionResolution(
+            canonical_question=question,
+            plan=plan,
+            model_used=True,
+        )
+        with (
+            patch("mining_qa.api.resolve_question", AsyncMock(return_value=resolution)),
+            patch("mining_qa.api.MiningQAAgent", FakeAnsweredAgent),
+            patch("mining_qa.api.research_runner.schedule") as schedule,
+        ):
+            answered = self.client.post(
+                "/api/ask",
+                headers={"X-API-Key": key},
+                json={"question": question},
+            )
+
+        self.assertEqual(answered.status_code, 200, answered.text)
+        payload = answered.json()
+        self.assertEqual(payload["status"], "answered")
+        self.assertEqual(payload["mode"], "basic")
+        self.assertEqual(payload["quota"]["consumed_units"], 1)
+        schedule.assert_not_called()
+
     def test_basic_answer_to_deep_research_only_reserves_two_more_units(self) -> None:
         user = self.register(self.client, "deep-upgrade@example.com")
         self.store.set_daily_limit(
@@ -613,9 +685,17 @@ class ApiAccountTests(unittest.TestCase):
             self.admin["user_id"],
             "Asia/Shanghai",
         )
+        api_key = self.client.post(
+            "/api/account/api-keys",
+            json={"name": "deep upgrade sync"},
+        ).json()["api_key"]
         question = "矿体外推所依据的工程间距在不同标准中是否一致？"
         with patch("mining_qa.api.MiningQAAgent", FakeAnsweredAgent):
-            basic = self.client.post("/api/ask", json={"question": question})
+            basic = self.client.post(
+                "/api/ask",
+                headers={"X-API-Key": api_key},
+                json={"question": question},
+            )
         self.assertEqual(basic.status_code, 200, basic.text)
 
         with patch("mining_qa.api.research_runner.schedule"):

@@ -11,29 +11,11 @@ const state = {
   feedbackItem: null,
   emailCodeTimer: null,
   registrationEnabled: true,
-  qaMode: "basic",
   activeResearchTask: null,
   pendingClarification: null,
   lexiconData: null,
   lexiconCandidate: null,
   lexiconStatusEntry: null,
-};
-
-const qaModes = {
-  basic: {
-    title: "基本模式 · 快速查证",
-    description: "查询明确条款、定义、数值、材料、办理依据和官方来源。",
-    cost: "本次 1 次",
-    note: "回答仅引用必要条款片段；正式业务决策请核验官方原文。",
-    placeholder: "输入需要快速查证的标准条款、定义、数值或政策问题",
-  },
-  deep: {
-    title: "深度模式 · 综合研究",
-    description: "跨标准汇总、逐项对比、差异检查和复杂条件分析；任务会逐份检索候选文件。",
-    cost: "本次 3 次",
-    note: "预计耗时较长；知识库正文不足时会明确说明证据边界。",
-    placeholder: "输入需要跨文件研究、完整性核验或复杂比较的问题",
-  },
 };
 
 const viewMeta = {
@@ -98,29 +80,6 @@ function formatDate(value) {
 function displayCount(value) {
   const count = Number(value);
   return Number.isFinite(count) ? String(Math.max(0, Math.trunc(count))) : "0";
-}
-
-function setQAMode(mode, persist = true) {
-  const normalized = mode === "deep" ? "deep" : "basic";
-  state.qaMode = normalized;
-  const config = qaModes[normalized];
-  $$("#qaModeControl .segment").forEach((button) => {
-    const active = button.dataset.mode === normalized;
-    button.classList.toggle("active", active);
-    button.setAttribute("aria-selected", String(active));
-  });
-  $("#modeTitle").textContent = config.title;
-  $("#modeDescription").textContent = config.description;
-  $("#modeCost").textContent = config.cost;
-  $("#composerNote").textContent = config.note;
-  $("#questionInput").placeholder = config.placeholder;
-  if (persist) {
-    try {
-      window.localStorage.setItem("geowiki.qaMode", normalized);
-    } catch {
-      // Mode selection still works when storage is unavailable.
-    }
-  }
 }
 
 function showToast(message, type = "success") {
@@ -471,19 +430,19 @@ function appendAssistantLoading() {
   return node;
 }
 
-function appendResearchProgress() {
-  const node = document.createElement("article");
+function appendResearchProgress(existingNode = null) {
+  const node = existingNode || document.createElement("article");
   node.className = "message assistant-message research-message";
   node.innerHTML = `
     <div class="assistant-avatar">G</div>
     <div class="assistant-body">
-      <div class="research-progress-head"><strong>深度研究已进入队列</strong><span>0%</span></div>
-      <div class="research-progress-track" aria-label="深度研究进度"><span style="width:0%"></span></div>
+      <div class="research-progress-head"><strong>综合研究已进入队列</strong><span>0%</span></div>
+      <div class="research-progress-track" aria-label="综合研究进度"><span style="width:0%"></span></div>
       <p class="research-progress-message">正在等待研究工作器。</p>
       <div class="research-coverage"><span>已审查 0/0</span><span>证据覆盖 0</span></div>
     </div>
   `;
-  $("#messageList").appendChild(node);
+  if (!existingNode) $("#messageList").appendChild(node);
   return node;
 }
 
@@ -493,23 +452,23 @@ function updateResearchProgress(node, task) {
   $(".research-progress-head strong", node).textContent = researchStageLabel(task.status || progress.stage);
   $(".research-progress-head span", node).textContent = `${percent}%`;
   $(".research-progress-track span", node).style.width = `${percent}%`;
-  $(".research-progress-message", node).textContent = progress.message || "正在处理深度研究任务。";
+  $(".research-progress-message", node).textContent = progress.message || "正在处理综合研究任务。";
   const coverage = $(".research-coverage", node);
   coverage.innerHTML = `<span>已审查 ${displayCount(progress.examined_documents)}/${displayCount(progress.total_documents)}</span><span>证据覆盖 ${displayCount(progress.evidence_documents)}</span>`;
 }
 
 function researchStageLabel(status) {
   return {
-    queued: "深度研究已进入队列",
+    queued: "综合研究已进入队列",
     planning: "正在制定研究计划",
     retrieving: "正在逐份检索候选文件",
     analyzing: "正在提取事实并比较",
-    completed: "深度研究已完成",
-    partial: "深度研究已完成，覆盖不完整",
-    insufficient_evidence: "深度研究证据不足",
-    failed: "深度研究执行失败",
-    cancelled: "深度研究已取消",
-  }[status] || "深度研究处理中";
+    completed: "综合研究已完成",
+    partial: "综合研究已完成，覆盖不完整",
+    insufficient_evidence: "综合研究证据不足",
+    failed: "综合研究执行失败",
+    cancelled: "综合研究已取消",
+  }[status] || "综合研究处理中";
 }
 
 function renderMarkdown(value) {
@@ -593,7 +552,7 @@ function appendAssistantMessage(data, existingNode = null) {
       ${renderClarification(data)}
       <div class="answer-meta">
         <span class="status-chip ${escapeHtml(data.status || "")}">${escapeHtml(statusLabel(data.status))}</span>
-        <span class="mode-chip">${data.mode === "deep" ? "深度模式" : "基本模式"}</span>
+        <span class="mode-chip">${data.mode === "deep" ? "综合研究" : "直接查证"}</span>
         ${data.quota ? `<span>${escapeHtml(quotaLabel(data.quota))}</span>` : ""}
         ${data.request_id ? `<span>请求 ${escapeHtml(data.request_id.slice(0, 12))}</span>` : ""}
       </div>
@@ -601,7 +560,6 @@ function appendAssistantMessage(data, existingNode = null) {
       ${isClarification ? "" : `<div class="message-actions" aria-label="回答反馈">
         <button class="message-action-button feedback-positive" type="button" title="满意" aria-label="满意"><i data-lucide="thumbs-up"></i></button>
         <button class="message-action-button feedback-negative" type="button" title="不满意" aria-label="不满意"><i data-lucide="thumbs-down"></i></button>
-        ${data.mode !== "deep" && data.mode_recommendation === "deep" && data.question ? '<button class="deep-upgrade-button" type="button"><i data-lucide="microscope"></i><span>转深度研究 · 追加 2 次</span></button>' : ""}
       </div>
       <form class="feedback-form hidden">
         <select aria-label="不满意原因">
@@ -623,11 +581,9 @@ function appendAssistantMessage(data, existingNode = null) {
     $$(".clarification-option", node).forEach((button) => {
       button.addEventListener("click", () => {
         $$(".clarification-option", node).forEach((item) => { item.disabled = true; });
-        setQAMode(data.mode === "deep" ? "deep" : "basic");
         state.pendingClarification = {
           clarificationId: data.clarification?.clarification_id || null,
           optionId: button.dataset.optionId || null,
-          mode: data.mode === "deep" ? "deep" : "basic",
         };
         const input = $("#questionInput");
         input.value = button.dataset.question || "";
@@ -641,7 +597,6 @@ function appendAssistantMessage(data, existingNode = null) {
   const positive = $(".feedback-positive", node);
   const negative = $(".feedback-negative", node);
   const form = $(".feedback-form", node);
-  const deepUpgrade = $(".deep-upgrade-button", node);
   positive.addEventListener("click", async () => {
     await submitFeedback(data, "satisfied", null, "");
     positive.classList.add("selected");
@@ -666,18 +621,6 @@ function appendAssistantMessage(data, existingNode = null) {
       setBusy(submit, false);
     }
   });
-  if (deepUpgrade) {
-    deepUpgrade.addEventListener("click", async () => {
-      if (!window.confirm("将按同一问题创建深度研究任务，并追加消耗 2 次配额。继续？")) return;
-      deepUpgrade.disabled = true;
-      const started = await startDeepResearch(data.question, {
-        sessionId: data.session_id || state.currentConversation,
-        sourceRequestId: data.request_id || null,
-        appendUser: false,
-      });
-      if (!started) deepUpgrade.disabled = false;
-    });
-  }
   refreshIcons();
   return node;
 }
@@ -730,48 +673,40 @@ function resizeComposer() {
 
 async function submitQuestion(event) {
   event.preventDefault();
-  if (state.asking || (state.qaMode === "deep" && state.activeResearchTask)) return;
+  if (state.asking || state.activeResearchTask) return;
   const input = $("#questionInput");
   const question = input.value.trim();
   if (!question) return;
   const clarificationSelection = state.pendingClarification;
   state.pendingClarification = null;
-  if (state.qaMode === "deep" && !clarificationSelection && !window.confirm("深度模式将消耗 3 次配额，并以异步任务逐份审查候选文件。继续？")) {
-    return;
-  }
   state.asking = true;
   $("#chatEmptyState").classList.add("hidden");
   appendUserMessage(question);
-  const pending = state.qaMode === "deep" ? appendResearchProgress() : appendAssistantLoading();
+  const pending = appendAssistantLoading();
   input.value = "";
   resizeComposer();
   $("#askButton").disabled = true;
   scrollChatToBottom();
   try {
-    if (state.qaMode === "deep") {
-      await startDeepResearch(question, {
-        sessionId: state.currentConversation,
-        existingNode: pending,
-        appendUser: false,
-        clarificationId: clarificationSelection?.clarificationId || null,
-        optionId: clarificationSelection?.optionId || null,
-      });
+    const data = await apiRequest("/api/ask", {
+      method: "POST",
+      body: JSON.stringify({
+        question,
+        session_id: state.currentConversation,
+        clarification_id: clarificationSelection?.clarificationId || null,
+        option_id: clarificationSelection?.optionId || null,
+      }),
+    });
+    data.question = question;
+    state.currentConversation = data.session_id;
+    if (data.task_id) {
+      const researchNode = appendResearchProgress(pending);
+      await handleResearchTask(data, question, researchNode);
     } else {
-      const data = await apiRequest("/api/ask", {
-        method: "POST",
-        body: JSON.stringify({
-          question,
-          session_id: state.currentConversation,
-          clarification_id: clarificationSelection?.clarificationId || null,
-          option_id: clarificationSelection?.optionId || null,
-        }),
-      });
-      data.question = question;
-      state.currentConversation = data.session_id;
       appendAssistantMessage(data, pending);
       if (data.quota) updateQuota(data.quota);
-      await Promise.allSettled([loadConversations(), loadAccountSummary()]);
     }
+    await Promise.allSettled([loadConversations(), loadAccountSummary()]);
   } catch (error) {
     appendAssistantMessage({
       answer: `请求失败：${error.message}`,
@@ -794,59 +729,30 @@ function wait(milliseconds) {
   return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 }
 
-async function startDeepResearch(question, options = {}) {
+async function handleResearchTask(task, question, pending) {
   if (state.activeResearchTask) {
-    showToast("当前已有深度研究任务在运行", "error");
-    return false;
+    throw new Error("当前已有综合研究任务在运行");
   }
-  const pending = options.existingNode || appendResearchProgress();
-  if (options.appendUser !== false) {
-    $("#chatEmptyState").classList.add("hidden");
-    appendUserMessage(question);
-  }
-  state.activeResearchTask = "creating";
+  state.activeResearchTask = task.task_id;
+  state.currentConversation = task.session_id;
+  storeActiveResearchTask(task, question);
+  updateResearchProgress(pending, task);
+  if (task.quota) updateQuota(task.quota);
   scrollChatToBottom();
   try {
-    const task = await apiRequest("/api/research/tasks", {
-      method: "POST",
-      body: JSON.stringify({
-        question,
-        session_id: options.sessionId || state.currentConversation,
-        source_request_id: options.sourceRequestId || null,
-        clarification_id: options.clarificationId || null,
-        option_id: options.optionId || null,
-      }),
-    });
-    if (task.status === "clarification_required") {
-      task.question = question;
-      task.mode = "deep";
-      state.currentConversation = task.session_id || state.currentConversation;
-      appendAssistantMessage(task, pending);
-      if (task.quota) updateQuota(task.quota);
-      await Promise.allSettled([loadConversations(), loadAccountSummary()]);
-      return true;
-    }
-    state.activeResearchTask = task.task_id;
-    state.currentConversation = task.session_id;
-    storeActiveResearchTask(task, question);
-    updateResearchProgress(pending, task);
-    if (task.quota) updateQuota(task.quota);
     await monitorResearchTask(task, question, pending);
-    await Promise.allSettled([loadConversations(), loadAccountSummary()]);
-    return true;
   } catch (error) {
     appendAssistantMessage({
-      answer: `深度研究创建或执行失败：${error.message}`,
+      answer: `综合研究执行失败：${error.message}`,
       status: "failed",
       mode: "deep",
-      session_id: options.sessionId || state.currentConversation,
+      session_id: task.session_id || state.currentConversation,
       question,
       sources: [],
       limitations: { notes: [] },
       quota: error.payload?.detail?.quota || null,
     }, pending);
     showToast(error.message, "error");
-    return false;
   } finally {
     state.activeResearchTask = null;
     scrollChatToBottom();
@@ -897,8 +803,8 @@ async function monitorResearchTask(initialTask, question, pending) {
   }
   appendAssistantMessage({
     answer: current.status === "cancelled"
-      ? "深度研究任务已在排队阶段取消，本次预留次数已退回。"
-      : "深度研究任务执行失败，本次预留次数已退回。",
+      ? "综合研究任务已在排队阶段取消，本次预留次数已退回。"
+      : "综合研究任务执行失败，本次预留次数已退回。",
     status: current.status,
     mode: "deep",
     session_id: current.session_id,
@@ -1989,7 +1895,6 @@ function bindEvents() {
   $("#registerForm").addEventListener("submit", handleRegister);
   $("#sendEmailCodeButton").addEventListener("click", sendEmailCode);
   $("#askForm").addEventListener("submit", submitQuestion);
-  $$("#qaModeControl .segment").forEach((button) => button.addEventListener("click", () => setQAMode(button.dataset.mode)));
   $("#questionInput").addEventListener("input", resizeComposer);
   $("#questionInput").addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
@@ -2003,7 +1908,6 @@ function bindEvents() {
   $("#quotaButton").addEventListener("click", () => navigate("usage"));
   $$(".nav-item").forEach((button) => button.addEventListener("click", () => navigate(button.dataset.view)));
   $$(".suggestion").forEach((button) => button.addEventListener("click", () => {
-    if (button.dataset.mode) setQAMode(button.dataset.mode);
     $("#questionInput").value = button.dataset.question;
     resizeComposer();
     $("#askForm").requestSubmit();
@@ -2076,11 +1980,6 @@ function bindEvents() {
 
 async function initialize() {
   bindEvents();
-  try {
-    setQAMode(window.localStorage.getItem("geowiki.qaMode") || "basic", false);
-  } catch {
-    setQAMode("basic", false);
-  }
   updateQuickstart("curl");
   refreshIcons();
   try {

@@ -51,16 +51,18 @@ process.stdout.write(JSON.stringify({html: renderer.render(input, {baseUrl: 'htt
         self.assertIn("已吊销", script)
         self.assertIn("if (!revoked)", script)
 
-    def test_dual_mode_controls_and_deep_progress_are_present(self) -> None:
+    def test_single_entry_uses_backend_routing_and_keeps_research_progress(self) -> None:
         html = (PROJECT_ROOT / "web" / "index.html").read_text(encoding="utf-8")
         script = (PROJECT_ROOT / "web" / "static" / "app.js").read_text(encoding="utf-8")
 
-        self.assertIn('id="qaModeControl"', html)
-        self.assertIn("基本模式 · 快速查证", html)
-        self.assertIn("深度模式 · 综合研究", script)
-        self.assertIn('apiRequest("/api/research/tasks"', script)
+        self.assertNotIn('id="qaModeControl"', html)
+        self.assertNotIn("data-mode=\"deep\"", html)
+        self.assertIn("系统自动选择检索深度", html)
+        self.assertIn('apiRequest("/api/ask"', script)
+        self.assertIn("if (data.task_id)", script)
         self.assertIn("updateResearchProgress", script)
-        self.assertIn("转深度研究 · 追加 2 次", script)
+        self.assertNotIn('apiRequest("/api/research/tasks"', script)
+        self.assertNotIn("转深度研究", script)
 
     def test_clarification_options_resubmit_without_rendering_feedback_controls(self) -> None:
         script = (PROJECT_ROOT / "web" / "static" / "app.js").read_text(encoding="utf-8")

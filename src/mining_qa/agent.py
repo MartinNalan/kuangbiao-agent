@@ -18,6 +18,7 @@ from .config import Settings
 from .domain_gate import DomainGate
 from .engineering_distance import render_engineering_distance_answer
 from .evidence_reranker import EvidenceReranker, RerankResult
+from .execution_routing import requires_deep_research
 from .gap_tasks import KnowledgeGapTaskStore
 from .knowledge_client import KnowledgeClient
 from .llm_client import LLMClient
@@ -511,10 +512,10 @@ class MiningQAAgent:
                 limitations=limitations,
                 knowledge_gap_task=gap_task,
                 confidence="low",
-                mode_recommendation=("deep" if self._should_recommend_deep(plan, question) else None),
+                mode_recommendation=("deep" if requires_deep_research(plan, question) else None),
                 mode_recommendation_reason=(
                     "该问题需要扩大候选范围并逐文件核验，建议使用深度模式。"
-                    if self._should_recommend_deep(plan, question)
+                    if requires_deep_research(plan, question)
                     else None
                 ),
                 query_classification=(
@@ -638,10 +639,10 @@ class MiningQAAgent:
             confidence="high"
             if rerank_result and rerank_result.confidence >= 0.8
             else "medium" if sources else "low",
-            mode_recommendation=("deep" if self._should_recommend_deep(plan, question) else None),
+            mode_recommendation=("deep" if requires_deep_research(plan, question) else None),
             mode_recommendation_reason=(
                 "该问题涉及跨文件完整性核验或差异比较，深度模式会枚举候选文件并逐份审查。"
-                if self._should_recommend_deep(plan, question)
+                if requires_deep_research(plan, question)
                 else None
             ),
             query_classification=(
@@ -3013,29 +3014,6 @@ class MiningQAAgent:
         requested = 650 + 1.5 * quote_chars + 100 * max(1, len(plan.definition_slots))
         bounded = min(float(self.settings.definition_answer_max_tokens), max(1000.0, requested))
         return int(math.ceil(bounded / 100.0) * 100)
-
-    @staticmethod
-    def _should_recommend_deep(plan: QueryPlan, question: str) -> bool:
-        if plan.search_mode in {"comparison", "exhaustive"} or plan.exhaustive_search:
-            return True
-        if plan.intent in {"projection_comparison", "clause_comparison", "cross_document_audit"}:
-            return True
-        return any(
-            term in question
-            for term in (
-                "逐一检查",
-                "逐项对比",
-                "全量检查",
-                "所有标准",
-                "各类标准",
-                "各类规范",
-                "分矿种规范",
-                "哪些规范与",
-                "哪些标准与",
-                "是否存在不一致",
-                "冲突检查",
-            )
-        )
 
     def _engineering_distance_answer(self, plan: QueryPlan, sources: list[Source]) -> str | None:
         if plan.intent != "engineering_distance_lookup":

@@ -37,6 +37,7 @@ from .auth import (
 )
 from .config import PROJECT_ROOT, get_settings
 from .email_sender import EmailDeliveryError, send_verification_email
+from .execution_routing import requires_deep_research
 from .fast_path_shadow import (
     get_fast_path_shadow_service,
     shutdown_fast_path_shadow_service,
@@ -50,7 +51,11 @@ from .lexicon_governance import (
     LexiconReviewError,
     get_lexicon_governance_store,
 )
-from .query_understanding import contextualize_follow_up, query_plan_from_payload, understand_query
+from .query_understanding import (
+    contextualize_follow_up,
+    query_plan_from_payload,
+    understand_query,
+)
 from .question_resolution import (
     QuestionResolution,
     QuestionResolver,
@@ -328,6 +333,61 @@ def clarification_selection(
     if state.get("mode") != expected_mode:
         raise PermissionDeniedError("clarification mode mismatch")
     return store.select_clarification_option(owner_id, clarification_id, option_id)
+
+
+def reserve_and_create_research_task(
+    store,
+    settings,
+    principal: Principal,
+    *,
+    request_id: str,
+    conversation_id: str,
+    channel: str,
+    question: str,
+    retrieval_question: str,
+    filters: dict[str, object],
+    query_plan: dict[str, object],
+    source_request_id: str | None = None,
+) -> tuple[dict[str, object], dict[str, object]]:
+    """Atomically account for quota around persistent task creation."""
+    if not principal.user_id:
+        raise PermissionDeniedError("account required")
+    reserved_units = store.research_upgrade_quota_cost(
+        principal.user_id,
+        source_request_id,
+        conversation_id,
+        question,
+    )
+    quota = store.reserve_qa_quota(
+        principal.user_id,
+        request_id,
+        channel,
+        principal.credential_id if principal.auth_type == "api_key" else None,
+        conversation_id,
+        len(question),
+        settings.quota_timezone,
+        quota_units=reserved_units,
+        request_mode="deep",
+        parent_request_id=source_request_id,
+    )
+    try:
+        task = store.create_research_task(
+            task_id="research_" + uuid4().hex,
+            request_id=request_id,
+            user_id=principal.user_id,
+            api_key_id=principal.credential_id if principal.auth_type == "api_key" else None,
+            conversation_id=conversation_id,
+            channel=channel,
+            question=question,
+            retrieval_question=retrieval_question,
+            filters=filters,
+            reserved_quota_units=reserved_units,
+            query_plan=query_plan,
+        )
+    except Exception:
+        store.fail_qa_quota(request_id, settings.quota_timezone)
+        raise
+    return task, quota
 
 
 @app.on_event("startup")
@@ -720,11 +780,13 @@ async def delete_conversation(
 
 @app.post(
     "/api/ask",
-    response_model=AskResponse,
+    response_model=AskResponse | ResearchTaskResponse,
     tags=["qa"],
     summary="Ask a domain-scoped question",
     description=(
         "Answers mineral-resource standards, technical specification, and related policy questions. "
+        "Browser sessions are automatically routed to either a direct answer or an asynchronous "
+        "research task; API-key calls retain the synchronous answer contract. "
         "Answered and in-scope evidence-gap requests consume daily quota; clarification, out-of-scope, "
         "and system-error results do not."
     ),
@@ -732,8 +794,9 @@ async def delete_conversation(
 async def ask(
     payload: AskRequest,
     http_request: Request,
+    response: Response,
     principal: Annotated[Principal, Depends(authenticated_principal)],
-) -> AskResponse:
+) -> AskResponse | ResearchTaskResponse:
     settings = get_settings()
     store = get_account_store(settings)
     started = perf_counter()
@@ -919,6 +982,58 @@ async def ask(
         payload._query_plan = resolution.plan
         payload._prepared_planner_result = resolution.prepared_planner_result
 
+        if (
+            principal.auth_type == "session"
+            and principal.user_id
+            and principal.quota_managed
+            and conversation_id
+            and requires_deep_research(resolution.plan, payload.retrieval_question)
+        ):
+            try:
+                task, quota = reserve_and_create_research_task(
+                    store,
+                    settings,
+                    principal,
+                    request_id=request_id,
+                    conversation_id=conversation_id,
+                    channel=channel,
+                    question=payload.question,
+                    retrieval_question=payload.retrieval_question,
+                    filters=payload.filters.model_dump(exclude_none=True),
+                    query_plan=resolution.plan.to_payload(),
+                )
+            except AccountStoreError as error:
+                raise account_error(error) from error
+            research_runner.schedule(str(task["task_id"]))
+            response.status_code = status.HTTP_202_ACCEPTED
+            result = research_task_response(task, quota)
+            usage_logger.write(
+                {
+                    "user_id": principal.user_id,
+                    "credential_id": principal.credential_id,
+                    "auth_type": principal.auth_type,
+                    "endpoint": "/api/ask",
+                    "method": "POST",
+                    "client_host": http_request.client.host if http_request.client else None,
+                    "request_id": request_id,
+                    "task_id": task["task_id"],
+                    "question_chars": len(payload.question),
+                    "status": "queued",
+                    "automatic_research_routing": True,
+                    "quota_reserved_units": int(task["reserved_quota_units"]),
+                    "quota_remaining": quota["remaining"],
+                    "question_resolution_used": resolution.model_used,
+                    "question_resolution_error": resolution.error,
+                    "query_classification": (
+                        resolution.plan.classification.to_payload()
+                        if resolution.plan.classification
+                        else None
+                    ),
+                    "duration_ms": round((perf_counter() - started) * 1000, 2),
+                }
+            )
+            return result
+
     if principal.user_id and principal.quota_managed:
         try:
             if domain_decision.in_scope:
@@ -1071,8 +1186,6 @@ async def create_research_task(
     await enforce_rate_limit(principal.rate_limit_key)
     channel = "web" if principal.auth_type == "session" else "api"
     request_id = "req_" + uuid4().hex
-    task_id = "research_" + uuid4().hex
-    quota_reserved = False
     inherited_plan = None
     resolved_slots: dict[str, str] = {}
     clarification_parent_request_id = request_id
@@ -1208,46 +1321,25 @@ async def create_research_task(
             resolution.canonical_question,
             resolution.plan,
         )
-        reserved_units = store.research_upgrade_quota_cost(
-            principal.user_id,
-            payload.source_request_id,
-            conversation_id,
-            payload.question,
-        )
-        quota = store.reserve_qa_quota(
-            principal.user_id,
-            request_id,
-            channel,
-            principal.credential_id if principal.auth_type == "api_key" else None,
-            conversation_id,
-            len(payload.question),
-            settings.quota_timezone,
-            quota_units=reserved_units,
-            request_mode="deep",
-            parent_request_id=payload.source_request_id,
-        )
-        quota_reserved = True
-        task = store.create_research_task(
-            task_id=task_id,
+        task, quota = reserve_and_create_research_task(
+            store,
+            settings,
+            principal,
             request_id=request_id,
-            user_id=principal.user_id,
-            api_key_id=principal.credential_id if principal.auth_type == "api_key" else None,
             conversation_id=conversation_id,
             channel=channel,
             question=payload.question,
             retrieval_question=retrieval_question,
             filters=payload.filters.model_dump(exclude_none=True),
-            reserved_quota_units=reserved_units,
             query_plan=resolution.plan.to_payload(),
+            source_request_id=payload.source_request_id,
         )
     except HTTPException:
         raise
     except AccountStoreError as error:
-        if quota_reserved:
-            store.fail_qa_quota(request_id, settings.quota_timezone)
         raise account_error(error) from error
 
-    research_runner.schedule(task_id)
+    research_runner.schedule(str(task["task_id"]))
     usage_logger.write(
         {
             "user_id": principal.user_id,
@@ -1257,7 +1349,7 @@ async def create_research_task(
             "method": "POST",
             "client_host": http_request.client.host if http_request.client else None,
             "request_id": request_id,
-            "task_id": task_id,
+            "task_id": task["task_id"],
             "question_chars": len(payload.question),
             "status": "queued",
             "quota_reserved_units": int(task["reserved_quota_units"]),
