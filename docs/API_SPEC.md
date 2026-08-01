@@ -6,6 +6,7 @@ Cloud deployments should expose only the controlled QA API surface:
 
 - `GET /health`
 - `POST /api/ask`
+- `POST /api/evidence`
 - `POST /api/research/tasks`
 - `GET /api/research/tasks/{task_id}`
 - `GET /api/research/tasks/{task_id}/result`
@@ -56,6 +57,81 @@ POST /api/auth/register
 ```
 
 Verification codes expire after 10 minutes by default. Sending is limited by per-email cooldown and a rolling daily cap. Production uses AgentMail with the `geowiki` inbox; API tokens and verification secrets exist only in `.env`.
+
+## POST /api/evidence
+
+This endpoint is the public, authenticated boundary for downstream agents. It runs the same
+question understanding, hybrid retrieval, evidence reranking, sufficiency checks, and authority
+guards as `/api/ask`, then stops before final answer synthesis. It never exposes private
+`/knowledge/*` routes or unrestricted corpus content.
+
+Request:
+
+```json
+{
+  "question": "哪个标准规定了金矿基本工程间距？",
+  "session_id": "optional-correlation-id",
+  "filters": {
+    "domain": "mineral_resources",
+    "document_types": ["standard"]
+  }
+}
+```
+
+Ready response:
+
+```json
+{
+  "schema_version": "1.0",
+  "request_id": "req_xxx",
+  "session_id": "session-id",
+  "question": "哪个标准规定了金矿基本工程间距？",
+  "retrieval_question": "哪个标准规定了金矿基本工程间距？",
+  "status": "ready",
+  "answerable": true,
+  "sources": [
+    {
+      "document_id": "stable-document-id",
+      "unit_id": "stable-unit-id",
+      "chunk_id": "stable-retrieval-id",
+      "title": "文件名称",
+      "standard_no": "DZ/T 0205-2020",
+      "chapter": "F.1",
+      "page": 26,
+      "page_end": 26,
+      "quote": "经证据审查保留的必要原文片段",
+      "retrieval_routes": ["full_text", "vector"],
+      "source_type": "local_kb",
+      "text_access": "ocr_text",
+      "validation_status": "approved"
+    }
+  ],
+  "evidence_targets": ["核心结论"],
+  "missing_evidence": [],
+  "retrieval": {
+    "full_text_hits": 5,
+    "vector_hits": 8,
+    "direct_evidence_hits": 1,
+    "retrieval_rounds": 1,
+    "planner_used": true,
+    "reranker_used": false,
+    "total_ms": 1200.0
+  },
+  "limitations": {
+    "has_clause_level_evidence": true,
+    "notes": []
+  },
+  "confidence": "medium",
+  "quota_cost": 1
+}
+```
+
+`status` is `ready`, `insufficient_evidence`, `out_of_scope`, or
+`clarification_required`. A downstream model may synthesize a conclusion only when
+`answerable=true`; every factual statement must remain traceable to `sources`. The endpoint
+does not return an `answer` field and does not invoke the final answer model. It uses one basic
+quota unit for a ready or in-scope insufficient-evidence result; clarification and out-of-scope
+results do not consume quota.
 
 ## POST /api/ask
 

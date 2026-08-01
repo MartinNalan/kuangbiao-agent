@@ -33,7 +33,9 @@ from mining_qa.schemas import (  # noqa: E402
     AskResponse,
     Clarification,
     ClarificationOption,
+    EvidenceBundleResponse,
     Limitations,
+    Source,
 )
 
 
@@ -84,6 +86,42 @@ class EchoRetrievalQuestionAgent:
             limitations=Limitations(has_clause_level_evidence=True),
             confidence="high",
         )
+
+
+class FakeEvidenceAgent:
+    def __init__(self, settings):
+        self.settings = settings
+
+    async def generate_evidence(self, request):
+        return EvidenceBundleResponse(
+            session_id=request.session_id or "generated-session",
+            question=request.question,
+            retrieval_question=request.retrieval_question,
+            status="ready",
+            answerable=True,
+            sources=[
+                Source(
+                    document_id="doc-test",
+                    unit_id="unit-test",
+                    chunk_id="chunk-test",
+                    title="测试规范",
+                    standard_no="DZ/T 0000-2026",
+                    chapter="6.1",
+                    page=12,
+                    page_end=12,
+                    quote="测试条款原文。",
+                    retrieval_routes=["full_text", "vector"],
+                    source_type="local_kb",
+                    text_access="ocr_text",
+                )
+            ],
+            limitations=Limitations(has_clause_level_evidence=True),
+            confidence="high",
+            evidence_targets=["测试条款"],
+        )
+
+    async def aclose(self):
+        return None
 
 
 class ApiAccountTests(unittest.TestCase):
@@ -199,6 +237,32 @@ class ApiAccountTests(unittest.TestCase):
         usage = self.client.get("/api/usage", headers={"X-API-Key": api_key})
         self.assertEqual(usage.status_code, 200, usage.text)
         self.assertEqual(usage.json()["usage"]["quota"]["used"], 2)
+
+    def test_evidence_api_returns_structured_sources_without_answer_synthesis(self) -> None:
+        self.register(self.client, "evidence-api@example.com")
+        question = "金矿工程间距是多少？"
+        resolution = QuestionResolution(
+            canonical_question=question,
+            plan=understand_query(question),
+            model_used=True,
+        )
+
+        with (
+            patch("mining_qa.api.resolve_question", AsyncMock(return_value=resolution)),
+            patch("mining_qa.api.MiningQAAgent", FakeEvidenceAgent),
+        ):
+            response = self.client.post("/api/evidence", json={"question": question})
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertNotIn("answer", payload)
+        self.assertEqual(payload["status"], "ready")
+        self.assertTrue(payload["answerable"])
+        self.assertEqual(payload["schema_version"], "1.0")
+        self.assertEqual(payload["sources"][0]["unit_id"], "unit-test")
+        self.assertEqual(payload["sources"][0]["retrieval_routes"], ["full_text", "vector"])
+        self.assertTrue(payload["quota"]["consumed"])
+        self.assertEqual(payload["quota"]["remaining"], 1)
 
     def test_basic_clarification_does_not_call_agent_or_consume_quota(self) -> None:
         user = self.register(self.client, "clarification-basic@example.com")

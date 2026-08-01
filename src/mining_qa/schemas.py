@@ -59,6 +59,12 @@ class AskRequest(BaseModel):
         return self._prepared_planner_result
 
 
+class EvidenceRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=4000)
+    session_id: str | None = None
+    filters: AskFilters = Field(default_factory=AskFilters)
+
+
 class QuotaInfo(BaseModel):
     date: str
     daily_limit: int
@@ -79,12 +85,18 @@ class KnowledgeGapTask(BaseModel):
 
 
 class Source(BaseModel):
+    document_id: str | None = None
+    unit_id: str | None = None
+    chunk_id: str | None = None
     title: str
     standard_no: str | None = None
     chapter: str | None = None
     page: int | None = None
+    page_end: int | None = None
+    section_path: str | None = None
     quote: str | None = None
     score: float | None = None
+    retrieval_routes: list[str] = Field(default_factory=list)
     source_type: SourceType = "unavailable"
     text_access: TextAccess = "unavailable"
     url: str | None = None
@@ -167,6 +179,33 @@ class AskResponse(BaseModel):
     mode_recommendation_reason: str | None = None
     clarification: Clarification | None = None
     query_classification: dict[str, Any] | None = None
+
+
+class EvidenceBundleResponse(BaseModel):
+    """Answer-model-independent, structured output from the shared evidence layer."""
+
+    schema_version: Literal["1.0"] = "1.0"
+    request_id: str | None = None
+    session_id: str
+    question: str
+    retrieval_question: str
+    status: Literal[
+        "ready",
+        "insufficient_evidence",
+        "out_of_scope",
+        "clarification_required",
+    ]
+    answerable: bool = False
+    sources: list[Source] = Field(default_factory=list)
+    retrieval: RetrievalStats = Field(default_factory=RetrievalStats)
+    limitations: Limitations = Field(default_factory=Limitations)
+    confidence: Literal["low", "medium", "high"] = "low"
+    query_classification: dict[str, Any] | None = None
+    evidence_targets: list[str] = Field(default_factory=list)
+    missing_evidence: list[str] = Field(default_factory=list)
+    clarification: Clarification | None = None
+    quota: QuotaInfo | None = None
+    quota_cost: int = 1
 
 
 ResearchTaskStatus = Literal[

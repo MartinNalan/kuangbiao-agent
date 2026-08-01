@@ -13,7 +13,7 @@ Browser
   -> Frontend Web App
   -> Backend API
 External Agent / Customer System
-  -> Public Backend API
+  -> Public Structured Evidence API
 Backend API
   -> Application Database
        -> Users / Sessions / Invitations / Email Verification
@@ -49,8 +49,9 @@ Backend API
 - 按单位原子预留、结算或退回每日问答配额
 - 判断问题是否属于矿产资源标准规范相关领域
 - 调用知识库检索接口
-- 组织检索结果
-- 调用大模型生成答案
+- 通过共享证据生成层组织、审查并裁剪检索结果
+- `/api/ask` 在证据层通过后调用大模型生成答案
+- `/api/evidence` 直接返回结构化证据，由下游 Agent 自行组织语言
 - 返回结构化结果
 - 记录日志和反馈
 - 对无证据但领域相关的问题创建异步补库任务
@@ -75,6 +76,8 @@ Request
   -> Optional knowledge-gap task queued for background processing
   -> Consume one unit for answered/evidence-gap results; refund on system error
 ```
+
+共享证据生成层只有一套实现：权威锚点校验、混合召回、候选合并、证据重排、最多一次缺口补检、条款级充分性判断和来源裁剪均在该层完成。`/api/ask` 与 `/api/evidence` 不能各自维护一套检索规则；前者在同一证据包之上继续答案合成，后者在合成前停止。外部 Agent 只能访问经认证、限流、配额控制和证据裁剪的 `/api/evidence`，不能访问私有 `/knowledge/*` 或全量正文。
 
 深度模式使用独立异步流程：
 
