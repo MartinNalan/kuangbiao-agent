@@ -6,7 +6,7 @@ The current single-server deployment uses:
 - QA API and web app on `127.0.0.1:18080`.
 - Private KB service on `127.0.0.1:18081`.
 - Redis for rate limiting.
-- SQLite application and KB databases under `/opt/kuangbiao-agent/data/`.
+- SQLite application and KB databases under `/opt/geowiki/data/`.
 
 The Nginx configuration explicitly returns 404 for `/knowledge/*`.
 
@@ -85,7 +85,7 @@ After deployment, allow TCP port 80 in the cloud security group and visit the se
 Create the first administrator directly on the server:
 
 ```bash
-cd /opt/kuangbiao-agent
+cd /opt/geowiki
 sudo -u kuangbiao env PYTHONPATH=src .venv/bin/python scripts/manage_accounts.py create-admin \
   --account admin --display-name 管理员
 ```

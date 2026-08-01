@@ -7,10 +7,10 @@ Wants=network-online.target
 Type=simple
 User=kuangbiao
 Group=kuangbiao
-WorkingDirectory=/opt/kuangbiao-agent
-EnvironmentFile=/opt/kuangbiao-agent/.env
-Environment=PYTHONPATH=/opt/kuangbiao-agent/src
-ExecStart=/opt/kuangbiao-agent/.venv/bin/uvicorn mining_qa.knowledge_service:app --host 127.0.0.1 --port 18081
+WorkingDirectory=/opt/geowiki
+EnvironmentFile=/opt/geowiki/.env
+Environment=PYTHONPATH=/opt/geowiki/src
+ExecStart=/opt/geowiki/.venv/bin/uvicorn mining_qa.knowledge_service:app --host 127.0.0.1 --port 18081
 Restart=on-failure
 RestartSec=3
 TimeoutStopSec=20
@@ -19,7 +19,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
-ReadWritePaths=/opt/kuangbiao-agent/data
+ReadWritePaths=/opt/geowiki/data
 
 [Install]
 WantedBy=multi-user.target

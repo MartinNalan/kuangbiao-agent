@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_DIR="${1:-/opt/kuangbiao-agent}"
+APP_DIR="${1:-/opt/geowiki}"
 PIP_INDEX_URL="${PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple}"
 
 if [[ "${EUID}" -ne 0 ]]; then
@@ -9,8 +9,8 @@ if [[ "${EUID}" -ne 0 ]]; then
   exit 1
 fi
 
-if [[ "${APP_DIR}" != "/opt/kuangbiao-agent" ]]; then
-  echo "The current systemd templates expect /opt/kuangbiao-agent." >&2
+if [[ "${APP_DIR}" != "/opt/geowiki" ]]; then
+  echo "The current systemd templates expect /opt/geowiki." >&2
   exit 1
 fi
 

@@ -17,12 +17,12 @@ set +a
 : "${CLOUD_USER:?CLOUD_USER is required}"
 : "${CLOUD_SSH_PASSWORD:?CLOUD_SSH_PASSWORD is required}"
 : "${CLOUD_SSH_PORT:=22}"
-: "${CLOUD_APP_DIR:=/opt/kuangbiao-agent}"
+: "${CLOUD_APP_DIR:=/opt/geowiki}"
 : "${CLOUD_AGENTMAIL_PROXY_URL:=}"
 : "${SYNC_KB_DB:=true}"
 
-if [[ "${CLOUD_APP_DIR}" != "/opt/kuangbiao-agent" ]]; then
-  echo "Current systemd templates require CLOUD_APP_DIR=/opt/kuangbiao-agent." >&2
+if [[ "${CLOUD_APP_DIR}" != "/opt/geowiki" ]]; then
+  echo "Current systemd templates require CLOUD_APP_DIR=/opt/geowiki." >&2
   exit 1
 fi
 
