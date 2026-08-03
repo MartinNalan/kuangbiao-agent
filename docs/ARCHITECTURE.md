@@ -13,7 +13,7 @@
 ## 1. 系统边界
 
 ```text
-Browser / API client
+Browser / QA API client / downstream evidence client
   -> Nginx :80
   -> Public FastAPI + static SPA :18080
        -> Application SQLite
@@ -43,6 +43,8 @@ Browser / API client
 
 用户不再手工选择“普通/深度模式”。浏览器 Session 统一调用 `POST /api/ask`：明确问题直接查证；跨文件比较、完整性核验等复杂问题由后端自动创建异步研究任务。用户 API Key 调用 `/api/ask` 时继续保持同步答案合同；需要异步综合研究的外部客户端显式调用 `/api/research/tasks`。
 
+下游 Agent 调用 `POST /api/evidence` 获取结构化证据包。该接口不调用最终答案模型，不返回 `answer` 字段，也不允许调用者访问私有 `/knowledge/*`。调用者只有在 `status=ready` 且 `answerable=true` 时才能基于返回的 `sources` 组织结论；`missing_evidence` 非空或证据不足时必须停止自动作出规范性结论。
+
 公共 API 负责：
 
 - 浏览器 Session 或用户 API Key 鉴权；
@@ -50,7 +52,9 @@ Browser / API client
 - 亚洲/上海时区下的配额预留、结算与退款；
 - 会话、确认状态、研究任务和反馈持久化；
 - 调用私有知识服务并只返回限长、可引用的证据；
-- 证据充分时组织答案，证据不足时停止作答。
+- 通过共享证据生成层执行权威锚点、混合召回、候选合并、证据重排、缺口补检和充分性判断；
+- `/api/ask` 在证据充分时组织答案，`/api/evidence` 在答案合成前返回结构化证据；
+- 证据不足时停止作答或返回 `answerable=false`。
 
 ## 3. 统一问题处理流程
 
@@ -69,7 +73,8 @@ Request
        -> comprehensive research: reserve 3 units and create async task
      API-key /api/ask: retain synchronous answer contract
   -> private v4 retrieval and evidence review
-  -> grounded answer or insufficient-evidence result
+  -> /api/ask: grounded answer or insufficient-evidence result
+     /api/evidence: governed evidence bundle without answer synthesis
   -> quota settlement, trace and optional bounded shadow observation
 ```
 
@@ -108,6 +113,8 @@ original / governed lexical and semantic query routes
 结构保留只补充同一表格、明确编号条款族或受控章节中的必要证据。父级导航节点不可直接引用，最终答案仍必须落到可引用的叶节点、条款、表格行或官方来源记录。
 
 ## 5. 证据审查与回答
+
+直接问答与结构化证据接口只有一套证据生成实现。问题理解、T085 统一检索规划、权威锚点校验、检索、重排、最多一次缺口补检、来源裁剪和充分性判断均在共享层完成；不得为 `/api/evidence` 另建一套排序或证据规则。结构化来源包含可用的文档、内容单元和检索叶标识，以及标准号、条款、页码、短引文、检索路线和治理状态。
 
 搜到相关文件不等于已经回答问题。系统在生成答案前检查：
 

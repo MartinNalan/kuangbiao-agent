@@ -70,6 +70,8 @@ from .schemas import (
     DailyLimitUpdateRequest,
     DailyQuotaAdjustmentRequest,
     EmailCodeRequest,
+    EvidenceBundleResponse,
+    EvidenceRequest,
     FeedbackRequest,
     FeedbackResponse,
     FeedbackStatusUpdateRequest,
@@ -101,6 +103,7 @@ OPENAPI_TAGS = [
     {"name": "auth", "description": "Invite-only registration and browser session authentication."},
     {"name": "account", "description": "Current account, API keys, daily quota, and conversation history."},
     {"name": "qa", "description": "Controlled public QA API for mineral-resource standards and policies."},
+    {"name": "evidence", "description": "Structured, answer-model-independent evidence generation."},
     {"name": "research", "description": "Persistent deep-research tasks for cross-document review and comparison."},
     {"name": "catalog", "description": "Knowledge-base catalog lookup through the public API boundary."},
     {"name": "feedback", "description": "Answer-quality feedback for retrieval and KB improvement."},
@@ -1151,6 +1154,231 @@ async def ask(
         payload.retrieval_question,
         result,
         payload.filters,
+    )
+    return result
+
+
+@app.post(
+    "/api/evidence",
+    response_model=EvidenceBundleResponse,
+    tags=["evidence"],
+    summary="Generate a governed structured evidence bundle",
+    description=(
+        "Runs the same question understanding, hybrid retrieval, evidence reranking, and "
+        "sufficiency checks used by `/api/ask`, but does not call the final answer model. "
+        "The returned quotations, locators, source status, and missing-evidence fields are "
+        "intended for downstream agents that perform their own language synthesis."
+    ),
+)
+async def generate_evidence_bundle(
+    payload: EvidenceRequest,
+    http_request: Request,
+    principal: Annotated[Principal, Depends(authenticated_principal)],
+) -> EvidenceBundleResponse:
+    settings = get_settings()
+    store = get_account_store(settings)
+    started = perf_counter()
+    request_id = "req_" + uuid4().hex
+    quota_reserved = False
+    resolution: QuestionResolution | None = None
+    retrieval_question = payload.question.strip()
+
+    await enforce_rate_limit(principal.rate_limit_key)
+    if not retrieval_question:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "QUESTION_REQUIRED", "message": "question is required"},
+        )
+
+    domain_decision = domain_gate.check(retrieval_question)
+    if domain_decision.in_scope:
+        resolution = await resolve_question(
+            settings,
+            retrieval_question,
+            mode="basic",
+        )
+        if resolution_is_out_of_scope(resolution):
+            quota = None
+            if principal.user_id and principal.quota_managed:
+                snapshot = store.quota_snapshot(
+                    principal.user_id,
+                    settings.quota_timezone,
+                )
+                snapshot.update({"consumed": False, "consumed_units": 0})
+                quota = QuotaInfo(**snapshot)
+            result = EvidenceBundleResponse(
+                request_id=request_id,
+                session_id=payload.session_id or str(uuid4()),
+                question=payload.question,
+                retrieval_question=retrieval_question,
+                status="out_of_scope",
+                answerable=False,
+                limitations={
+                    "has_clause_level_evidence": False,
+                    "notes": ["问题理解阶段判定为领域外，未执行知识库检索。"],
+                },
+                confidence="low",
+                query_classification=(
+                    resolution.plan.classification.to_payload()
+                    if resolution.plan.classification
+                    else None
+                ),
+                quota=quota,
+                quota_cost=0,
+            )
+            usage_logger.write(
+                {
+                    "user_id": principal.user_id,
+                    "credential_id": principal.credential_id,
+                    "auth_type": principal.auth_type,
+                    "endpoint": "/api/evidence",
+                    "method": "POST",
+                    "client_host": http_request.client.host
+                    if http_request.client
+                    else None,
+                    "request_id": request_id,
+                    "question_chars": len(payload.question),
+                    "status": result.status,
+                    "quota_consumed": False,
+                    "quota_consumed_units": 0,
+                    "question_resolution_used": resolution.model_used,
+                    "question_resolution_error": resolution.error,
+                    "query_classification": result.query_classification,
+                    "duration_ms": round((perf_counter() - started) * 1000, 2),
+                }
+            )
+            return result
+        if resolution.requires_clarification:
+            clarification_result = clarification_response(
+                resolution,
+                session_id=payload.session_id or str(uuid4()),
+                request_id=request_id,
+                mode="basic",
+                quota=(
+                    store.quota_snapshot(principal.user_id, settings.quota_timezone)
+                    if principal.user_id and principal.quota_managed
+                    else None
+                ),
+            )
+            result = MiningQAAgent._evidence_bundle_from_response(
+                clarification_result,
+                original_question=payload.question,
+                retrieval_question=retrieval_question,
+            )
+            result.request_id = request_id
+            result.quota_cost = 0
+            usage_logger.write(
+                {
+                    "user_id": principal.user_id,
+                    "credential_id": principal.credential_id,
+                    "auth_type": principal.auth_type,
+                    "endpoint": "/api/evidence",
+                    "method": "POST",
+                    "client_host": http_request.client.host
+                    if http_request.client
+                    else None,
+                    "request_id": request_id,
+                    "question_chars": len(payload.question),
+                    "status": result.status,
+                    "quota_consumed": False,
+                    "quota_consumed_units": 0,
+                    "question_resolution_used": resolution.model_used,
+                    "question_resolution_error": resolution.error,
+                    "query_classification": result.query_classification,
+                    "duration_ms": round((perf_counter() - started) * 1000, 2),
+                }
+            )
+            return result
+
+    agent_request = AskRequest(
+        question=payload.question,
+        session_id=payload.session_id,
+        filters=payload.filters,
+    )
+    if resolution is not None:
+        agent_request._retrieval_question = primary_retrieval_question(
+            retrieval_question,
+            resolution.canonical_question,
+            resolution.plan,
+        )
+        agent_request._query_plan = resolution.plan
+        agent_request._prepared_planner_result = resolution.prepared_planner_result
+
+    if principal.user_id and principal.quota_managed and domain_decision.in_scope:
+        try:
+            store.reserve_qa_quota(
+                principal.user_id,
+                request_id,
+                "web" if principal.auth_type == "session" else "api",
+                principal.credential_id if principal.auth_type == "api_key" else None,
+                None,
+                len(payload.question),
+                settings.quota_timezone,
+                quota_units=1,
+                request_mode="basic",
+            )
+            quota_reserved = True
+        except AccountStoreError as error:
+            raise account_error(error) from error
+
+    agent = MiningQAAgent(settings)
+    try:
+        result = await agent.generate_evidence(agent_request)
+        result.request_id = request_id
+        if result.query_classification is None and resolution and resolution.plan.classification:
+            result.query_classification = resolution.plan.classification.to_payload()
+        if quota_reserved:
+            settlement_status = {
+                "ready": "answered",
+                "insufficient_evidence": "insufficient_evidence",
+                "out_of_scope": "out_of_scope",
+                "clarification_required": "out_of_scope",
+            }[result.status]
+            settlement = store.settle_qa_quota(
+                request_id,
+                settlement_status,
+                sum(len(source.quote or "") for source in result.sources),
+                settings.quota_timezone,
+            )
+            result.quota = QuotaInfo(**settlement)
+        elif principal.user_id and principal.quota_managed:
+            snapshot = store.quota_snapshot(
+                principal.user_id,
+                settings.quota_timezone,
+            )
+            snapshot.update({"consumed": False, "consumed_units": 0})
+            result.quota = QuotaInfo(**snapshot)
+    except Exception:
+        if quota_reserved:
+            store.fail_qa_quota(request_id, settings.quota_timezone)
+        raise
+    finally:
+        close_agent = getattr(agent, "aclose", None)
+        if close_agent is not None:
+            await close_agent()
+
+    usage_logger.write(
+        {
+            "user_id": principal.user_id,
+            "credential_id": principal.credential_id,
+            "auth_type": principal.auth_type,
+            "endpoint": "/api/evidence",
+            "method": "POST",
+            "client_host": http_request.client.host if http_request.client else None,
+            "request_id": request_id,
+            "question_chars": len(payload.question),
+            "status": result.status,
+            "confidence": result.confidence,
+            "has_clause_level_evidence": result.limitations.has_clause_level_evidence,
+            "source_count": len(result.sources),
+            "quota_consumed": result.quota.consumed if result.quota else False,
+            "quota_consumed_units": result.quota.consumed_units if result.quota else 0,
+            "quota_remaining": result.quota.remaining if result.quota else None,
+            "question_resolution_used": resolution.model_used if resolution else False,
+            "question_resolution_error": resolution.error if resolution else None,
+            "query_classification": result.query_classification,
+            "duration_ms": round((perf_counter() - started) * 1000, 2),
+        }
     )
     return result
 

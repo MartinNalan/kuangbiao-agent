@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 import unittest
@@ -9,9 +10,11 @@ import numpy as np
 from fastapi.testclient import TestClient
 
 from mining_qa import knowledge_service
+from mining_qa.agent import MiningQAAgent
+from mining_qa.config import Settings
 from mining_qa.knowledge_client import structural_evidence_plan
 from mining_qa.query_understanding import understand_query
-from mining_qa.schemas import KnowledgeSearchResponse, Source, StandardsResponse
+from mining_qa.schemas import AskRequest, KnowledgeSearchResponse, Source, StandardsResponse
 from mining_qa.v4_retrieval_store import FrozenQueryEmbedder
 from mining_qa.v4_retrieval_store_v2 import ResilientV4KnowledgeStore
 
@@ -59,6 +62,43 @@ class FailingEmbedder:
         raise RuntimeError("synthetic embedding outage")
 
     def close(self) -> None:
+        return None
+
+
+class InProcessKnowledgeClient:
+    def __init__(self, store: ResilientV4KnowledgeStore) -> None:
+        self.store = store
+
+    async def search(
+        self,
+        question,
+        filters,
+        plan,
+        *,
+        retrieval_round=1,
+        top_k=None,
+        allow_web_supplement=True,
+    ):
+        del retrieval_round, allow_web_supplement
+        return KnowledgeSearchResponse.model_validate(
+            self.store.search(
+                {
+                    "query": question,
+                    "filters": filters,
+                    "retrieval_plan": plan.to_payload(),
+                    "options": {"top_k": top_k or 20},
+                }
+            )
+        )
+
+    async def standards(self, params):
+        return StandardsResponse.model_validate(self.store.standards(params))
+
+    async def create_candidates(self, question, sources):
+        del question, sources
+        return 0
+
+    async def aclose(self) -> None:
         return None
 
 
@@ -218,6 +258,31 @@ class V4LocalProductionRuntimeTests(unittest.TestCase):
             [item["chunk_id"] for item in response.json()["results"]],
             case["replay"]["final_pool"],
         )
+
+    def test_shared_evidence_layer_returns_v4_sources_without_answer_model(self) -> None:
+        case = self._case("AIP001")
+        settings = Settings(
+            KNOWLEDGE_BASE_URL="http://in-process-v4.test",
+            OPENAI_API_KEY="",
+            QUERY_PLANNER_ENABLED=False,
+            EVIDENCE_RERANKER_ENABLED=False,
+            RETRIEVAL_TRACE_ENABLED=False,
+        )
+        agent = MiningQAAgent(settings)
+        agent.knowledge = InProcessKnowledgeClient(self.store)
+        try:
+            response = asyncio.run(
+                agent.generate_evidence(AskRequest(question=case["question"]))
+            )
+        finally:
+            asyncio.run(agent.aclose())
+
+        self.assertEqual(response.status, "ready")
+        self.assertTrue(response.answerable)
+        self.assertNotIn("answer", response.model_dump())
+        self.assertTrue(response.sources)
+        self.assertTrue(response.sources[0].document_id)
+        self.assertTrue(response.sources[0].chunk_id)
 
     def test_explicit_document_scope_returns_only_that_document(self) -> None:
         case = self._case("AIP001")

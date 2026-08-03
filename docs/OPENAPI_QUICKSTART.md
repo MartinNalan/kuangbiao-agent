@@ -8,6 +8,7 @@ Public deployments should expose only:
 
 - `GET /health`
 - `POST /api/ask`
+- `POST /api/evidence`
 - `POST /api/research/tasks`
 - `GET /api/research/tasks/{task_id}`
 - `GET /api/research/tasks/{task_id}/result`
@@ -107,6 +108,21 @@ curl -sS -X POST http://127.0.0.1:18080/api/ask \
 ```
 
 Free-text correction remains supported by sending a new complete `question`. The same structured selection fields may be sent to `POST /api/research/tasks` for deep mode.
+
+## Structured Evidence
+
+Use the evidence endpoint when another agent will organize the final language:
+
+```bash
+curl -sS -X POST http://127.0.0.1:18080/api/evidence \
+  -H 'Content-Type: application/json' \
+  -H 'X-API-Key: kb_live_xxx' \
+  -d '{"question":"哪个标准规定了金矿基本工程间距？"}'
+```
+
+The response has no `answer` field. Synthesize a conclusion only when `status=ready` and `answerable=true`, and use only the returned `sources`. Each source can include stable document, unit, and retrieval IDs; standard number; clause and page range; a capped quotation; retrieval routes; and governance status. `missing_evidence` identifies unresolved evidence targets. The private `/knowledge/*` service remains inaccessible to the caller.
+
+`clarification_required`, `out_of_scope`, and `insufficient_evidence` must not be converted into a normative conclusion. Submit a new complete question after clarification; `/api/evidence` does not currently accept `clarification_id` and `option_id`.
 
 ## Deep Research
 

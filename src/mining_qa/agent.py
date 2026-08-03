@@ -36,7 +36,14 @@ from .query_understanding import (
 )
 from .retrieval_planner import QueryVariant, RetrievalPlanner
 from .retrieval_trace import RetrievalTraceLogger
-from .schemas import AskRequest, AskResponse, Limitations, RetrievalStats, Source
+from .schemas import (
+    AskRequest,
+    AskResponse,
+    EvidenceBundleResponse,
+    Limitations,
+    RetrievalStats,
+    Source,
+)
 from .technical_test_hierarchy import (
     MINERAL_PROCESSING_TEST_LEVELS,
     actual_level_from_sufficiency_question,
@@ -144,12 +151,31 @@ class MiningQAAgent:
         await self.llm.aclose()
 
     async def ask(self, request: AskRequest) -> AskResponse:
+        response = await self._execute_evidence_pipeline(request, evidence_only=False)
+        if not isinstance(response, AskResponse):  # pragma: no cover - invariant guard
+            raise RuntimeError("answer pipeline returned an evidence bundle")
+        return response
+
+    async def generate_evidence(self, request: AskRequest) -> EvidenceBundleResponse:
+        """Run the governed retrieval and evidence checks without answer synthesis."""
+
+        response = await self._execute_evidence_pipeline(request, evidence_only=True)
+        if not isinstance(response, EvidenceBundleResponse):  # pragma: no cover - invariant guard
+            raise RuntimeError("evidence pipeline returned an answer")
+        return response
+
+    async def _execute_evidence_pipeline(
+        self,
+        request: AskRequest,
+        *,
+        evidence_only: bool,
+    ) -> AskResponse | EvidenceBundleResponse:
         started = perf_counter()
         trace_id = "trace_" + uuid4().hex
         session_id = request.session_id or str(uuid4())
         question = request.retrieval_question
         cache_key = self._cache_key(question)
-        if ANSWER_CACHE_ENABLED and cache_key in ANSWER_CACHE:
+        if not evidence_only and ANSWER_CACHE_ENABLED and cache_key in ANSWER_CACHE:
             cached = ANSWER_CACHE[cache_key].model_copy(deep=True)
             cached.session_id = session_id
             return cached
@@ -168,8 +194,17 @@ class MiningQAAgent:
                 confidence="low",
             )
             response.retrieval.total_ms = round((perf_counter() - started) * 1000, 3)
-            self._write_trace(trace_id, question, None, response, {})
-            return response
+            output = (
+                self._evidence_bundle_from_response(
+                    response,
+                    original_question=request.question,
+                    retrieval_question=question,
+                )
+                if evidence_only
+                else response
+            )
+            self._write_trace(trace_id, question, None, output, {})
+            return output
 
         filters = request.filters.model_dump(exclude_none=True)
         base_plan = request.query_plan or understand_query(question)
@@ -189,8 +224,17 @@ class MiningQAAgent:
                 confidence="low",
             )
             response.retrieval.total_ms = round((perf_counter() - started) * 1000, 3)
-            self._write_trace(trace_id, question, base_plan, response, {})
-            return response
+            output = (
+                self._evidence_bundle_from_response(
+                    response,
+                    original_question=request.question,
+                    retrieval_question=question,
+                )
+                if evidence_only
+                else response
+            )
+            self._write_trace(trace_id, question, base_plan, output, {})
+            return output
 
         authority_anchor = classify_authority_anchor(
             question,
@@ -206,14 +250,23 @@ class MiningQAAgent:
                 authority_decision,
                 started,
             )
+            output = (
+                self._evidence_bundle_from_response(
+                    response,
+                    original_question=request.question,
+                    retrieval_question=question,
+                )
+                if evidence_only
+                else response
+            )
             self._write_trace(
                 trace_id,
                 question,
                 base_plan,
-                response,
+                output,
                 {"authority_anchor": authority_decision.to_payload()},
             )
-            return response
+            return output
         if authority_decision.filter_standard_numbers:
             filters = dict(filters)
             if len(authority_decision.filter_standard_numbers) == 1:
@@ -242,6 +295,9 @@ class MiningQAAgent:
             }
             for variant in evidence_targets
         )
+        required_evidence_targets = [
+            variant.target for variant in evidence_targets if variant.required
+        ]
         rounds = max(1, min(2, int(self.settings.max_retrieval_rounds)))
         merged_hits: list[dict] = []
         kb_results = []
@@ -293,11 +349,22 @@ class MiningQAAgent:
                 knowledge_ms=knowledge_ms,
                 planned_query_count=len(initial_plans),
             )
+            output = (
+                self._evidence_bundle_from_response(
+                    response,
+                    original_question=request.question,
+                    retrieval_question=question,
+                    evidence_targets=required_evidence_targets,
+                    missing_evidence=required_evidence_targets,
+                )
+                if evidence_only
+                else response
+            )
             self._write_trace(
                 trace_id,
                 question,
                 plan,
-                response,
+                output,
                 self._trace_details(
                     planner_result,
                     [],
@@ -307,7 +374,7 @@ class MiningQAAgent:
                     knowledge_errors,
                 ),
             )
-            return response
+            return output
         kb_result = kb_results[0]
         use_model_evidence = semantic_evidence_required or self.reranker.needs_model(plan)
         audit_hits = self._evidence_audit_hits(
@@ -503,7 +570,11 @@ class MiningQAAgent:
         limitations = Limitations(has_clause_level_evidence=has_clause_evidence, notes=notes)
 
         if not has_usable_evidence:
-            gap_task = self.gap_tasks.create(question, domain_decision, len(sources))
+            gap_task = (
+                None
+                if evidence_only
+                else self.gap_tasks.create(question, domain_decision, len(sources))
+            )
             response = AskResponse(
                 answer=self._insufficient_answer(request.question, notes),
                 session_id=session_id,
@@ -524,6 +595,69 @@ class MiningQAAgent:
                 ),
             )
             response.retrieval.total_ms = round((perf_counter() - started) * 1000, 3)
+            missing_evidence = list(
+                dict.fromkeys(
+                    [
+                        *(rerank_result.missing_targets if rerank_result else ()),
+                        *(
+                            rerank_result.missing_evidence_groups
+                            if rerank_result
+                            else ()
+                        ),
+                    ]
+                    or required_evidence_targets
+                )
+            )
+            output = (
+                self._evidence_bundle_from_response(
+                    response,
+                    original_question=request.question,
+                    retrieval_question=question,
+                    evidence_targets=required_evidence_targets,
+                    missing_evidence=missing_evidence,
+                )
+                if evidence_only
+                else response
+            )
+            self._write_trace(
+                trace_id,
+                question,
+                plan,
+                output,
+                self._trace_details(
+                    planner_result,
+                    kb_results,
+                    rerank_result,
+                    generation_details,
+                    authority_decision,
+                    knowledge_errors,
+                ),
+            )
+            return output
+
+        if evidence_only:
+            confidence = (
+                "high"
+                if rerank_result and rerank_result.confidence >= 0.8
+                else "medium" if sources else "low"
+            )
+            response = EvidenceBundleResponse(
+                session_id=session_id,
+                question=request.question,
+                retrieval_question=question,
+                status="ready",
+                answerable=True,
+                sources=sources,
+                retrieval=retrieval,
+                limitations=limitations,
+                confidence=confidence,
+                query_classification=(
+                    plan.classification.to_payload() if plan.classification else None
+                ),
+                evidence_targets=required_evidence_targets,
+                missing_evidence=[],
+            )
+            response.retrieval.total_ms = round((perf_counter() - started) * 1000, 3)
             self._write_trace(
                 trace_id,
                 question,
@@ -533,7 +667,7 @@ class MiningQAAgent:
                     planner_result,
                     kb_results,
                     rerank_result,
-                    generation_details,
+                    {"used": False, "reason": "evidence_only"},
                     authority_decision,
                     knowledge_errors,
                 ),
@@ -1060,12 +1194,51 @@ class MiningQAAgent:
             "generation": generation or {"used": False},
         }
 
+    @staticmethod
+    def _evidence_bundle_from_response(
+        response: AskResponse,
+        *,
+        original_question: str,
+        retrieval_question: str,
+        evidence_targets: list[str] | None = None,
+        missing_evidence: list[str] | None = None,
+    ) -> EvidenceBundleResponse:
+        status_map = {
+            "answered": "ready",
+            "out_of_scope": "out_of_scope",
+            "clarification_required": "clarification_required",
+            "insufficient_evidence": "insufficient_evidence",
+            "queued_for_enrichment": "insufficient_evidence",
+        }
+        return EvidenceBundleResponse(
+            request_id=response.request_id,
+            session_id=response.session_id,
+            question=original_question,
+            retrieval_question=retrieval_question,
+            status=status_map[response.status],
+            answerable=response.status == "answered",
+            sources=response.sources,
+            retrieval=response.retrieval,
+            limitations=response.limitations,
+            confidence=response.confidence,
+            query_classification=response.query_classification,
+            evidence_targets=evidence_targets or [],
+            missing_evidence=missing_evidence or [],
+            clarification=response.clarification,
+            quota=response.quota,
+            quota_cost=(
+                0
+                if response.status in {"out_of_scope", "clarification_required"}
+                else response.quota_cost
+            ),
+        )
+
     def _write_trace(
         self,
         trace_id: str,
         question: str,
         plan: QueryPlan | None,
-        response: AskResponse,
+        response: AskResponse | EvidenceBundleResponse,
         details: dict,
     ) -> None:
         self.trace.write(
@@ -3084,13 +3257,22 @@ class MiningQAAgent:
         return "其他或需要结合上下文判断"
 
     def _source_from_hit(self, hit: dict) -> Source:
+        routes = hit.get("hit_type") or hit.get("retrieval_routes") or []
+        if isinstance(routes, str):
+            routes = [routes]
         return Source(
+            document_id=hit.get("document_id"),
+            unit_id=hit.get("unit_id") or hit.get("retrieval_unit_id"),
+            chunk_id=hit.get("chunk_id"),
             title=hit.get("title") or "未知文件",
             standard_no=hit.get("standard_no"),
             chapter=hit.get("clause_no") or hit.get("section_path") or hit.get("chapter"),
             page=hit.get("page") or hit.get("page_start"),
+            page_end=hit.get("page_end"),
+            section_path=hit.get("section_path"),
             quote=hit.get("quote") or hit.get("text"),
             score=hit.get("score"),
+            retrieval_routes=[str(route) for route in routes if str(route).strip()],
             source_type=hit.get("source_type", "unavailable"),
             text_access=hit.get("text_access", "unavailable"),
             url=hit.get("url") or hit.get("source_url"),

@@ -238,6 +238,20 @@ class AgentKnowledgeFailureTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("部分检索查询执行失败", " ".join(response.limitations.notes))
         self.assertEqual(agent.trace.rows[0]["knowledge_errors"][0]["primary"], True)
 
+    async def test_structured_evidence_mode_reuses_failure_guards_without_creating_gap_task(self) -> None:
+        agent = self._agent()
+        knowledge = _FailingKnowledge()
+        agent.knowledge = knowledge
+
+        response = await agent.generate_evidence(AskRequest(question=QUESTION))
+
+        self.assertEqual(response.status, "insufficient_evidence")
+        self.assertFalse(response.answerable)
+        self.assertEqual(response.sources, [])
+        self.assertEqual(response.retrieval.query_count, 0)
+        self.assertNotIn("answer", response.model_dump())
+        self.assertEqual(agent.gap_tasks.calls, 0)
+
 
 if __name__ == "__main__":
     unittest.main()
