@@ -16,6 +16,7 @@ from .engineering_distance import (
 )
 from .knowledge_client import KnowledgeClient
 from .llm_client import LLMClient
+from .llm_observability import llm_call_context
 from .prompt_registry import prompt_text
 from .query_understanding import (
     PROJECTION_REFERENCE_STANDARD_NUMBERS,
@@ -334,10 +335,11 @@ class ResearchPlanner:
             },
         ]
         try:
-            raw = await self.llm.complete_json(
-                messages,
-                max_tokens=self.settings.research_planner_max_tokens,
-            )
+            with llm_call_context("research_planner"):
+                raw = await self.llm.complete_json(
+                    messages,
+                    max_tokens=self.settings.research_planner_max_tokens,
+                )
             payload = json.loads(raw)
             if not isinstance(payload, dict):
                 return fallback
@@ -1028,10 +1030,11 @@ class ResearchAnalyzer:
         values = None
         for attempt in range(2):
             try:
-                raw = await self.llm.complete_json(
-                    messages,
-                    max_tokens=self.settings.research_analysis_max_tokens,
-                )
+                with llm_call_context("research_fact_extraction", attempt=attempt + 1):
+                    raw = await self.llm.complete_json(
+                        messages,
+                        max_tokens=self.settings.research_analysis_max_tokens,
+                    )
                 payload = json.loads(raw)
                 values = payload.get("facts") if isinstance(payload, dict) else None
                 if isinstance(values, list):
@@ -2443,8 +2446,9 @@ class ResearchTaskRunner:
                             ),
                         }
                     )
-                completion = await llm.complete_detailed(
-                    [
+                with llm_call_context("research_summary"):
+                    completion = await llm.complete_detailed(
+                        [
                         {
                             "role": "system",
                             "content": (
@@ -2473,10 +2477,10 @@ class ResearchTaskRunner:
                                 ensure_ascii=False,
                             ),
                         },
-                    ],
-                    max_tokens=min(700, settings.research_answer_max_tokens),
-                    temperature=settings.research_answer_temperature,
-                )
+                        ],
+                        max_tokens=min(700, settings.research_answer_max_tokens),
+                        temperature=settings.research_answer_temperature,
+                    )
                 if completion.content and self._summary_matches_scope(question, completion.content):
                     summary = completion.content
             except Exception:

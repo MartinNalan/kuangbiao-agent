@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1320" viewBox="0 0 1800 1320" role="img" aria-labelledby="title desc">
-  <title id="title">geowiki v3.1.0 系统架构与用户问答处理流程</title>
+  <title id="title">geowiki 3.2.0 与 v4 检索运行时架构</title>
   <desc id="desc">展示用户从网页或 API 提问后，经认证、问题理解、分类确认、混合检索、证据校验和回答生成的流程，以及私有知识库、模型服务、补库和运营反馈路径。</desc>
   <defs>
     <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="strokeWidth">
@@ -37,7 +37,7 @@
   </defs>
 
   <rect class="canvas" width="1800" height="1320"/>
-  <text class="title" x="70" y="62">geowiki v3.1.0 系统架构与用户问答处理流程</text>
+  <text class="title" x="70" y="62">geowiki 3.2.0 · v4 检索运行时架构</text>
   <text class="subtitle" x="70" y="92">一款专注地质领域的百科全搜 · 私有知识库受控检索，不将标准正文暴露给公网</text>
 
   <rect class="boundary" x="45" y="122" width="1710" height="1030"/>
@@ -60,7 +60,7 @@
   <rect class="api box" x="730" y="220" width="330" height="122"/>
   <text class="label" x="757" y="258">geowiki API</text>
   <text class="small" x="757" y="285">请求编排、会话、回答、来源链接</text>
-  <text class="small" x="757" y="308">基本模式 1 次 / 深度模式 3 次</text>
+  <text class="small" x="757" y="308">统一入口 · 按实际路径计次</text>
   <text class="mono" x="757" y="328">Python · FastAPI · Uvicorn</text>
 
   <rect class="neutral box" x="1125" y="220" width="245" height="122"/>
@@ -84,9 +84,9 @@
   <text class="tiny" x="752" y="524">不检索 / 不扣次数</text>
 
   <rect class="model box" x="980" y="415" width="225" height="126"/>
-  <text class="label" x="1002" y="450">2. 第一语义阶段</text>
-  <text class="small" x="1002" y="478">错别字、口语、否定纠正</text>
-  <text class="small" x="1002" y="501">意图、阶段关系、歧义</text>
+  <text class="label" x="1002" y="450">2. 理解＋候选规划</text>
+  <text class="small" x="1002" y="478">固定 Schema 前缀、错别字、意图</text>
+  <text class="small" x="1002" y="501">槽位、歧义与候选检索计划</text>
   <text class="mono" x="1002" y="524">DeepSeek Chat API</text>
 
   <rect class="api box" x="1245" y="415" width="220" height="126"/>
@@ -102,18 +102,18 @@
   <text class="tiny" x="1532" y="524">不检索、不扣次</text>
 
   <rect class="api box" x="730" y="615" width="235" height="136"/>
-  <text class="label" x="752" y="651">4. 策略化检索规划</text>
-  <text class="small" x="752" y="680">按问题分类锁定文档范围</text>
-  <text class="small" x="752" y="703">领域词典仅做分类内扩展</text>
+  <text class="label" x="752" y="651">4. 确定性计划校验</text>
+  <text class="small" x="752" y="680">分类锁定范围、校验证据完整性</text>
+  <text class="small" x="752" y="703">必要时才调用专用 Planner</text>
   <text class="tiny" x="752" y="728">标准号、文号、数值为保护条件</text>
 
   <rect class="private box" x="1010" y="590" width="430" height="190"/>
   <text class="label" x="1035" y="628">5. 私有知识库混合检索</text>
-  <text class="small" x="1035" y="657">Schema 文档过滤 + FTS 条款检索 + KG 关系扩展</text>
-  <text class="small" x="1035" y="683">ANN 语义召回 + RRF 融合排序 + 受控 MMR 去重</text>
-  <text class="small" x="1035" y="709">仅返回少量条款级证据、页码与官方来源链接</text>
-  <text class="mono" x="1035" y="742">FastAPI · SQLite/FTS5 · SQLite KG · USEARCH HNSW</text>
-  <text class="mono" x="1035" y="762">DashScope text-embedding-v4 · private SQLite / ANN index</text>
+  <text class="small" x="1035" y="657">FTS5 文档 Top-30 + 文档内关键词 Top-50</text>
+  <text class="small" x="1035" y="683">Qwen 精确余弦 Top-60 + RRF + 头部/结构保护</text>
+  <text class="small" x="1035" y="709">固定 20 条可审查候选；返回限长条款、页码和链接</text>
+  <text class="mono" x="1035" y="742">FastAPI · SQLite FTS5 · NumPy exact cosine</text>
+  <text class="mono" x="1035" y="762">qwen3.7-text-embedding 1024d · ANN 0 · KG 0</text>
 
   <rect class="model box" x="1490" y="615" width="180" height="136"/>
   <text class="label" x="1512" y="651">6. 证据校验</text>
@@ -128,7 +128,7 @@
   <text class="tiny" x="752" y="956">无证据则如实说明，不用模型常识替代</text>
 
   <rect class="api box" x="1070" y="840" width="300" height="146"/>
-  <text class="label" x="1092" y="877">深度模式：异步跨文件研究</text>
+  <text class="label" x="1092" y="877">自动综合研究：异步跨文件审查</text>
   <text class="small" x="1092" y="905">候选语料枚举、逐文件限定检索</text>
   <text class="small" x="1092" y="928">事实抽取、对比矩阵、覆盖说明</text>
   <text class="mono" x="1092" y="956">research_tasks · concurrency control</text>
@@ -149,7 +149,7 @@
   <text class="mono" x="722" y="1251">PaddleOCR · PP-StructureV3</text>
   <rect class="async box" x="1110" y="1200" width="335" height="58"/>
   <text class="small" x="1132" y="1231">候选暂存、人工审核、重建索引</text>
-  <text class="mono" x="1132" y="1251">staging · admin review · ANN rebuild</text>
+  <text class="mono" x="1132" y="1251">staging · admin review · governed release</text>
   <rect class="neutral box" x="1520" y="1200" width="205" height="58"/>
   <text class="small" x="1542" y="1231">邮件验证</text>
   <text class="mono" x="1542" y="1251">AgentMail</text>

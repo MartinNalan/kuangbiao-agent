@@ -10,6 +10,11 @@ The current single-server deployment uses:
 
 The Nginx configuration explicitly returns 404 for `/knowledge/*`.
 
+The application directory is `/opt/geowiki`. The retained Linux service user
+`kuangbiao` and systemd unit names `kuangbiao-api.service` /
+`kuangbiao-kb.service` are compatibility identifiers, not old application
+paths. Do not migrate those identities merely to rename the project.
+
 ## Current v4 production cutover
 
 The production knowledge service now runs the hash-pinned v4 runtime. For an
@@ -19,9 +24,10 @@ in-place update of that runtime, fill the ignored `.cloud.env` and run:
 bash scripts/deploy_v4_cloud.sh deploy
 ```
 
-This workflow preserves the remote `.env` values and
+This workflow preserves remote secrets, account/provider settings and
 `data/app/application.sqlite`, creates a timestamped rollback point before any
-upload, transfers only code and the explicit private v4 runtime assets,
+upload, explicitly pins the approved v4/T085 runtime switches, transfers only
+Git-tracked application code and the explicit private v4 runtime assets,
 verifies every manifest hash remotely, preloads the v4 store before changing
 the service environment, and then restarts the KB service before the public
 API. It does not upload raw PDFs, OCR sources, `.cloud.env`, Git metadata or

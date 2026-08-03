@@ -4,14 +4,16 @@
 
 ## 当前阶段
 
-当前版本为 **v3.2.0**。已具备私有知识库问答、受控 Agentic RAG、基本/深度双模式、持久化跨文档研究任务、统一问题分类与多级业务确认、大模型第一语义阶段、按证据目标拆解的复合关系检索、矿业权办事流程关系检索、邀请码与邮箱验证注册、登录会话、用户 API Key、每日次数配额、会话历史、标准目录、开发者控制台，以及由管理员审核发布的领域词典治理入口。
+当前应用版本为 **v3.2.0**，生产知识与检索运行时为 **`v4-hybrid-fixed20-p1fix-v4`**。系统已具备私有知识库问答、受控 Agentic RAG、统一问答入口、自动检索深度选择、持久化跨文档研究任务、统一问题分类与多级业务确认、大模型第一语义阶段、按证据目标拆解的复合关系检索、矿业权办事流程关系检索、邀请码与邮箱验证注册、登录会话、用户 API Key、每日次数配额、会话历史、标准目录、开发者控制台，以及由管理员审核发布的领域词典治理入口。
 
-基本模式检索链路为：认证/限流 -> 低成本领域门控 -> 当前问题与最近用户问题 -> DeepSeek 错别字校准、意图理解和歧义判断 -> 业务 Schema 校验 -> Schema/FTS/KG/ANN 混合检索 -> 证据审查 -> 最多一次补充检索 -> 受证据约束的回答。深度模式使用相同的第一语义阶段，再进入独立异步流程：研究规划 -> Schema/目录候选枚举 -> 逐文件限定检索 -> AND 证据组校验 -> 分批结构化事实抽取 -> 对比矩阵与覆盖说明。
+网页只提供一个问答入口。后端根据问题的明确程度、证据槽位和任务复杂度自动选择直接查证或异步综合研究。直接查证链路为：认证/限流 -> 低成本领域门控 -> 当前问题与最近用户问题 -> DeepSeek 错别字校准、意图理解、歧义判断与受保护规划 -> 业务 Schema 校验 -> FTS5 关键词与 Qwen 向量并行召回 -> RRF、头部保护与结构保留 -> 条款级证据审查 -> 最多一次补充检索 -> 受证据约束的回答。综合研究复用同一问题分类，再进入候选目录枚举、逐文件限定检索、AND 证据组校验、结构化事实抽取、对比矩阵和覆盖说明。
+
+当前 v4 私有语料包含 156 份文档、20,670 个内容单元和 23,250 个检索叶节点。运行时使用独立 FTS5、23,250 个持久化 `qwen3.7-text-embedding` 1024 维文档向量和精确余弦扫描；不使用 ANN 或知识图谱。私有 `/knowledge/*` 仅供后端调用，公网不得访问。
 
 ## 文档
 
 - `docs/PRD.md` - 产品需求文档
-- `docs/ARCHITECTURE.md` - 技术架构草案
+- `docs/ARCHITECTURE.md` - 当前生产与本地代码架构
 - `docs/API_SPEC.md` - 前后端与知识库接口约定
 - `docs/OPENAPI_QUICKSTART.md` - 公开 QA API 调用说明和示例
 - `docs/WIREFRAMES.md` - 页面原型说明
@@ -31,7 +33,7 @@
 
 ## 本地配置
 
-`.env` 仅用于本地模型/API 配置，不提交到 Git。
+`.env` 仅用于本地模型/API 配置，不提交到 Git。完整、与当前代码同步的模板是 `.env.example`；下面只列最关键的调用与规划项，避免复制两套配置后发生漂移。
 
 示例：
 
@@ -40,8 +42,10 @@ OPENAI_API_KEY=<your-model-api-key>
 OPENAI_BASE_URL=https://api.deepseek.com
 OPENAI_MODEL=deepseek-v4-flash
 QUESTION_RESOLUTION_ENABLED=true
-QUESTION_RESOLUTION_MAX_TOKENS=500
+QUESTION_RESOLUTION_MAX_TOKENS=900
 QUESTION_RESOLUTION_MIN_CONFIDENCE=0.55
+UNIFIED_QUERY_PLANNING_ENABLED=true
+PROMPT_LAYOUT_VARIANT=schema_prefix
 DEFINITION_ANSWER_MAX_TOKENS=1600
 RESEARCH_PLANNER_MAX_TOKENS=1000
 RESEARCH_ANALYSIS_MAX_TOKENS=1800
@@ -73,7 +77,7 @@ EMAIL_CODE_COOLDOWN_SECONDS=60
 EMAIL_CODE_DAILY_LIMIT=5
 EMAIL_DEBUG=false
 EMAIL_PROVIDER=agentmail
-AGENTMAIL_API_KEY=am_your_token
+AGENTMAIL_API_KEY=<your-agentmail-token>
 AGENTMAIL_INBOX_ID=geowiki@agentmail.to
 AGENTMAIL_BASE_URL=https://api.agentmail.to/v0
 ```
@@ -84,13 +88,9 @@ AGENTMAIL_BASE_URL=https://api.agentmail.to/v0
 
 `PROMPT_REGISTRY_ENABLED=true` 启用版本化提示词注册表。默认只加载基线提示词；`PROMPT_CALIBRATION_ENABLED=false` 时不会启用校准变体。可用 `PYTHONPATH=src .venv/bin/python scripts/evaluate_prompt_registry.py` 校验 30 条离线校准样本覆盖，再按意图小范围开启灰度。
 
-稠密向量使用阿里云百炼 `text-embedding-v4`，运行时通过 USEARCH ANN 索引检索，不再逐条解析 SQLite 中的 JSON 向量。v1.0.6 默认使用 `ANN_EXPANSION_SEARCH=64`；embedding 请求按 `EMBEDDING_BATCH_SIZE` 分批并复用连接。完成或更新 `chunk_embeddings` 后重建私有索引：
+当前 v4 稠密路线使用阿里云百炼 `qwen3.7-text-embedding`，文档向量是与语料哈希绑定的 1024 维持久化矩阵，查询时执行精确余弦 Top-60，并与关键词路线并行融合。查询 Embedding 有独立短超时、重试、内存缓存和相同并发请求合并；失败时安全退回关键词路线。当前运行时不创建或读取 ANN/KG。历史 v3 的 `text-embedding-v4`、SQLite 向量表和 USEARCH 工具仅用于回滚或历史复现实验，不是现行生产链路。
 
-```bash
-PYTHONPATH=src .venv/bin/python scripts/build_ann_index.py
-```
-
-索引默认写入 `data/knowledge_base/indexes/`，与 SQLite 知识库一样属于私有资产，不提交 Git。
+v4 语料、检索叶、FTS 和向量矩阵均属于私有运行资产，不提交 Git。其本地启动和哈希校验方法见 `docs/KNOWLEDGE_BASE_MVP_RUNBOOK.md`。
 
 本地知识库证据不足时，默认快速返回证据不足，并记录知识库缺口任务；后台后续再进行官方来源补充、OCR 和候选入库审核。若设置 `ENABLE_SYNC_WEB_SUPPLEMENT=true`，同步请求会尝试查询国家标准公开系统和自然资源标准化信息服务平台，但仍不会在缺少正文证据时生成条款级结论。
 
@@ -132,7 +132,7 @@ PYTHONPATH=src .venv/bin/python scripts/manage_accounts.py create-admin --accoun
 PYTHONPATH=src .venv/bin/python scripts/manage_accounts.py create-invite --label "第一轮内测" --admin-account admin
 ```
 
-管理员创建时会安全提示输入密码；邀请码明文只显示一次。注册用户默认每天拥有 10 个配额单位，网页问答和用户 API Key 共用。基本模式消费 1 个单位；深度模式消费 3 个单位；从同一基本答案一键升级只追加 2 个单位。领域外拒答不消费，系统异常和排队阶段取消的深度任务退回预留单位。
+管理员创建时会安全提示输入密码；邀请码明文只显示一次。注册用户默认每天拥有 10 个配额单位，网页问答和用户 API Key 共用。系统自动选择的直接查证消费 1 个单位，综合研究消费 3 个单位；兼容 API 从同一直接答案升级综合研究时只追加 2 个单位。领域外拒答不消费，系统异常和排队阶段取消的研究任务退回预留单位。
 
 管理员可以修改长期日上限，或给指定用户增加当天次数：
 
@@ -166,7 +166,7 @@ curl -X POST http://127.0.0.1:8000/api/ask \
   -d '{"question":"哪个规范规定了铁矿的推荐工程间距？"}'
 ```
 
-创建深度研究任务：
+兼容 API：显式创建综合研究任务：
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/research/tasks \
@@ -217,7 +217,7 @@ curl http://127.0.0.1:8000/api/usage -H 'X-API-Key: kb_live_xxx'
 
 ## 知识库 Mock 与回归测试
 
-在真实知识库接入前，可以用内置 mock 服务验证 API 对接：
+不加载私有 v4 运行资产时，可以用内置 mock 服务验证公共/私有 API 合同：
 
 ```bash
 PYTHONPATH=src uvicorn mining_qa.mock_kb:app --host 127.0.0.1 --port 18081
@@ -235,12 +235,13 @@ PYTHONPATH=src uvicorn mining_qa.api:app --host 127.0.0.1 --port 8000
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v
-PYTHONPATH=src .venv/bin/python scripts/evaluate_ann_recall.py
 KB_URL=http://127.0.0.1:18181 API_URL=http://127.0.0.1:18180 \
   PYTHONPATH=src .venv/bin/python scripts/run_kb_regression.py
 KB_URL=http://127.0.0.1:18181 API_URL=http://127.0.0.1:18180 \
   PYTHONPATH=src .venv/bin/python scripts/run_api_regression.py
 ```
+
+`scripts/evaluate_ann_recall.py` 只用于历史 v3/USEARCH 复现实验，不属于当前 v4 验收命令。
 
 ## 许可证与数据边界
 

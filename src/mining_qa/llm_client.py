@@ -1,9 +1,11 @@
 from dataclasses import dataclass
+from time import perf_counter
 from typing import Any
 
 import httpx
 
 from .config import Settings
+from .llm_observability import LLMUsageLedger
 
 
 @dataclass(frozen=True)
@@ -12,12 +14,16 @@ class CompletionResult:
     finish_reason: str | None = None
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
+    total_tokens: int | None = None
+    prompt_cache_hit_tokens: int | None = None
+    prompt_cache_miss_tokens: int | None = None
 
 
 class LLMClient:
     def __init__(self, settings: Settings):
         self.settings = settings
         self._client: httpx.AsyncClient | None = None
+        self._usage_ledger = LLMUsageLedger(settings)
 
     @property
     def enabled(self) -> bool:
@@ -70,20 +76,43 @@ class LLMClient:
             "Authorization": f"Bearer {self.settings.openai_api_key}",
             "Content-Type": "application/json",
         }
-        response = await self._http_client().post(
-            self.settings.chat_completions_url,
-            headers=headers,
-            json=payload,
-        )
-        response.raise_for_status()
-        data = response.json()
+        started = perf_counter()
+        try:
+            response = await self._http_client().post(
+                self.settings.chat_completions_url,
+                headers=headers,
+                json=payload,
+            )
+            response.raise_for_status()
+            data = response.json()
+        except Exception as error:
+            self._usage_ledger.write_call(
+                model=self.settings.openai_model,
+                messages=messages,
+                response_format="text",
+                latency_ms=(perf_counter() - started) * 1000,
+                success=False,
+                error_type=type(error).__name__,
+            )
+            raise
         choice = data["choices"][0]
         usage = data.get("usage") or {}
-        return CompletionResult(
-            content=choice["message"]["content"].strip(),
+        normalized_usage = self._usage_ledger.normalized_usage(usage)
+        content = choice["message"]["content"].strip()
+        self._usage_ledger.write_call(
+            model=self.settings.openai_model,
+            messages=messages,
+            response_format="text",
+            latency_ms=(perf_counter() - started) * 1000,
+            success=True,
+            usage=usage,
+            output_chars=len(content),
             finish_reason=choice.get("finish_reason"),
-            prompt_tokens=usage.get("prompt_tokens"),
-            completion_tokens=usage.get("completion_tokens"),
+        )
+        return CompletionResult(
+            content=content,
+            finish_reason=choice.get("finish_reason"),
+            **normalized_usage,
         )
 
     async def complete_json(
@@ -92,8 +121,17 @@ class LLMClient:
         *,
         max_tokens: int | None = None,
     ) -> str:
+        result = await self.complete_json_detailed(messages, max_tokens=max_tokens)
+        return result.content
+
+    async def complete_json_detailed(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_tokens: int | None = None,
+    ) -> CompletionResult:
         if not self.enabled:
-            return ""
+            return CompletionResult("")
 
         payload: dict[str, Any] = {
             "model": self.settings.openai_model,
@@ -112,12 +150,41 @@ class LLMClient:
             "Authorization": f"Bearer {self.settings.openai_api_key}",
             "Content-Type": "application/json",
         }
-        response = await self._http_client().post(
-            self.settings.chat_completions_url,
-            headers=headers,
-            json=payload,
+        started = perf_counter()
+        try:
+            response = await self._http_client().post(
+                self.settings.chat_completions_url,
+                headers=headers,
+                json=payload,
+            )
+            response.raise_for_status()
+            data = response.json()
+        except Exception as error:
+            self._usage_ledger.write_call(
+                model=self.settings.openai_model,
+                messages=messages,
+                response_format="json_object",
+                latency_ms=(perf_counter() - started) * 1000,
+                success=False,
+                error_type=type(error).__name__,
+            )
+            raise
+        choice = data["choices"][0]
+        usage = data.get("usage") or {}
+        normalized_usage = self._usage_ledger.normalized_usage(usage)
+        content = choice["message"]["content"].strip()
+        self._usage_ledger.write_call(
+            model=self.settings.openai_model,
+            messages=messages,
+            response_format="json_object",
+            latency_ms=(perf_counter() - started) * 1000,
+            success=True,
+            usage=usage,
+            output_chars=len(content),
+            finish_reason=choice.get("finish_reason"),
         )
-        response.raise_for_status()
-        data = response.json()
-
-        return data["choices"][0]["message"]["content"].strip()
+        return CompletionResult(
+            content=content,
+            finish_reason=choice.get("finish_reason"),
+            **normalized_usage,
+        )

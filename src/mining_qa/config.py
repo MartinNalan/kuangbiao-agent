@@ -55,7 +55,7 @@ class Settings(BaseSettings):
     )
     query_planner_enabled: bool = Field(default=True, alias="QUERY_PLANNER_ENABLED")
     unified_query_planning_enabled: bool = Field(
-        default=False,
+        default=True,
         alias="UNIFIED_QUERY_PLANNING_ENABLED",
     )
     parallel_query_analysis_enabled: bool = Field(
@@ -128,6 +128,24 @@ class Settings(BaseSettings):
     prompt_calibration_enabled: bool = Field(default=False, alias="PROMPT_CALIBRATION_ENABLED")
     prompt_calibration_variant: str = Field(default="baseline", alias="PROMPT_CALIBRATION_VARIANT")
     prompt_calibration_intents: str = Field(default="", alias="PROMPT_CALIBRATION_INTENTS")
+    prompt_layout_variant: str = Field(default="schema_prefix", alias="PROMPT_LAYOUT_VARIANT")
+    llm_usage_ledger_enabled: bool = Field(default=False, alias="LLM_USAGE_LEDGER_ENABLED")
+    llm_usage_ledger_path: str = Field(
+        default=str(PROJECT_ROOT / "data" / "app" / "llm_stage_usage.jsonl"),
+        alias="LLM_USAGE_LEDGER_PATH",
+    )
+    llm_usage_ledger_max_bytes: int = Field(
+        default=2 * 1024 * 1024,
+        ge=4096,
+        le=64 * 1024 * 1024,
+        alias="LLM_USAGE_LEDGER_MAX_BYTES",
+    )
+    llm_usage_ledger_backup_count: int = Field(
+        default=2,
+        ge=1,
+        le=10,
+        alias="LLM_USAGE_LEDGER_BACKUP_COUNT",
+    )
     query_planner_max_tokens: int = Field(default=600, alias="QUERY_PLANNER_MAX_TOKENS")
     evidence_reranker_max_tokens: int = Field(default=800, alias="EVIDENCE_RERANKER_MAX_TOKENS")
     answer_max_tokens: int = Field(default=1000, alias="ANSWER_MAX_TOKENS")

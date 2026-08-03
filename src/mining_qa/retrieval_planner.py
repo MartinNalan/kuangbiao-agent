@@ -7,6 +7,8 @@ from typing import Literal, get_args
 
 from .config import Settings
 from .llm_client import LLMClient
+from .llm_observability import llm_call_context
+from .prompt_layout import structured_prompt_messages, unwrap_output_schema_envelope
 from .prompt_registry import prompt_text
 from .query_understanding import (
     QueryPlan,
@@ -96,10 +98,7 @@ class RetrievalPlanner:
                 evidence_targets=self._primary_evidence_target(plan),
             )
 
-        messages = [
-            {
-                "role": "system",
-                "content": (
+        base_system = (
                     "你是 geowiki 的地质矿产知识库检索规划器，只理解问题和制定检索计划，不回答问题。"
                     "你的输出将用于搜索本地权威标准、政策、办事指南和条款，不是互联网搜索。"
                     "必须保留矿种、标准号、文号、条款号、数值、比例、勘查阶段、业务事项、责任主体和限定条件。"
@@ -139,13 +138,8 @@ class RetrievalPlanner:
                     "administrative_service_guide、amendment 中选择。"
                     "只返回符合给定结构的 JSON。"
                     "\n"
-                    f"{prompt_text(self.settings, 'retrieval_planner', primary_intent=(base_plan.classification.primary_intent if base_plan.classification else None))}"
-                ),
-            },
-            {
-                "role": "user",
-                "content": json.dumps(
-                    {
+        )
+        dynamic_payload = {
                         "question": question,
                         "deterministic_plan": {
                             "normalized_query": base_plan.normalized_query,
@@ -154,7 +148,8 @@ class RetrievalPlanner:
                             "candidate_titles": base_plan.candidate_title_terms,
                             "standard_numbers": base_plan.standard_numbers,
                         },
-                        "output_schema": {
+        }
+        output_schema = {
                             "canonical_query": "更专业且完整的检索问题",
                             "intent": "允许的意图标签",
                             "search_mode": "default|scoped|comparison|exhaustive|catalog",
@@ -179,18 +174,30 @@ class RetrievalPlanner:
                                 }
                             ],
                             "confidence": 0.0,
-                        },
-                    },
-                    ensure_ascii=False,
-                ),
-            },
-        ]
+        }
+        registry_instruction = prompt_text(
+            self.settings,
+            "retrieval_planner",
+            primary_intent=(
+                base_plan.classification.primary_intent
+                if base_plan.classification
+                else None
+            ),
+        )
+        messages = structured_prompt_messages(
+            layout=self.settings.prompt_layout_variant,
+            base_system=base_system,
+            dynamic_system_suffix=registry_instruction,
+            dynamic_payload=dynamic_payload,
+            output_schema=output_schema,
+        )
         try:
-            raw = await self.llm.complete_json(
-                messages,
-                max_tokens=self.settings.query_planner_max_tokens,
-            )
-            payload = json.loads(raw)
+            with llm_call_context("retrieval_planner"):
+                raw = await self.llm.complete_json(
+                    messages,
+                    max_tokens=self.settings.query_planner_max_tokens,
+                )
+            payload = unwrap_output_schema_envelope(json.loads(raw))
             if not isinstance(payload, dict):
                 raise ValueError("planner response must be a JSON object")
             allowed_intents = set(get_args(PlannerIntent))
@@ -316,6 +323,26 @@ class RetrievalPlanner:
             elapsed_ms=elapsed_ms,
             query_variants=variants,
             evidence_targets=variants or cls._primary_evidence_target(plan),
+        )
+
+    @staticmethod
+    def unified_result_is_complete(result: PlannerResult) -> bool:
+        """Conservatively decide whether a combined resolver plan is usable.
+
+        ``required_evidence_groups`` are AND groups.  When the combined model
+        emits more than one such group but no independent query variant, it
+        has violated the unified prompt's completeness contract.  A single
+        retrieval route may then return a plausible answer while dropping the
+        intended authoritative evidence.  In that narrow case the caller must
+        run the dedicated planner; one group, or explicit variants, remains on
+        the one-call path.
+        """
+
+        if not result.used or not result.evidence_targets:
+            return False
+        return not (
+            len(result.plan.required_evidence_groups) > 1
+            and not result.query_variants
         )
 
     @classmethod

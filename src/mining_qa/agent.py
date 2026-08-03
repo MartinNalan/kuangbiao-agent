@@ -22,6 +22,7 @@ from .execution_routing import requires_deep_research
 from .gap_tasks import KnowledgeGapTaskStore
 from .knowledge_client import KnowledgeClient
 from .llm_client import LLMClient
+from .llm_observability import llm_call_context
 from .prompt_registry import prompt_text
 from .query_understanding import (
     PROJECTION_REFERENCE_STANDARD_NUMBERS,
@@ -571,17 +572,18 @@ class MiningQAAgent:
                     else self.settings.answer_max_tokens
                 )
                 temperature = 0.0 if plan.intent == "definition_explanation" else None
-                completion = await self.llm.complete_detailed(
-                    self._messages(
-                        question,
-                        sources,
-                        limitations,
-                        plan,
-                        rerank_result.facts if rerank_result else (),
-                    ),
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                )
+                with llm_call_context("answer_generation"):
+                    completion = await self.llm.complete_detailed(
+                        self._messages(
+                            question,
+                            sources,
+                            limitations,
+                            plan,
+                            rerank_result.facts if rerank_result else (),
+                        ),
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                    )
                 answer = completion.content
                 generation_details = {
                     "used": True,
@@ -594,6 +596,17 @@ class MiningQAAgent:
                     "max_tokens": max_tokens,
                     "truncated": completion.finish_reason == "length",
                 }
+                if completion.finish_reason == "length":
+                    # A token-limited draft may end in the middle of a clause
+                    # even when the provider exposes a non-empty body.  Never
+                    # publish that fragment after the evidence gate passed;
+                    # use the same deterministic, source-only fallback as an
+                    # empty completion.
+                    answer = self._fast_answer(question, sources, plan) or self._evidence_summary_answer(sources)
+                    limitations.notes.append(
+                        "回答模型输出达到长度上限，已按审查通过的证据生成确定性答案。"
+                    )
+                    generation_details["truncated_completion_fallback"] = True
             except Exception:
                 answer = self._fast_answer(question, sources, plan) or self._evidence_summary_answer(sources)
                 limitations.notes.append("回答模型调用超时或不可用，已按审查通过的证据生成确定性降级答案。")
@@ -1227,7 +1240,8 @@ class MiningQAAgent:
             {"role": "user", "content": question},
         ]
         try:
-            payload = json.loads(await self.llm.complete_json(messages))
+            with llm_call_context("fallback_query_rewrite"):
+                payload = json.loads(await self.llm.complete_json(messages))
         except (json.JSONDecodeError, TypeError, ValueError, OSError):
             return None
         except Exception:
@@ -2950,6 +2964,20 @@ class MiningQAAgent:
                 rf"(?:^|\s)\d+(?:\.\d+)+\s+{re.escape(term)}(?=\s|[:：]|$)",
                 clean,
             ):
+                return term
+            # Some standards define a quantity in an estimation clause rather
+            # than in the terminology chapter, for example “A减去B为C”.  Treat
+            # it as direct definition evidence only when the exact requested
+            # term appears in the numbered heading and the clause body states
+            # an explicit identity ending in that same term.  Mere topical
+            # occurrence is deliberately insufficient.
+            heading_and_body = re.search(
+                rf"(?:^|\s)\d+(?:\.\d+)+\s+{re.escape(term)}(?:估算|计算|定义)?"
+                rf"(?=\s|[:：]|$).*?(?:是指|定义为|称为|为){re.escape(term)}"
+                rf"(?=\s|[。；;，,]|$)",
+                clean,
+            )
+            if heading_and_body:
                 return term
         return None
 

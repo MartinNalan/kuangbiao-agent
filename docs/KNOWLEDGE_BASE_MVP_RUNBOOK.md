@@ -2,9 +2,14 @@
 
 ## Scope
 
-This MVP implements the local/internal knowledge base service required by `docs/KNOWLEDGE_BASE_REQUIREMENTS.md`.
+This runbook contains both the current v4 startup contract and explicitly
+labelled legacy-v3 rebuild notes. Current production uses
+`v4-hybrid-fixed20-p1fix-v4`: 156 documents, 20,670 content units, 23,250
+retrieval leaves, FTS5 and a persisted Qwen 1024-dimensional vector matrix.
+It does not use ANN or a knowledge graph. Do not run the legacy rebuild steps
+against production.
 
-It uses:
+The historical v3 MVP used:
 
 - SQLite + FTS5 for structured storage and full-text retrieval.
 - Clause-level chunking for governed standards and MNR policy/law documents.
@@ -17,7 +22,7 @@ It uses:
 - MNR policy/law HTML and attachments downloaded from the official policy/law database category `矿产资源管理`.
 - Local data under `data/knowledge_base/`, which is ignored by Git.
 
-## Data Layout
+## Legacy v3 Data Layout (Historical)
 
 ```text
 data/knowledge_base/
@@ -33,7 +38,10 @@ data/knowledge_base/
 src/mining_qa/domain_lexicon.json
 ```
 
-## Rebuild The KB
+## Legacy v3 Rebuild (Historical — Do Not Use For Production)
+
+These commands are retained only to reproduce the v3 rollback asset. They do
+not build or update the active v4 corpus.
 
 ```bash
 cd /home/nalanmading/My-project/my-1st-agent
@@ -56,7 +64,7 @@ PYTHONPATH=src .venv/bin/python scripts/build_chunk_embeddings.py --reset
 
 This writes dense vectors to `chunk_embeddings` and keeps local hash vectors as fallback.
 
-Current expanded KB result:
+Historical v3 expanded result:
 
 - Documents: 388
 - Chunks: 28,104
@@ -73,7 +81,7 @@ Current expanded KB result:
 - High-value policy authority relations: `自然资规〔2023〕6号` 第十条 contains two `RESPONSIBLE_FOR` relations for `自然资源部` and `省级自然资源主管部门`.
 - Domain lexicon: first-stage JSON config seeded for `authority_responsibility`, `standard_selection`, `numeric_table_lookup`, and `clause_comparison` intents.
 
-## Verify The KB
+## Legacy v3 Regression
 
 ```bash
 cd /home/nalanmading/My-project/my-1st-agent
@@ -104,29 +112,24 @@ Health check:
 curl http://127.0.0.1:18081/knowledge/health
 ```
 
-### v4 local production shadow
+### Current v4 local production runtime
 
-The service keeps the legacy v3 store as its default and rollback path. The historical `hybrid_fixed20_v1` bundle remains frozen for T076/T077 replay. The active local v4 profile is `hybrid_fixed20_v2`, which reuses the same corpus, FTS and document vectors while adding bounded query-Embedding fallback and duplicate-query single-flight. Validate it and then select v4 explicitly:
+The current production-compatible profile is `hybrid_fixed20_v4` / `v4-hybrid-fixed20-p1fix-v4`. It retains the bounded query-Embedding fallback and duplicate-query single-flight introduced in v2, plus the accepted P1 retrieval and answerability fixes. The historical v1-v3 bundles remain frozen only for replay or rollback. Validate the hash-pinned v4 manifest, then select v4 explicitly:
 
 ```bash
 cd /home/nalanmading/My-project/my-1st-agent
-PYTHONPATH=src .venv/bin/python scripts/promote_v4_local_production_runtime.py --validate-only \
-  --runtime-id v4-hybrid-fixed20-resilient-v2 \
-  --runtime-fts data/knowledge_base_v4/runtime_private/hybrid_fixed20_v1/fts.sqlite \
-  --manifest data/knowledge_base_v4/runtime_private/hybrid_fixed20_v2/runtime_manifest.json \
-  --adapter src/mining_qa/v4_retrieval_store_v2.py \
-  --base-adapter src/mining_qa/v4_retrieval_store.py
 KNOWLEDGE_RUNTIME_VERSION=v4 \
-V4_RUNTIME_MANIFEST=data/knowledge_base_v4/runtime_private/hybrid_fixed20_v2/runtime_manifest.json \
+V4_RUNTIME_MANIFEST=data/knowledge_base_v4/runtime_private/hybrid_fixed20_v4/runtime_manifest.json \
+V4_CANDIDATE_DB_PATH=data/knowledge_base_v4/runtime_private/candidates.sqlite \
 KNOWLEDGE_REQUEST_TIMEOUT_SECONDS=20 \
 V4_EMBEDDING_TIMEOUT_SECONDS=3 \
 V4_EMBEDDING_MAX_RETRIES=1 \
-PYTHONPATH=src .venv/bin/python -m uvicorn mining_qa.knowledge_service:app --host 127.0.0.1 --port 18082
+PYTHONPATH=src .venv/bin/python -m uvicorn mining_qa.knowledge_service:app --host 127.0.0.1 --port 18081
 ```
 
-Check the selected runtime at `http://127.0.0.1:18082/knowledge/health`; `runtime_id` must be `v4-hybrid-fixed20-resilient-v2`. The v4 adapter uses the accepted keyword-plus-Qwen-vector fixed-20 route and preserves the existing Knowledge API response contract. Query Embedding has a separate short budget and falls back to keywords on failure; identical concurrent searches are computed once. It does not use an ANN index or knowledge graph.
+Check `http://127.0.0.1:18081/knowledge/health`; `runtime_id` must be `v4-hybrid-fixed20-p1fix-v4`, with 156 documents, 23,250 retrieval leaves, 23,250 vectors, `ann_available=false`, and zero knowledge-graph entities/relations. The adapter uses the accepted keyword-plus-Qwen-vector fixed-20 route and preserves the existing Knowledge API response contract. Query Embedding has a separate short budget and falls back to keywords on failure; identical concurrent searches are computed once.
 
-Rollback is explicit and immediate: stop the local shadow process, or start the service without `KNOWLEDGE_RUNTIME_VERSION=v4`; the default value is `v3`. This local switch is not authorization to edit a cloud environment, deploy v4 data or restart the online service.
+Rollback is explicit: stop the v4 process and select the retained v3 database only for a deliberate recovery operation. Do not rely on an omitted environment variable, because current production-compatible examples select v4 explicitly. Local selection is not authorization to edit a cloud environment or restart the online service.
 
 ## Connect The QA API
 
@@ -151,6 +154,7 @@ curl -X POST http://127.0.0.1:18080/api/ask \
 
 - `GET /knowledge/health`
 - `POST /knowledge/search`
+- `POST /knowledge/research/corpus`
 - `GET /knowledge/standards`
 - `GET /knowledge/documents/{document_id}`
 - `GET /knowledge/chunks/{chunk_id}`

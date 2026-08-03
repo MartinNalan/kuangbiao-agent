@@ -83,7 +83,8 @@ class UnifiedQueryPlanningTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(prepared.used)  # type: ignore[union-attr]
         self.assertEqual(len(prepared.query_variants), 2)  # type: ignore[union-attr]
         self.assertEqual(len(prepared.evidence_targets), 2)  # type: ignore[union-attr]
-        self.assertIn("subqueries", llm.messages[1]["content"])
+        self.assertIn("subqueries", llm.messages[0]["content"])
+        self.assertNotIn("subqueries", llm.messages[1]["content"])
         self.assertTrue(result.plan.planner_used)
 
     async def test_default_path_does_not_prepare_a_plan(self) -> None:
@@ -107,6 +108,44 @@ class UnifiedQueryPlanningTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(result.prepared_planner_result)
         self.assertNotIn("subqueries", llm.messages[1]["content"])
+
+    async def test_multi_group_unified_plan_without_variants_falls_back(self) -> None:
+        llm = FakeUnifiedLLM(
+            {
+                "canonical_question": "样品制备中样品损失率和缩分误差有何要求？",
+                "intent": "general",
+                "primary_intent": "technical_method",
+                "target_entity": "样品制备",
+                "document_types": ["standard"],
+                "is_ambiguous": False,
+                "confidence": 0.9,
+                "required_evidence_groups": [["样品损失率"], ["缩分误差"]],
+                "subqueries": [],
+            }
+        )
+
+        result = await QuestionResolver(self.settings(), llm=llm).resolve(
+            "样品制备过程中对样品损失率和缩分误差有何要求？"
+        )
+
+        self.assertEqual(llm.calls, 1)
+        self.assertIsNone(result.prepared_planner_result)
+        self.assertEqual(len(result.plan.required_evidence_groups), 2)
+
+    def test_single_group_unified_plan_can_keep_the_one_call_path(self) -> None:
+        question = "剩余控制经济可采储量的定义是什么？"
+        result = RetrievalPlanner.result_from_payload(
+            question,
+            understand_query(question),
+            {
+                "canonical_query": question,
+                "intent": "definition_explanation",
+                "required_evidence_groups": [["剩余控制经济可采储量"]],
+                "confidence": 0.9,
+            },
+        )
+
+        self.assertTrue(RetrievalPlanner.unified_result_is_complete(result))
 
     def test_internal_request_transports_prepared_result(self) -> None:
         request = AskRequest(question="金矿勘查间距")

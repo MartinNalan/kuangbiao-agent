@@ -10,6 +10,7 @@ import httpx
 
 from .config import Settings
 from .llm_client import LLMClient
+from .llm_observability import llm_call_context
 from .schemas import Source
 
 
@@ -106,7 +107,8 @@ class WebSupplement:
             {"role": "user", "content": question},
         ]
         try:
-            raw = await self.llm.complete_json(messages)
+            with llm_call_context("web_supplement_candidates"):
+                raw = await self.llm.complete_json(messages)
             data = json.loads(raw)
         except Exception:
             return []

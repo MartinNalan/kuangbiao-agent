@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from .config import Settings
 from .llm_client import LLMClient
+from .llm_observability import llm_call_context
 from .query_understanding import QueryPlan
 
 
@@ -185,10 +186,11 @@ class EvidenceReranker:
             },
         ]
         try:
-            raw = await self.llm.complete_json(
-                messages,
-                max_tokens=self.settings.evidence_reranker_max_tokens,
-            )
+            with llm_call_context("evidence_reranker"):
+                raw = await self.llm.complete_json(
+                    messages,
+                    max_tokens=self.settings.evidence_reranker_max_tokens,
+                )
             decision = EvidenceDecision.model_validate_json(raw)
         except (ValidationError, json.JSONDecodeError, TypeError, ValueError, OSError) as error:
             return self._with_error(fallback, started, type(error).__name__)

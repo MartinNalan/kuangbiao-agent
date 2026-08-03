@@ -15,6 +15,8 @@ from .governed_query_routing import (
     sand_gold_confirmation_options,
 )
 from .llm_client import LLMClient
+from .llm_observability import llm_call_context
+from .prompt_layout import structured_prompt_messages, unwrap_output_schema_envelope
 from .prompt_registry import prompt_text
 from .query_classification import (
     PRIMARY_INTENTS,
@@ -234,10 +236,7 @@ class QuestionResolver:
                 "standard_numbers只保留用户明确提供且未被改写的锚点。"
                 "required_evidence_groups的外层为AND、每个内层为OR。"
             )
-        messages = [
-            {
-                "role": "system",
-                "content": (
+        base_system = (
                     "你是 geowiki 的问题理解与歧义判断器，只理解问题，不回答问题，不检索标准，"
                     "服务领域是矿产资源、地质勘查、矿业权登记、储量管理、标准规范和办事指南。"
                     "先纠正常见输入错误、同音字和形近字，例如‘采矿正’应理解为‘采矿证’，"
@@ -276,20 +275,16 @@ class QuestionResolver:
                     "应判为歧义，并按实质不同的专业任务给出候选方向。"
                     f"{unified_instruction}"
                     "只返回 JSON。\n"
-                    f"{registry_instruction}"
-                ),
-            },
-            {
-                "role": "user",
-                "content": json.dumps(
-                    {
+        )
+        dynamic_payload = {
                         "question": mechanical,
                         "contextual_fallback": contextual_fallback,
                         "original_input": normalized,
                         "recent_user_questions": recent_questions,
                         "mode": mode,
                         "deterministic_plan": base_plan.to_llm_payload(),
-                        "output_schema": {
+        }
+        output_schema = {
                             "canonical_question": "问题明确时的专业化完整表达",
                             "intent": "主要业务意图",
                             "primary_intent": "统一问题分类",
@@ -320,7 +315,7 @@ class QuestionResolver:
                                     "slot_updates": {"待确认槽位": "选择后的值"},
                                 }
                             ],
-                            **(
+            **(
                                 {
                                     "search_mode": "default|scoped|comparison|exhaustive|catalog",
                                     "subject_terms": ["核心对象"],
@@ -345,18 +340,21 @@ class QuestionResolver:
                                 if self.settings.unified_query_planning_enabled
                                 else {}
                             ),
-                        },
-                    },
-                    ensure_ascii=False,
-                ),
-            },
-        ]
+        }
+        messages = structured_prompt_messages(
+            layout=self.settings.prompt_layout_variant,
+            base_system=base_system,
+            dynamic_system_suffix=registry_instruction,
+            dynamic_payload=dynamic_payload,
+            output_schema=output_schema,
+        )
         model_started = perf_counter()
         try:
-            raw = await self.llm.complete_json(
-                messages,
-                max_tokens=self.settings.question_resolution_max_tokens,
-            )
+            with llm_call_context("question_resolution"):
+                raw = await self.llm.complete_json(
+                    messages,
+                    max_tokens=self.settings.question_resolution_max_tokens,
+                )
         except (json.JSONDecodeError, TypeError, ValueError, OSError) as error:
             return QuestionResolution(
                 canonical_question=contextual_fallback,
@@ -375,8 +373,9 @@ class QuestionResolver:
             )
         model_elapsed_ms = (perf_counter() - model_started) * 1000
         try:
-            payload = ResolutionPayload.model_validate_json(raw)
-        except ValidationError as error:
+            decoded = unwrap_output_schema_envelope(json.loads(raw))
+            payload = ResolutionPayload.model_validate(decoded)
+        except (json.JSONDecodeError, ValidationError) as error:
             payload = self._recover_resolution_payload(raw, contextual_fallback)
             if payload is None:
                 return QuestionResolution(
@@ -479,6 +478,17 @@ class QuestionResolver:
                 )
             except (TypeError, ValueError):
                 prepared_planner_result = None
+            if (
+                prepared_planner_result is not None
+                and not RetrievalPlanner.unified_result_is_complete(
+                    prepared_planner_result
+                )
+            ):
+                # Keep the resolved semantic plan, but let the agent invoke the
+                # dedicated planner.  This preserves the one-call path for
+                # complete unified output and fails closed for an incomplete
+                # multi-group plan.
+                prepared_planner_result = None
             if prepared_planner_result is not None:
                 final_plan = prepared_planner_result.plan
         return QuestionResolution(
@@ -515,6 +525,9 @@ class QuestionResolver:
             value = json.loads(raw)
         except (json.JSONDecodeError, TypeError, ValueError):
             return None
+        if not isinstance(value, dict):
+            return None
+        value = unwrap_output_schema_envelope(value)
         if not isinstance(value, dict):
             return None
         interpretations: list[dict[str, object]] = []

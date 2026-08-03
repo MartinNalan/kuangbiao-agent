@@ -86,6 +86,14 @@ if [[ ! -d "${backup}" || ! -f "${backup}/application-code.tar.gz" || ! -f "${ba
 fi
 if [[ "$(id -u)" -eq 0 ]]; then sudo_cmd=(); else sudo_cmd=(sudo); fi
 "${sudo_cmd[@]}" systemctl stop kuangbiao-api.service kuangbiao-kb.service
+tar -tzf "${backup}/application-code.tar.gz" >/dev/null
+failed_state="${backup}/failed-state-$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir -p "${failed_state}"
+for candidate in src scripts deploy web schemas requirements.txt pyproject.toml; do
+  if [[ -e "${app}/${candidate}" ]]; then
+    mv "${app}/${candidate}" "${failed_state}/${candidate}"
+  fi
+done
 tar -xzf "${backup}/application-code.tar.gz" -C "${app}"
 install -m 0600 "${backup}/runtime.env" "${app}/.env"
 if [[ -f "${backup}/kuangbiao-api.service" ]]; then
@@ -204,19 +212,14 @@ echo "backup_id=${deploy_id}"
 REMOTE
 BACKUP_CREATED=true
 
-for directory in src scripts deploy web schemas; do
-  if [[ -d "${PROJECT_ROOT}/${directory}" ]]; then
-    sshpass -e rsync -az --info=stats2 -e "${RSYNC_SSH}" \
-      --exclude __pycache__/ --exclude '*.pyc' \
-      "${PROJECT_ROOT}/${directory}/" "${REMOTE}:${CLOUD_APP_DIR}/${directory}/"
-  fi
-done
-for file in requirements.txt pyproject.toml; do
-  if [[ -f "${PROJECT_ROOT}/${file}" ]]; then
-    sshpass -e rsync -az --info=stats2 -e "${RSYNC_SSH}" \
-      "${PROJECT_ROOT}/${file}" "${REMOTE}:${CLOUD_APP_DIR}/${file}"
-  fi
-done
+# Deploy only files recorded by Git.  This prevents local KB governance,
+# experimental, or unrelated untracked scripts from leaking onto production.
+(
+  cd "${PROJECT_ROOT}"
+  git ls-files -z -- src scripts deploy web schemas requirements.txt pyproject.toml \
+    | sshpass -e rsync -az --from0 --files-from=- --info=stats2 \
+        -e "${RSYNC_SSH}" ./ "${REMOTE}:${CLOUD_APP_DIR}/"
+)
 
 (
   cd "${PROJECT_ROOT}"
@@ -300,6 +303,12 @@ updates = {
     "V4_EMBEDDING_TIMEOUT_SECONDS": "3",
     "V4_EMBEDDING_MAX_RETRIES": "1",
     "V4_QUERY_EMBEDDING_CACHE_SIZE": "256",
+    "UNIFIED_QUERY_PLANNING_ENABLED": "true",
+    "PROMPT_LAYOUT_VARIANT": "schema_prefix",
+    "LLM_USAGE_LEDGER_ENABLED": "false",
+    "LLM_USAGE_LEDGER_PATH": str(Path(sys.argv[2]).parents[3] / "app" / "llm_stage_usage.jsonl"),
+    "LLM_USAGE_LEDGER_MAX_BYTES": "2097152",
+    "LLM_USAGE_LEDGER_BACKUP_COUNT": "2",
     "FAST_PATH_SHADOW_ENABLED": "true",
     "FAST_PATH_SHADOW_SAMPLE_RATE": "0.2",
     "FAST_PATH_SHADOW_LOG_PATH": str(Path(sys.argv[2]).parents[3] / "app" / "fast_path_shadow.jsonl"),
@@ -332,6 +341,27 @@ temporary = path.with_name(".env.v4-cutover.tmp")
 temporary.write_text("\n".join(result) + "\n", encoding="utf-8")
 os.chmod(temporary, 0o600)
 temporary.replace(path)
+PY
+python3 - "${app}/.env" <<'PY'
+import sys
+from pathlib import Path
+
+values = {}
+for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    stripped = line.strip()
+    if stripped and not stripped.startswith("#") and "=" in line:
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip()
+expected = {
+    "KNOWLEDGE_RUNTIME_VERSION": "v4",
+    "UNIFIED_QUERY_PLANNING_ENABLED": "true",
+    "PROMPT_LAYOUT_VARIANT": "schema_prefix",
+    "LLM_USAGE_LEDGER_ENABLED": "false",
+}
+for key, value in expected.items():
+    if values.get(key) != value:
+        raise SystemExit(f"runtime setting mismatch: {key}")
+print("t085_runtime_switches=passed")
 PY
 chown kuangbiao:kuangbiao "${app}/.env"
 install -m 0644 "${app}/deploy/systemd/kuangbiao-kb.service" /etc/systemd/system/kuangbiao-kb.service

@@ -1,135 +1,57 @@
 # External Agent API Test Guide
 
-This document is for a fresh external agent or another LAN machine to test the public API boundary of the mining standards QA service.
-
-Do not call `/knowledge/*`. Those routes are internal knowledge-base routes and are not part of the customer-facing API.
-
-## Connection
-
-Base URL:
-
-```text
-http://172.168.206.253:18080
-```
-
-Test API key:
-
-```text
-<your-api-key>
-```
-
-Authentication header:
-
-```text
-X-API-Key: <your-api-key>
-```
-
-Alternative bearer form:
-
-```text
-Authorization: Bearer <your-api-key>
-```
-
-## Health Check
+This guide tests the public GeoWiki API through Nginx. Replace the placeholders locally; never commit a production host, IP address, or API key.
 
 ```bash
-curl -sS http://172.168.206.253:18080/health
+export GEOWIKI_BASE_URL="https://<your-geowiki-host>"
+export GEOWIKI_API_KEY="<your-api-key>"
 ```
 
-Expected: JSON with `"ok": true`.
+Use only `/health` and `/api/*`. The private `/knowledge/*` routes are deliberately unavailable through the public origin.
 
-## Ask A Question
+## Health
 
 ```bash
-curl -sS -X POST http://172.168.206.253:18080/api/ask \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: <your-api-key>" \
-  -d '{"question":"我是一个大型的金矿，我的储量报告评审应该去哪个机构？"}'
+curl -sS "${GEOWIKI_BASE_URL}/health"
 ```
 
-Expected behavior:
-
-- The response should answer only with mineral-resource standards/policy scope.
-- The answer should cite `自然资规〔2023〕6号`.
-- The response should include a `session_id`.
-- Save the `session_id` if you want to submit feedback.
-
-## Query Standard Catalog
+## Ask
 
 ```bash
-curl -sS "http://172.168.206.253:18080/api/standards?standard_no=DZ/T%200205-2020&page_size=5" \
-  -H "X-API-Key: <your-api-key>"
+curl -sS -X POST "${GEOWIKI_BASE_URL}/api/ask" \
+  -H 'Content-Type: application/json' \
+  -H "X-API-Key: ${GEOWIKI_API_KEY}" \
+  -d '{"question":"金矿勘查Ⅰ类型的推荐工程间距是多少？"}'
 ```
 
-Expected: catalog items for `DZ/T 0205-2020`.
+The public browser and API use one question endpoint. A direct question returns an answer response. If a browser-session request is automatically routed to comprehensive research, the response contains `task_id`; poll `/api/research/tasks/{task_id}` and then read `/result`.
 
-## Submit Feedback
-
-Replace `SESSION_ID_FROM_ASK` with the `session_id` returned by `/api/ask`.
+If the response has `status="clarification_required"`, submit the returned identifiers without reconstructing the question locally:
 
 ```bash
-curl -sS -X POST http://172.168.206.253:18080/api/feedback \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: <your-api-key>" \
-  -d '{
-    "session_id":"SESSION_ID_FROM_ASK",
-    "rating":"satisfied",
-    "reason":"other",
-    "comment":"LAN external-agent test succeeded",
-    "question":"我是一个大型的金矿，我的储量报告评审应该去哪个机构？"
-  }'
+curl -sS -X POST "${GEOWIKI_BASE_URL}/api/ask" \
+  -H 'Content-Type: application/json' \
+  -H "X-API-Key: ${GEOWIKI_API_KEY}" \
+  -d '{"clarification_id":"clarify_xxx","option_id":"option_1"}'
 ```
 
-Expected: feedback recorded message.
-
-Allowed `rating` values:
-
-- `satisfied`
-- `unsatisfied`
-
-Allowed `reason` values:
-
-- `wrong_standard`
-- `wrong_clause`
-- `missing_evidence`
-- `quote_too_long`
-- `answer_too_vague`
-- `format_issue`
-- `other`
-
-## Check Current API Key Usage
+## Catalog
 
 ```bash
-curl -sS http://172.168.206.253:18080/api/usage \
-  -H "X-API-Key: <your-api-key>"
+curl -sS "${GEOWIKI_BASE_URL}/api/standards?standard_no=DZ/T%200205-2020&page_size=5" \
+  -H "X-API-Key: ${GEOWIKI_API_KEY}"
 ```
 
-Expected: usage counters for this test key.
+## Feedback and usage
 
-## Python Example
+```bash
+curl -sS -X POST "${GEOWIKI_BASE_URL}/api/feedback" \
+  -H 'Content-Type: application/json' \
+  -H "X-API-Key: ${GEOWIKI_API_KEY}" \
+  -d '{"session_id":"SESSION_ID_FROM_ASK","rating":"satisfied","reason":"other","comment":"External API test succeeded"}'
 
-```python
-import requests
-
-base_url = "http://172.168.206.253:18080"
-headers = {"X-API-Key": "<your-api-key>"}
-
-response = requests.post(
-    f"{base_url}/api/ask",
-    headers=headers,
-    json={"question": "大型金矿基本工程间距是多少？"},
-    timeout=90,
-)
-response.raise_for_status()
-data = response.json()
-print(data["answer"])
-print("session_id:", data["session_id"])
+curl -sS "${GEOWIKI_BASE_URL}/api/usage" \
+  -H "X-API-Key: ${GEOWIKI_API_KEY}"
 ```
 
-## Scope Rules For The External Agent
-
-- Use only `/health` and `/api/*`.
-- Do not call `/knowledge/*`.
-- Do not ask general chat questions such as `1+1=几`; this service should reject out-of-scope questions.
-- Preserve returned `session_id` for feedback.
-- Do not retry aggressively. The current LAN test limit is 100 requests per minute per key.
+Do not retry aggressively, do not call `/knowledge/*`, and do not record returned credentials or private evidence in shared logs.

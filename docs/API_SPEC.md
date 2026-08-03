@@ -59,6 +59,14 @@ Verification codes expire after 10 minutes by default. Sending is limited by per
 
 ## POST /api/ask
 
+The browser has one question entry point and always calls this endpoint. The
+server automatically returns either a synchronous `AskResponse` for direct
+verification or a `ResearchTaskResponse` for asynchronous comprehensive
+research. Clients must branch on the presence of `task_id`; users do not need
+to choose a basic/deep mode before asking. API-key callers retain the
+synchronous answer contract for compatibility, while the explicit research
+endpoints remain available below.
+
 Authentication:
 
 ```text
@@ -110,13 +118,13 @@ Authorization: Bearer your-api-key
   "retrieval": {
     "full_text_hits": 5,
     "vector_hits": 8,
-    "graph_hits": 2,
+    "graph_hits": 0,
     "web_hits": 1,
     "direct_evidence_hits": 3,
     "retrieval_rounds": 1,
     "planner_used": true,
     "reranker_used": true,
-    "ann_used": true,
+    "ann_used": false,
     "planner_ms": 4200.0,
     "knowledge_ms": 800.0,
     "reranker_ms": 9200.0,
@@ -265,7 +273,7 @@ Knowledge-gap tasks are only created for in-scope questions. Out-of-scope questi
 
 ## Deep Research Tasks
 
-Deep mode is a persistent asynchronous workflow for cross-document review, completeness checks, differences, and complex condition analysis. It does not expose private knowledge endpoints or raw KB assets.
+Comprehensive research is a persistent asynchronous workflow for cross-document review, completeness checks, differences, and complex condition analysis. The browser normally enters it automatically through `/api/ask`; these explicit task routes remain a compatibility contract for API clients. The workflow does not expose private knowledge endpoints or raw KB assets.
 
 ### Create
 
@@ -524,6 +532,9 @@ Approval requires `status=pending`, positive examples, hard-negative examples, a
 
 ## POST /api/uploads
 
+> Planned contract — not implemented in the current FastAPI application.
+> Clients must not call the upload or review routes in this section.
+
 用户上传资料。上传资料默认进入上传用户的私有库。
 
 ### Response
@@ -538,6 +549,8 @@ Approval requires `status=pending`, positive examples, hard-negative examples, a
 
 ## POST /api/uploads/{upload_id}/submit-review
 
+> Planned contract — not implemented in the current FastAPI application.
+
 用户申请将上传资料提交管理员审核。审核通过后才能进入受控服务可检索范围；知识库本体不对外公开。
 
 ### Response
@@ -550,6 +563,8 @@ Approval requires `status=pending`, positive examples, hard-negative examples, a
 ```
 
 ## POST /api/admin/reviews/{review_id}/decision
+
+> Planned contract — not implemented in the current FastAPI application.
 
 管理员审核用户上传资料。
 
@@ -575,24 +590,28 @@ Approval requires `status=pending`, positive examples, hard-negative examples, a
 
 联网补充、官方阅读器 OCR、网页解析或用户问题触发的新材料，默认进入候选暂存区。
 
-建议由知识库服务提供：
+当前知识库服务提供：
 
 ```text
 POST /knowledge/candidates
 GET /knowledge/candidates
-POST /knowledge/candidates/{candidate_id}/decision
 ```
 
-候选数据只有在管理员审核为 `approved_for_kb` 后，才能进入后台正式知识库、全文索引、向量索引或知识图谱。上述资产仍只供后台服务使用，不作为公开接口暴露。
+当前 v4 服务只实现候选创建和列表。候选暂存库不属于答案检索语料，当前也没有通过该接口自动晋级、修改正式知识库或重建索引的能力。任何候选治理和正式入库都必须经过独立、受审计的 KB 流程。
 
 ## Internal Knowledge Service Contract
 
 后端调用知识库服务时，建议先约定统一接口。These routes are internal only and should be bound to localhost, private network, service mesh, or a firewall-protected backend segment:
 
 ```text
+GET  /knowledge/health
 POST /knowledge/search
-GET /knowledge/standards
+POST /knowledge/research/corpus
+GET  /knowledge/standards
+GET  /knowledge/documents/{document_id}
+GET  /knowledge/chunks/{chunk_id}
 POST /knowledge/candidates
+GET  /knowledge/candidates
 ```
 
 返回候选证据，不直接返回最终自然语言答案。
