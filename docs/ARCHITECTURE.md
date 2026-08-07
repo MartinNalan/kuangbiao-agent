@@ -4,11 +4,11 @@
 
 ![geowiki 3.2.0 与 v4 检索运行时](SYSTEM_ARCHITECTURE_DIAGRAM.svg)
 
-本文描述当前应用代码和最近一次验收通过的生产架构。应用版本为 `3.2.0`，生产知识与检索运行时为 `v4-hybrid-fixed20-p1fix-v4`。v3 仅保留为回滚资产；当前 v4 不使用 ANN 或知识图谱。
+本文描述当前应用代码和最近一次验收通过的生产架构。应用版本为 `3.2.0`，生产知识与检索运行时为 `v4-hybrid-fixed20-p1fix-t094-v1`。v3 仅保留为回滚资产；当前 v4 不使用 ANN 或知识图谱。
 
 示意图强调组件边界，综合研究分支的连线是逻辑摘要；实际浏览器路由在知识库检索前完成。直接查证进入 v4 fixed-20 检索，综合研究则先持久化异步任务再执行受控的逐文件检索。
 
-生产状态以 `coordination/task_board.md` 的 T086 为准。T085 的 Schema 前移和统一问题理解/检索规划已于 2026-08-03 完成线上部署与独立验收；旧开关仍作为回滚路径保留。
+T094 把已接受的 fixed-20 检索算法抽取为包内生产模块，生产导入闭包不再触达历史 A/B、Gold 或旧 T090/T092 Store；运行时 Manifest 对完整导入闭包逐文件哈希。T092 的共享、版本化、失败关闭 `TechnicalSufficiencyDecision` 语义保持不变；T085 的 Schema 前移和统一问题理解/检索规划继续生效，旧部署快照仍作为回滚路径保留。
 
 ## 1. 系统边界
 
@@ -176,7 +176,7 @@ OCR 用于图片型 PDF、扫描件、官方视觉预览和复杂表格，只作
 - Redis：限流；
 - 应用目录：`/opt/geowiki`。
 
-v4 代码或运行时更新只允许使用 `scripts/deploy_v4_cloud.sh deploy`。该流程保留远端 `.env` 和应用数据库，先建立时间戳回滚点，再同步显式代码和哈希固定的 v4 资产，远端预加载通过后依次重启知识服务和公共 API。
+v4 代码或运行时更新只允许使用 `scripts/deploy_v4_cloud.sh deploy`。该流程保留远端 `.env` 和应用数据库，先建立时间戳回滚点，再同步 Git 跟踪代码和显式列出的哈希固定 v4 资产，远端预加载通过后依次重启知识服务和公共 API；失败时恢复代码、环境和旧 corpus。当前 GeoWiki 云端 Python 为 3.10，`src/sitecustomize.py` 只补齐该版本缺少的标准库 `enum.StrEnum`，在新版本 Python 上不做任何修改，也不改变 Manifest 绑定的检索或决策源码。
 
 `scripts/sync_cloud.sh` 是旧 v3 bootstrap，可能恢复 v3 数据、ANN 和旧环境，不得用于当前 v4 的日常部署。
 

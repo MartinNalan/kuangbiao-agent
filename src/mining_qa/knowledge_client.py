@@ -1,4 +1,6 @@
 from dataclasses import replace
+import hashlib
+import json
 from typing import Any
 
 import httpx
@@ -10,6 +12,63 @@ from .query_understanding import (
     understand_query,
 )
 from .schemas import KnowledgeSearchResponse, StandardsResponse
+from .technical_sufficiency_decision_t092 import (
+    TRACE_KEY as T092_DECISION_TRACE_KEY,
+    decision_payload,
+    decision_sha256,
+)
+
+
+T092_DECISION_VERSION = "t092"
+T092_DECISION_SCHEMA_VERSION = (
+    "geowiki-technical-sufficiency-decision-transport.v1"
+)
+T092_DECISION_REQUEST_KEY = "technical_sufficiency_decision"
+T092_DECISION_HANDSHAKE_KEY = "technical_sufficiency_decision_handshake"
+
+
+def _stable_json(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def build_t092_decision_envelope(
+    decision_question: str,
+    decision: Any | None,
+) -> dict[str, Any]:
+    """Build a body-free, canonical Decision envelope for the private KB API."""
+
+    question_sha256 = _sha256_text(decision_question)
+    shared_payload = decision_payload(decision) if decision is not None else None
+    shared_decision_sha256 = (
+        decision_sha256(decision) if decision is not None else None
+    )
+    transport_payload = {
+        "schema_version": T092_DECISION_SCHEMA_VERSION,
+        "decision_version": T092_DECISION_VERSION,
+        "decision_question_sha256": question_sha256,
+        "status": "accepted" if decision is not None else "not_applicable",
+        "decision_payload": shared_payload,
+        "decision_sha256": shared_decision_sha256,
+    }
+    transport_sha256 = _sha256_text(_stable_json(transport_payload))
+    return {
+        "schema_version": T092_DECISION_SCHEMA_VERSION,
+        "decision_version": T092_DECISION_VERSION,
+        "decision_question": decision_question,
+        "decision_question_sha256": question_sha256,
+        "decision_payload": shared_payload,
+        "decision_sha256": shared_decision_sha256,
+        "transport_sha256": transport_sha256,
+    }
 
 
 def is_broad_classification_question(question: str, plan: QueryPlan) -> bool:
@@ -90,6 +149,8 @@ class KnowledgeClient:
         retrieval_round: int = 1,
         top_k: int | None = None,
         allow_web_supplement: bool = True,
+        technical_decision: Any | None = None,
+        decision_question: str | None = None,
     ) -> KnowledgeSearchResponse:
         if not self.enabled:
             return KnowledgeSearchResponse(
@@ -115,6 +176,14 @@ class KnowledgeClient:
                 "retrieval_round": retrieval_round,
             },
         }
+        if (
+            self.settings.technical_sufficiency_decision_version.strip().lower()
+            == T092_DECISION_VERSION
+        ):
+            payload[T092_DECISION_REQUEST_KEY] = build_t092_decision_envelope(
+                decision_question or question,
+                technical_decision,
+            )
         url = self.settings.knowledge_base_url.rstrip("/") + "/knowledge/search"
         response = await self._http_client().post(url, json=payload)
         response.raise_for_status()

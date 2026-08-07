@@ -29,6 +29,7 @@ from .query_classification import (
 )
 from .query_understanding import (
     PROTECTED_QUERY_INTENTS,
+    RESERVE_ESTIMATION_ACTION_TERMS,
     QueryPlan,
     default_document_types,
     default_evidence_groups,
@@ -243,6 +244,12 @@ class QuestionResolver:
                     "再识别用户真正办理的事项；不得改写标准号、文号、数值或用户明确限定的对象。"
                     "最近用户问题仅用于消解省略、回答追问或恢复被误解的原始目标，当前用户的纠正优先。"
                     "出现‘与X无关、不是X、不要讨论X’时，canonical_question 必须排除X，不能继续检索X。"
+                    "必须把业务背景与实际回答目标分开：‘转采审查中、办理转采时’可以只是场景，"
+                    "不能仅因出现‘转采’就把具体技术问题改成转采总体条件。若问句真正询问的是"
+                    "勘查阶段矿石加工选冶试验的级别、规模或条件分支，应保持"
+                    "technical_stage_requirement / technical_method；只有用户询问能否转采、转采条件、"
+                    "转采应达到的总体勘查程度或报告依据时，才归入 eligibility_condition。"
+                    "‘不要回答转采总体要求、不得用转采条款替代’属于排除范围，不能正向触发转采意图。"
                     "不得使用模型记忆生成专业结论。判断歧义时关注：不同解释是否会改变目标标准、"
                     "条款范围、业务事项或最终结论。只有存在两个以上实质不同且合理的专业方向，"
                     "或缺少决定结论的关键条件时，才要求确认；不要对表达清楚的问题过度追问。"
@@ -260,13 +267,20 @@ class QuestionResolver:
                     "当用户询问‘评审备案后、领取采矿许可证前还需办理什么’时，目标是采矿权登记的"
                     "申请材料、缴费或有偿处置等待办事项，intent 应为 service_materials，不能归为"
                     "license_reference、authority_responsibility 或跨文件比较。"
+                    "必须区分两个方向：‘估算储量、提交储量、资源量转为储量应依据哪些材料’，尤其"
+                    "同时出现预可研、可研、技术经济评价、开发利用方案、初步设计或排产计划时，"
+                    "是在问储量形成和提交的技术经济依据，intent 和 primary_intent 都应为"
+                    "reserve_estimation_basis；不得改写成储量评审备案申请材料。只有问题明确询问"
+                    "‘评审备案申请要提交哪些申请材料、报件或材料清单’时，才是 service_materials。"
+                    "‘采矿权申请需要储量评审备案文件’也不能反向解释为‘储量评审备案需要哪些材料’。"
                     "intent 优先使用 authority_responsibility、service_materials、service_procedure_basis、"
                     "service_time_limit、standard_selection、definition_explanation、engineering_distance_lookup、"
-                    "projection_numeric_rule、projection_comparison、legal_responsibility、general 之一。"
+                    "projection_numeric_rule、projection_comparison、legal_responsibility、"
+                    "reserve_estimation_basis、general 之一。"
                     "同时按统一分类给出 primary_intent：standard_catalog_lookup、status_verification、"
                     "clause_lookup、definition_lookup、numeric_table_lookup、service_materials、service_workflow、"
                     "authority_jurisdiction、eligibility_condition、cross_document_comparison、document_inventory、"
-                    "technical_method 或 out_of_scope。采矿权材料问题必须抽取 application_type；"
+                    "reserve_estimation_basis、technical_method 或 out_of_scope。采矿权材料问题必须抽取 application_type；"
                     "application_type=change 时还必须抽取 change_subtype。用户已明确‘扩大范围’等子事项时"
                     "不得再次要求确认。领域词典不负责决定 primary_intent。"
                     "候选解释必须完整、互斥、仍属于地质矿产领域，并可直接作为后续知识库检索问题。"
@@ -510,8 +524,10 @@ class QuestionResolver:
         if classification is None:
             return False
         return bool(
-            classification.primary_intent in {"eligibility_condition", "technical_method"}
-            and classification.output_shape in {"condition_matrix", "requirements_and_advice"}
+            classification.primary_intent
+            in {"eligibility_condition", "reserve_estimation_basis", "technical_method"}
+            and classification.output_shape
+            in {"condition_matrix", "stage_basis_matrix", "requirements_and_advice"}
             and classification.target_entity
         )
 
@@ -728,6 +744,36 @@ class QuestionResolver:
         model_payload = payload.model_dump(mode="json")
         model_payload["primary_intent"] = model_primary
         classification = classification_from_payload(model_payload, fallback)
+        if plan.intent == "reserve_estimation_basis":
+            classification = replace(
+                classification,
+                primary_intent=fallback.primary_intent,
+                secondary_intents=fallback.secondary_intents,
+                target_entity=fallback.target_entity,
+                business_action=fallback.business_action,
+                document_types=fallback.document_types,
+                evidence_slots=fallback.evidence_slots,
+                output_shape=fallback.output_shape,
+                ambiguities=fallback.ambiguities,
+                missing_slots=fallback.missing_slots,
+            )
+        if plan.intent == "technical_stage_requirement":
+            # The model may correctly extract descriptive slots while still
+            # carrying policy document types from the surrounding transfer
+            # scenario.  Keep the fixed technical evidence contract and let
+            # the model enrich only non-routing metadata.
+            classification = replace(
+                classification,
+                primary_intent=fallback.primary_intent,
+                secondary_intents=fallback.secondary_intents,
+                target_entity=fallback.target_entity,
+                business_action=fallback.business_action,
+                document_types=fallback.document_types,
+                evidence_slots=fallback.evidence_slots,
+                output_shape=fallback.output_shape,
+                ambiguities=fallback.ambiguities,
+                missing_slots=fallback.missing_slots,
+            )
         classification = replace(
             classification,
             application_type=(
@@ -749,7 +795,7 @@ class QuestionResolver:
         classification = merge_slot_updates(classification, fallback.resolved_slots)
         if (
             classification.business_action
-            and classification.primary_intent in {"technical_method", "eligibility_condition"}
+            and classification.primary_intent == "eligibility_condition"
         ):
             classification = replace(
                 classification,
@@ -786,6 +832,7 @@ class QuestionResolver:
         legacy_intent = legacy_intent_for_primary(classification.primary_intent, plan.intent)
         if (
             plan.intent in {
+                "reserve_estimation_basis",
                 "technical_requirement_sufficiency",
                 "technical_test_conformity_verification",
                 "technical_stage_requirement",
@@ -1185,6 +1232,17 @@ class QuestionResolver:
             base_plan.intent in PROTECTED_QUERY_INTENTS
             and candidate_plan.intent != base_plan.intent
         ):
+            return False
+        if (
+            base_plan.intent == "reserve_estimation_basis"
+            and not any(
+                term in candidate_plan.normalized_query
+                for term in RESERVE_ESTIMATION_ACTION_TERMS
+            )
+        ):
+            # The rewrite must retain "reserve" as the object being formed or
+            # submitted.  Merely mentioning a feasibility report inside a
+            # filing-material question is not an equivalent relation.
             return False
         if require_missing_slot_resolution:
             if (

@@ -7,6 +7,57 @@ from typing import Any
 
 CLASSIFICATION_VERSION = "1.0"
 
+ALLOWED_DOCUMENT_TYPES = frozenset(
+    {
+        "standard",
+        "national_standard",
+        "industry_standard",
+        "policy_document",
+        "policy_attachment",
+        "law",
+        "regulation",
+        "department_rule",
+        "guidance",
+        "service_guide",
+        "administrative_service_guide",
+        "amendment",
+    }
+)
+
+
+def controlled_document_types(
+    values: Any,
+    *,
+    expand_standard: bool = False,
+    limit: int = 12,
+) -> tuple[str, ...]:
+    """Return only document-type identifiers understood by the KB runtime.
+
+    Model-facing schemas describe the values in Chinese, so a model can still
+    occasionally return labels such as ``规范性文件``.  Those labels must not
+    become exact database filters: an unknown filter would turn an otherwise
+    healthy corpus into an empty one.  Invalid values are therefore discarded
+    at every plan deserialization boundary.
+    """
+
+    if not isinstance(values, (list, tuple, set, frozenset)):
+        return ()
+    result: list[str] = []
+    for raw in values:
+        value = str(raw or "").strip()
+        if value == "standard" and expand_standard:
+            candidates = ("standard", "national_standard", "industry_standard")
+        elif value in ALLOWED_DOCUMENT_TYPES:
+            candidates = (value,)
+        else:
+            candidates = ()
+        for candidate in candidates:
+            if candidate not in result:
+                result.append(candidate)
+            if len(result) >= limit:
+                return tuple(result)
+    return tuple(result)
+
 PRIMARY_INTENTS = {
     "standard_catalog_lookup",
     "status_verification",
@@ -19,6 +70,7 @@ PRIMARY_INTENTS = {
     "eligibility_condition",
     "cross_document_comparison",
     "document_inventory",
+    "reserve_estimation_basis",
     "technical_method",
     "out_of_scope",
 }
@@ -114,6 +166,18 @@ STRATEGY_REGISTRY: dict[str, RetrievalStrategy] = {
         search_mode="exhaustive",
         deep_recommended=True,
     ),
+    "reserve_estimation_basis": RetrievalStrategy(
+        strategy_id="reserve_stage_basis",
+        document_types=("standard", "national_standard", "industry_standard", "guidance"),
+        evidence_slots=(
+            "资源量转换为储量的最低评价要求",
+            "储量形成或提交阶段",
+            "各阶段技术经济依据材料",
+            "转换因素及适用限制",
+        ),
+        output_shape="stage_basis_matrix",
+        search_mode="scoped",
+    ),
     "technical_method": RetrievalStrategy(
         strategy_id="requirements_then_advice",
         document_types=("standard", "national_standard", "industry_standard", "guidance"),
@@ -149,6 +213,7 @@ LEGACY_TO_PRIMARY = {
     "projection_comparison": "cross_document_comparison",
     "clause_comparison": "cross_document_comparison",
     "cross_document_audit": "cross_document_comparison",
+    "reserve_estimation_basis": "reserve_estimation_basis",
 }
 
 PRIMARY_TO_LEGACY = {
@@ -163,6 +228,7 @@ PRIMARY_TO_LEGACY = {
     "eligibility_condition": "general",
     "cross_document_comparison": "projection_comparison",
     "document_inventory": "related_documents",
+    "reserve_estimation_basis": "reserve_estimation_basis",
     "technical_method": "general",
     "out_of_scope": "general",
 }
@@ -335,11 +401,15 @@ def _comparison_topic(question: str) -> str | None:
 
 
 def _business_action(question: str, primary_intent: str, application_type: str | None, change_subtype: str | None) -> str | None:
+    if primary_intent == "reserve_estimation_basis":
+        return "矿产资源储量估算与提交"
     if primary_intent == "service_materials":
         if change_subtype:
             return CHANGE_SUBTYPE_LABELS[change_subtype]
         if application_type:
             return f"采矿权{APPLICATION_LABELS[application_type]}申请"
+        if any(term in question for term in ("矿产资源储量评审备案", "资源储量评审备案", "储量评审备案")):
+            return "矿产资源储量评审备案申请"
         return "采矿权申请"
     if primary_intent == "authority_jurisdiction":
         relation = extract_authority_relation(question)
@@ -350,6 +420,17 @@ def _business_action(question: str, primary_intent: str, application_type: str |
             "registration": "矿业权登记",
             "license_issuance": "许可证颁发",
         }.get(relation)
+    if primary_intent == "technical_method" and any(
+        term in question
+        for term in (
+            "矿石加工选冶技术性能",
+            "矿石选冶技术性能",
+            "选冶试验",
+            "选矿试验",
+            "试验研究程度",
+        )
+    ):
+        return "确定勘查阶段矿石加工选冶试验研究程度"
     if "转采" in question or "探矿权转采矿权" in question:
         return "探矿权转采矿权"
     return None
@@ -381,6 +462,13 @@ def build_classification(
         primary = "service_workflow"
     strategy = strategy_for(primary)
     application_type, change_subtype = extract_application_slots(question)
+    if primary == "technical_method":
+        # A transfer-to-mining phrase may be the business scenario surrounding
+        # a technical review item.  It must not turn that item into a mining-
+        # right application or leak an administrative application subtype into
+        # the technical retrieval plan.
+        application_type = None
+        change_subtype = None
     authority_relation = extract_authority_relation(question)
     missing: list[str] = []
     ambiguities: list[str] = []
@@ -416,15 +504,24 @@ def build_classification(
         secondary = ("service_workflow",)
 
     target_entity = None
-    if is_mining_right_materials:
+    if primary == "reserve_estimation_basis":
+        target_entity = "矿产资源储量估算与转换"
+    elif is_mining_right_materials:
         if change_subtype:
             target_entity = f"采矿权{CHANGE_SUBTYPE_LABELS[change_subtype]}登记"
         elif application_type:
             target_entity = f"采矿权{APPLICATION_LABELS[application_type]}登记"
         else:
             target_entity = "采矿权登记"
+    elif primary == "service_materials" and any(
+        term in question
+        for term in ("矿产资源储量评审备案", "资源储量评审备案", "储量评审备案")
+    ):
+        target_entity = "矿产资源储量评审备案"
     elif primary == "authority_jurisdiction" and authority_relation == "reserve_filing":
         target_entity = "矿产资源储量评审备案"
+    elif legacy_intent == "technical_stage_requirement":
+        target_entity = "勘查阶段矿石加工选冶试验研究程度"
 
     completed_stage = None
     target_outcome = None
@@ -434,6 +531,19 @@ def build_classification(
             completed_stage = stage_match.group(1).strip("，,。；;?？ ")[-40:]
         if any(term in question for term in ("领取采矿证", "领取采矿许可证", "取得采矿证", "取得采矿许可证")):
             target_outcome = "取得采矿许可证"
+
+    evidence_slots = strategy.evidence_slots
+    output_shape = strategy.output_shape
+    if legacy_intent == "technical_stage_requirement":
+        evidence_slots = (
+            "勘查阶段",
+            "资源量规模",
+            "矿石加工选冶难易程度",
+            "试验研究等级",
+            "矿种专项规定",
+            "例外条件",
+        )
+        output_shape = "condition_matrix"
 
     return QueryClassification(
         version=CLASSIFICATION_VERSION,
@@ -445,8 +555,8 @@ def build_classification(
         completed_stage=completed_stage,
         target_outcome=target_outcome,
         document_types=document_types or strategy.document_types,
-        evidence_slots=strategy.evidence_slots,
-        output_shape=strategy.output_shape,
+        evidence_slots=evidence_slots,
+        output_shape=output_shape,
         ambiguities=tuple(ambiguities),
         missing_slots=tuple(missing),
         confidence=confidence,
@@ -509,7 +619,9 @@ def classification_from_payload(
         business_action=_clean_optional(payload.get("business_action")) or fallback.business_action,
         completed_stage=_clean_optional(payload.get("completed_stage")) or fallback.completed_stage,
         target_outcome=_clean_optional(payload.get("target_outcome")) or fallback.target_outcome,
-        document_types=_clean_values(payload.get("document_types")) or fallback.document_types or strategy.document_types,
+        document_types=controlled_document_types(payload.get("document_types"))
+        or controlled_document_types(fallback.document_types)
+        or strategy.document_types,
         evidence_slots=_clean_values(payload.get("evidence_slots")) or fallback.evidence_slots or strategy.evidence_slots,
         output_shape=_clean_optional(payload.get("output_shape"), 80) or fallback.output_shape or strategy.output_shape,
         ambiguities=tuple(

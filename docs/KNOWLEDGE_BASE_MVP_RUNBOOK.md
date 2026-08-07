@@ -4,7 +4,7 @@
 
 This runbook contains both the current v4 startup contract and explicitly
 labelled legacy-v3 rebuild notes. Current production uses
-`v4-hybrid-fixed20-p1fix-v4`: 156 documents, 20,670 content units, 23,250
+`v4-hybrid-fixed20-p1fix-t094-v1`: 156 documents, 20,670 content units, 23,250
 retrieval leaves, FTS5 and a persisted Qwen 1024-dimensional vector matrix.
 It does not use ANN or a knowledge graph. Do not run the legacy rebuild steps
 against production.
@@ -114,12 +114,13 @@ curl http://127.0.0.1:18081/knowledge/health
 
 ### Current v4 local production runtime
 
-The current production-compatible profile is `hybrid_fixed20_v4` / `v4-hybrid-fixed20-p1fix-v4`. It retains the bounded query-Embedding fallback and duplicate-query single-flight introduced in v2, plus the accepted P1 retrieval and answerability fixes. The historical v1-v3 bundles remain frozen only for replay or rollback. Validate the hash-pinned v4 manifest, then select v4 explicitly:
+The current production profile is `hybrid_fixed20_t094_v1` / `v4-hybrid-fixed20-p1fix-t094-v1`. It retains the bounded query-Embedding fallback, duplicate-query single-flight, accepted P1 fixes and the T092 technical-sufficiency Decision shared by Agent and KB. T094 moves the accepted fixed-20 implementation into package-local production modules and binds the complete Python import closure; no historical A/B or Gold module is reachable. Historical deployment snapshots remain available for rollback. Validate the hash-pinned manifest, then select the runtime and Decision version together:
 
 ```bash
 cd /home/nalanmading/My-project/my-1st-agent
 KNOWLEDGE_RUNTIME_VERSION=v4 \
-V4_RUNTIME_MANIFEST=data/knowledge_base_v4/runtime_private/hybrid_fixed20_v4/runtime_manifest.json \
+V4_RUNTIME_MANIFEST=data/knowledge_base_v4/runtime_private/hybrid_fixed20_t094_v1/runtime_manifest.json \
+TECHNICAL_SUFFICIENCY_DECISION_VERSION=t092 \
 V4_CANDIDATE_DB_PATH=data/knowledge_base_v4/runtime_private/candidates.sqlite \
 KNOWLEDGE_REQUEST_TIMEOUT_SECONDS=20 \
 V4_EMBEDDING_TIMEOUT_SECONDS=3 \
@@ -127,7 +128,7 @@ V4_EMBEDDING_MAX_RETRIES=1 \
 PYTHONPATH=src .venv/bin/python -m uvicorn mining_qa.knowledge_service:app --host 127.0.0.1 --port 18081
 ```
 
-Check `http://127.0.0.1:18081/knowledge/health`; `runtime_id` must be `v4-hybrid-fixed20-p1fix-v4`, with 156 documents, 23,250 retrieval leaves, 23,250 vectors, `ann_available=false`, and zero knowledge-graph entities/relations. The adapter uses the accepted keyword-plus-Qwen-vector fixed-20 route and preserves the existing Knowledge API response contract. Query Embedding has a separate short budget and falls back to keywords on failure; identical concurrent searches are computed once.
+Check `http://127.0.0.1:18081/knowledge/health`; `runtime_id` must be `v4-hybrid-fixed20-p1fix-t094-v1`, with 156 documents, 23,250 retrieval leaves, 23,250 vectors, `ann_available=false`, and zero knowledge-graph entities/relations. The adapter uses the accepted keyword-plus-Qwen-vector fixed-20 route and preserves the existing Knowledge API response contract. Query Embedding has a separate short budget and falls back to keywords on failure; identical concurrent searches are computed once. A missing, tampered or version-mismatched T092 Decision envelope must stop before Embedding rather than silently falling back to an incompatible answer path. The T094 Manifest must also validate a complete package-local Python import closure with zero reachable `scripts/` files.
 
 Rollback is explicit: stop the v4 process and select the retained v3 database only for a deliberate recovery operation. Do not rely on an omitted environment variable, because current production-compatible examples select v4 explicitly. Local selection is not authorization to edit a cloud environment or restart the online service.
 

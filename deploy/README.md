@@ -15,23 +15,44 @@ The application directory is `/opt/geowiki`. The retained Linux service user
 `kuangbiao-kb.service` are compatibility identifiers, not old application
 paths. Do not migrate those identities merely to rename the project.
 
-## Current v4 production cutover
+## T094 v4 production cutover
 
-The production knowledge service now runs the hash-pinned v4 runtime. For an
-in-place update of that runtime, fill the ignored `.cloud.env` and run:
+The production deployment workflow targets
+`v4-hybrid-fixed20-p1fix-t094-v1` at
+`data/knowledge_base_v4/runtime_private/hybrid_fixed20_t094_v1/runtime_manifest.json`.
+T094 is an implementation-only extraction: it reuses the seven accepted T092
+private retrieval assets byte-for-byte and keeps
+`TECHNICAL_SUFFICIENCY_DECISION_VERSION=t092`. It does not rebuild the corpus,
+retrieval units, FTS database or document vectors.
+
+After the T094 Manifest has been built and independently accepted, fill the
+ignored `.cloud.env` and run:
 
 ```bash
 bash scripts/deploy_v4_cloud.sh deploy
 ```
 
-This workflow preserves remote secrets, account/provider settings and
-`data/app/application.sqlite`, creates a timestamped rollback point before any
-upload, explicitly pins the approved v4/T085 runtime switches, transfers only
-Git-tracked application code and the explicit private v4 runtime assets,
-verifies every manifest hash remotely, preloads the v4 store before changing
-the service environment, and then restarts the KB service before the public
-API. It does not upload raw PDFs, OCR sources, `.cloud.env`, Git metadata or
-other private source-evidence directories.
+This workflow preserves remote secrets, account/provider settings and the live
+`data/app/application.sqlite`, creates timestamped consistent SQLite and code
+rollback snapshots before any upload, and pins the T094 runtime and shared
+`TechnicalSufficiencyDecision` version as one fail-closed pair. It transfers
+only Git-tracked application code plus the explicit T094 Manifest and seven
+hash-pinned private assets. Before upload and again before remote service start,
+it recomputes and verifies `runtime_sources.python_import_closure`: the declared
+file count, every file SHA-256, bundle and closure hashes must match; the
+production closure must contain zero `scripts/` files and must not reach the
+T090 or T092 Store. Every local closure file must already be tracked by Git.
+The workflow preloads the T094 Store, then starts the private KB service before
+the public API. It also preserves and rechecks the separately hosted DeepTutor
+service. It does not upload raw PDFs, OCR sources, `.cloud.env`, Git metadata,
+Gold fixtures, evaluation reports or other private source-evidence directories.
+
+The GeoWiki cloud virtual environment currently uses Python 3.10. The tracked
+`src/sitecustomize.py` supplies only the standard-library `enum.StrEnum`
+behavior missing before Python 3.11; it is a no-op on newer interpreters. Both
+systemd units set `PYTHONPATH=/opt/geowiki/src`, so this compatibility hook is
+loaded before the hash-pinned application modules without changing retrieval
+or Decision semantics.
 
 The mutable candidate-staging endpoint uses its own v4-only SQLite file. The
 old v3 database is retained on disk solely for rollback and is not opened by
@@ -44,11 +65,12 @@ the deployment command:
 bash scripts/deploy_v4_cloud.sh rollback BACKUP_ID
 ```
 
-Rollback restores the saved service environment, code and systemd units and
-reactivates the retained v3 files. It deliberately does not overwrite the live
-application database, because doing so could discard registrations or account
-activity created after the backup; a point-in-time application-database copy
-is kept inside the rollback directory for explicit disaster recovery.
+Rollback restores the saved service environment, code, systemd units and the
+previous hash-pinned v4 corpus before restarting the services. It deliberately
+does not overwrite the live application or candidate database, because doing
+so could discard registrations, account activity or candidate review work
+created after the backup; consistent point-in-time copies are retained inside
+the rollback directory for explicit disaster recovery.
 
 ## Legacy v3 bootstrap
 

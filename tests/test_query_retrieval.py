@@ -380,7 +380,9 @@ class QueryUnderstandingTests(unittest.TestCase):
         self.assertEqual(plan.intent, "service_materials")
         self.assertIn("采矿权变更（续期）登记临时服务指南", plan.candidate_title_terms)
         self.assertNotIn("矿产资源储量评审备案", plan.candidate_title_terms)
-        self.assertIn("矿业权出让收益（价款）缴纳或有偿处置证明材料", plan.retrieval_query)
+        self.assertIn("矿业权出让收益", plan.retrieval_query)
+        self.assertIn("价款缴纳", plan.retrieval_query)
+        self.assertIn("有偿处置证明材料", plan.retrieval_query)
 
     def test_generic_mining_right_requirements_include_policy_attachment(self) -> None:
         plan = apply_semantic_plan(

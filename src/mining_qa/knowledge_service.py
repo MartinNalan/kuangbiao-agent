@@ -12,10 +12,10 @@ from fastapi.concurrency import run_in_threadpool
 from . import __version__
 from .knowledge_store import DEFAULT_DB_PATH, KnowledgeStore
 from .v4_candidate_store import V4CandidateStore
-from .v4_retrieval_store import V4KnowledgeStore
-from .v4_retrieval_store_v2 import (
+from .v4_retrieval_store_t094 import (
     DEFAULT_RUNTIME_MANIFEST,
-    ResilientV4KnowledgeStore,
+    RUNTIME_ID as T094_RUNTIME_ID,
+    T094V4KnowledgeStore,
 )
 
 
@@ -31,7 +31,7 @@ def build_store(
     runtime_version: str | None = None,
     *,
     query_embedder: Any | None = None,
-) -> KnowledgeStore | V4KnowledgeStore:
+) -> KnowledgeStore | T094V4KnowledgeStore:
     version = (runtime_version or runtime_version_from_env()).strip().lower()
     if version == "v3":
         return KnowledgeStore(db_path_from_env())
@@ -55,17 +55,9 @@ def build_store(
     )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     runtime_id = str(manifest.get("runtime_id") or "")
-    if runtime_id in {
-        "v4-hybrid-fixed20-resilient-v2",
-        "v4-hybrid-fixed20-p1fix-v3",
-        "v4-hybrid-fixed20-p1fix-v4",
-    }:
-        store_type = ResilientV4KnowledgeStore
-    elif runtime_id == "v4-hybrid-fixed20-v1":
-        store_type = V4KnowledgeStore
-    else:
+    if runtime_id != T094_RUNTIME_ID:
         raise RuntimeError(f"unsupported v4 runtime manifest: {runtime_id}")
-    return store_type(
+    return T094V4KnowledgeStore(
         manifest_path,
         query_embedder=query_embedder,
         legacy_admin_store=candidate_store,

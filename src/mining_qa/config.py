@@ -54,6 +54,10 @@ class Settings(BaseSettings):
         alias="V4_QUERY_EMBEDDING_CACHE_SIZE",
     )
     query_planner_enabled: bool = Field(default=True, alias="QUERY_PLANNER_ENABLED")
+    technical_sufficiency_decision_version: str = Field(
+        default="t090",
+        alias="TECHNICAL_SUFFICIENCY_DECISION_VERSION",
+    )
     unified_query_planning_enabled: bool = Field(
         default=True,
         alias="UNIFIED_QUERY_PLANNING_ENABLED",

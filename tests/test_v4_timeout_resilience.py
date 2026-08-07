@@ -125,25 +125,25 @@ class _TwoRoutePlanner:
 
 
 class V4EmbeddingResilienceTests(unittest.TestCase):
-    def test_p1_fix_runtime_uses_the_resilient_v2_store_contract(self) -> None:
+    def test_t094_runtime_uses_the_clean_store_contract(self) -> None:
         from mining_qa import knowledge_service
 
-        manifest = json.dumps({"runtime_id": "v4-hybrid-fixed20-p1fix-v4"})
+        manifest = json.dumps({"runtime_id": "v4-hybrid-fixed20-p1fix-t094-v1"})
         sentinel = object()
         with (
-            patch.dict(os.environ, {"V4_RUNTIME_MANIFEST": "/tmp/p1-runtime.json"}),
+            patch.dict(os.environ, {"V4_RUNTIME_MANIFEST": "/tmp/t094-runtime.json"}),
             patch.object(Path, "read_text", return_value=manifest),
             patch.object(knowledge_service, "KnowledgeStore", return_value=object()),
             patch.object(
                 knowledge_service,
-                "ResilientV4KnowledgeStore",
+                "T094V4KnowledgeStore",
                 return_value=sentinel,
-            ) as resilient_store,
+            ) as t094_store,
         ):
             result = knowledge_service.build_store("v4", query_embedder=object())
 
         self.assertIs(result, sentinel)
-        resilient_store.assert_called_once()
+        t094_store.assert_called_once()
 
     def test_embedding_timeout_budget_is_independent_from_outer_request_budget(self) -> None:
         settings = Settings(
@@ -204,6 +204,9 @@ class AgentKnowledgeFailureTests(unittest.IsolatedAsyncioTestCase):
             QUERY_PLANNER_ENABLED=False,
             EVIDENCE_RERANKER_ENABLED=False,
             RETRIEVAL_TRACE_ENABLED=False,
+            # Keep timeout behavior isolated from the separately tested T092
+            # decision-handshake contract, regardless of the developer .env.
+            TECHNICAL_SUFFICIENCY_DECISION_VERSION="t090",
         )
         agent = MiningQAAgent(settings)
         agent.trace = _TraceSink()

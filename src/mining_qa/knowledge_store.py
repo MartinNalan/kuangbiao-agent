@@ -27,6 +27,12 @@ from .domain_lexicon import (
     query_has_intent,
 )
 from .embedding_provider import EmbeddingProvider, cosine_dense, embedding_config
+from .evidence_text import (
+    contains_evidence_anchor_group,
+    extract_evidence_by_anchor_sequences,
+    split_evidence_sentences,
+)
+from .query_classification import controlled_document_types
 from .query_understanding import (
     QueryPlan,
     TRANSFER_CONDITION_TERMS,
@@ -47,6 +53,7 @@ from .technical_test_hierarchy import (
 from .technical_stage_requirements import (
     TECHNICAL_REQUIREMENT_STANDARD_NO,
     stage_requirement_clauses,
+    stage_requirement_evidence_refs,
     stage_section_from_text,
 )
 
@@ -400,21 +407,8 @@ def hydrate_official_urls(conn: sqlite3.Connection) -> None:
             )
 
 
-def split_evidence_sentences(text: str) -> list[str]:
-    clean = re.sub(r"\s+", " ", text).strip()
-    if not clean:
-        return []
-    parts = re.split(r"(?<=[。！？；;.!?])\s*|\n+", clean)
-    sentences = [part.strip() for part in parts if part.strip()]
-    if len(sentences) <= 1 and len(clean) > 120:
-        clauses = re.split(r"(?<=[，,、])\s*", clean)
-        sentences = [part.strip() for part in clauses if part.strip()]
-    return sentences or [clean]
-
-
 def quote_text(text: str, query: str = "", limit: int = QUOTE_LIMIT, max_sentences: int = 3) -> str:
     clean = re.sub(r"\s+", " ", text).strip()
-    targeted_patterns: list[str] = []
     if "无限外推" in query:
         infinite_match = re.search(r"(b\)\s*无限外推：.*?经验工程间距\s*1/2\s*尖推。)", clean)
         if infinite_match:
@@ -426,16 +420,25 @@ def quote_text(text: str, query: str = "", limit: int = QUOTE_LIMIT, max_sentenc
             )
             return quote if len(quote) <= limit else quote[:limit].rstrip() + "..."
     if any(term in query for term in ("真实性", "弄虚作假")):
-        targeted_patterns.append(r"(矿业权人应当对其报送的储量报告的真实性负责，不得弄虚作假。)")
-    if "采矿权" in query and any(term in query for term in ("申请材料", "申请资料", "资料清单", "附件4")):
-        targeted_patterns.append(
-            r"(自然资源部负责的矿业权.*?按照本通知附件2探矿权申请资料清单及要求、附件4采矿权申请资料清单及要求执行。)"
+        selected = extract_evidence_by_anchor_sequences(
+            clean,
+            (
+                (("矿业权人", "储量报告", "真实性", "弄虚作假"),),
+            ),
+            limit=limit,
         )
-    for pattern in targeted_patterns:
-        match = re.search(pattern, clean)
-        if match:
-            quote = match.group(1).strip()
-            return quote if len(quote) <= limit else quote[:limit].rstrip() + "..."
+        if selected:
+            return selected
+    if "采矿权" in query and any(term in query for term in ("申请材料", "申请资料", "资料清单", "附件4")):
+        selected = extract_evidence_by_anchor_sequences(
+            clean,
+            (
+                (("自然资源部", "矿业权", "附件2", "附件4", "执行"),),
+            ),
+            limit=limit,
+        )
+        if selected:
+            return selected
     if len(clean) <= limit:
         return clean
     priority_terms = [term for term in ["起草单位", "起草人", "发布", "实施", "代替", "替代"] if term in query]
@@ -524,20 +527,35 @@ def table_references(text: str) -> tuple[str, ...]:
 
 def transfer_evidence_quote(text: str) -> tuple[str | None, str | None]:
     clean = re.sub(r"\s+", " ", text or "").strip()
-    policy = re.search(
-        r"(探矿权转采矿权，应当依据经评审备案的矿产资源储量报告。"
-        r"资源储量规模为大型的非煤矿山、大中型煤矿应当达到勘探程度，"
-        r"其他矿山应当达到详查（含）以上程度。)",
+    policy = extract_evidence_by_anchor_sequences(
         clean,
+        (
+            (
+                ("探矿权转采矿权", "评审备案", "储量报告"),
+                ("大型", "勘探程度", "其他矿山", "详查"),
+            ),
+            (
+                (
+                    "探矿权转采矿权",
+                    "评审备案",
+                    "大型",
+                    "勘探程度",
+                    "其他矿山",
+                    "详查",
+                ),
+            ),
+        ),
     )
     if policy:
-        return policy.group(1), "二、#1"
-    report_limit = re.search(
-        r"(矿产资源储量核实报告不能替代探矿权转采矿权时应提交的地质勘查报告。)",
+        return policy, "二、#1"
+    report_limit = extract_evidence_by_anchor_sequences(
         clean,
+        (
+            (("核实报告", "不能替代", "转采矿权", "地质勘查报告"),),
+        ),
     )
     if report_limit:
-        return report_limit.group(1), "A.9.5"
+        return report_limit, "A.9.5"
     for sentence in split_evidence_sentences(clean):
         compact = re.sub(r"\s+", "", sentence)
         has_equivalent_relation = any(
@@ -559,50 +577,57 @@ def transfer_evidence_quote(text: str) -> tuple[str | None, str | None]:
 
 def authority_evidence_quote(text: str) -> tuple[str | None, str | None]:
     clean = re.sub(r"\s+", " ", text or "").strip()
-    authority = re.search(
-        r"(自然资源部负责本级已颁发勘查许可证或采矿许可证的矿产资源储量评审备案工作，"
-        r"其他由省级自然资源主管部门负责。)",
+    authority = extract_evidence_by_anchor_sequences(
         clean,
+        (
+            (("自然资源部", "本级", "许可证", "评审备案", "省级"),),
+            (
+                ("自然资源部", "本级", "许可证", "评审备案"),
+                ("省级", "自然资源主管部门", "负责"),
+            ),
+        ),
     )
     if authority:
-        return authority.group(1), "十、"
-    delegation = re.search(
-        r"(自然资源主管部门可以委托矿产资源储量评审机构根据评审备案范围和权限"
-        r"组织开展评审备案工作，相关费用按照国家有关规定执行。)",
+        return authority, "十、"
+    delegation = extract_evidence_by_anchor_sequences(
         clean,
+        (
+            (("自然资源主管部门", "委托", "评审机构", "评审备案"),),
+        ),
     )
     if delegation:
-        return delegation.group(1), "十、"
+        return delegation, "十、"
     return None, None
 
 
 def companion_resource_type_quote(text: str) -> tuple[str | None, str | None]:
     clean = re.sub(r"\s+", " ", text or "").strip()
-    intro = re.search(
-        r"(9\.2\s*当伴生矿产进行了基本分析，且研究工作达到以下程度时，"
-        r"其资源储量类型可与主要矿产相同：)",
+    intro = extract_evidence_by_anchor_sequences(
         clean,
+        (
+            (("9.2", "伴生矿产", "基本分析", "资源储量类型", "主要矿产"),),
+        ),
     )
     if intro:
-        parts = [intro.group(1)]
-        patterns = (
-            r"(a[）)]\s*地质研究程度：伴生矿产的质量、赋存状态、分布规律等达到与主要矿产相同的查明程度；)",
-            r"(b[）)]\s*矿石加工选冶试验研究程度：伴生矿产的物质组成与回收利用的加工选冶试验研究等达到与\s*主要矿产相应的查明程度；)",
-            r"(c[）)]\s*可行性评价：对伴生矿产综合回收的经济意义作出了相应评价。)",
+        parts = [intro]
+        anchor_groups = (
+            ("地质研究程度", "伴生矿产", "主要矿产", "查明程度"),
+            ("加工选冶", "伴生矿产", "主要矿产", "查明程度"),
+            ("可行性评价", "伴生矿产", "经济意义"),
         )
-        for pattern in patterns:
-            match = re.search(pattern, clean)
-            if match:
-                parts.append(match.group(1))
+        for anchors in anchor_groups:
+            match = extract_evidence_by_anchor_sequences(clean, ((anchors,),))
+            if match and match not in parts:
+                parts.append(match)
         if len(parts) >= 2:
             return " ".join(parts), "9.2"
-    for clause, pattern in (
-        ("9.3", r"(9\.3\s*当伴生矿产进行了基本分析但未能满足9\.2中其他条件时，应降低资源储量类型。)"),
-        ("9.4", r"(9\.4\s*伴生矿产只进行了组合分析而未做基本分析时，划为推断资源量。)"),
+    for clause, anchors in (
+        ("9.3", ("9.3", "伴生矿产", "基本分析", "其他条件", "降低")),
+        ("9.4", ("9.4", "伴生矿产", "组合分析", "未做基本分析", "推断资源量")),
     ):
-        match = re.search(pattern, clean)
+        match = extract_evidence_by_anchor_sequences(clean, (((*anchors,),),))
         if match:
-            return match.group(1), clause
+            return match, clause
     return None, None
 
 
@@ -1009,11 +1034,13 @@ def query_terms(query: str, plan: QueryPlan | None = None) -> list[str]:
         )
     elif effective_plan.intent == "technical_stage_requirement":
         section = stage_section_from_text(normalized_query)
+        evidence_refs = stage_requirement_evidence_refs(normalized_query)
         terms.extend(
             [
                 TECHNICAL_REQUIREMENT_STANDARD_NO,
                 section or "",
                 *stage_requirement_clauses(normalized_query),
+                *(f"{standard_no} {clause}" for standard_no, clause in evidence_refs),
                 "资源量规模",
                 "矿石加工选冶难易程度",
                 "可选性试验",
@@ -1165,9 +1192,9 @@ def query_terms(query: str, plan: QueryPlan | None = None) -> list[str]:
                 "自然资规〔2023〕6号",
                 "明确评审备案范围和权限",
                 "自然资源部",
+                "本级许可证",
                 "省级自然资源主管部门",
-                "自然资源部负责本级已颁发勘查许可证或采矿许可证",
-                "其他由省级自然资源主管部门负责",
+                "评审备案负责部门",
             ]
         )
     elif effective_plan.intent == "service_materials":
@@ -1525,9 +1552,11 @@ def row_has_legal_responsibility_evidence(row: sqlite3.Row) -> bool:
 
 def row_has_authority_evidence(row: sqlite3.Row) -> bool:
     text = re.sub(r"\s+", "", row["text"] or "")
-    return (
-        "自然资源部负责本级已颁发勘查许可证或采矿许可证" in text
-        and "其他由省级自然资源主管部门负责" in text
+    return contains_evidence_anchor_group(
+        text,
+        (
+            ("自然资源部", "本级", "许可证", "评审备案", "省级"),
+        ),
     )
 
 
@@ -1543,11 +1572,11 @@ def row_has_companion_resource_type_evidence(row: sqlite3.Row) -> bool:
     if standard_no != "GB/T25283-2023":
         return False
     return clause in {"9.2", "9.3", "9.4"} or any(
-        marker in text
-        for marker in (
-            "9.2当伴生矿产进行了基本分析",
-            "9.3当伴生矿产进行了基本分析但未能满足",
-            "9.4伴生矿产只进行了组合分析",
+        contains_evidence_anchor_group(text, (anchors,))
+        for anchors in (
+            ("9.2", "伴生矿产", "基本分析"),
+            ("9.3", "伴生矿产", "基本分析", "未能满足"),
+            ("9.4", "伴生矿产", "组合分析"),
         )
     )
 
@@ -1562,7 +1591,10 @@ def row_has_exploration_factor_evidence(row: sqlite3.Row) -> bool:
     return bool(
         re.search(r"表E\.[1-5](?:\D|$)", section)
         or clause == "E.1"
-        or "矿床勘查类型划分因素见表E.1至表E.5" in text
+        or contains_evidence_anchor_group(
+            text,
+            (("勘查类型", "划分因素", "表E.1", "表E.5"),),
+        )
     )
 
 
@@ -1637,13 +1669,15 @@ def row_has_technical_test_conformity_evidence(row: sqlite3.Row) -> bool:
 
 
 def row_has_technical_stage_requirement_evidence(row: sqlite3.Row, plan: QueryPlan) -> bool:
-    expected_clauses = set(stage_requirement_clauses(plan.normalized_query))
+    expected_refs = {
+        (re.sub(r"\s+", "", standard_no).upper(), clause)
+        for standard_no, clause in stage_requirement_evidence_refs(plan.normalized_query)
+    }
     clause = str(row["clause_no"] or "")
     standard_no = re.sub(r"\s+", "", str(row["standard_no"] or "")).upper()
     return bool(
-        expected_clauses
-        and clause in expected_clauses
-        and standard_no == TECHNICAL_REQUIREMENT_STANDARD_NO.replace(" ", "").upper()
+        expected_refs
+        and (standard_no, clause) in expected_refs
     )
 
 
@@ -1923,7 +1957,11 @@ def intent_score(row: sqlite3.Row, query: str, plan: QueryPlan | None = None) ->
             score += 2.0
         if "明确评审备案范围和权限" in section or row["clause_no"] == "十、":
             score += 4.0
-        if "自然资源部负责本级已颁发勘查许可证或采矿许可证" in text:
+        authority_evidence = contains_evidence_anchor_group(
+            text,
+            (("自然资源部", "本级", "许可证", "评审备案"),),
+        )
+        if authority_evidence:
             score += 10.0
         if "其他由省级自然资源主管部门负责" in text:
             score += 3.0
@@ -1931,7 +1969,7 @@ def intent_score(row: sqlite3.Row, query: str, plan: QueryPlan | None = None) ->
             score += 2.0
         evidence_text = " ".join([title, standard_no, section, text])
         is_target_authority_evidence = (
-            "自然资源部负责本级已颁发勘查许可证或采矿许可证" in text
+            authority_evidence
             or "明确评审备案范围和权限" in section
             or row["clause_no"] == "十、"
         )
@@ -3020,10 +3058,13 @@ class KnowledgeStore:
     ) -> None:
         if plan.intent != "technical_stage_requirement":
             return
-        clauses = stage_requirement_clauses(plan.normalized_query)
-        if not clauses:
+        refs = stage_requirement_evidence_refs(plan.normalized_query)
+        if not refs:
             return
-        placeholders = ",".join("?" for _ in clauses)
+        ref_where = " or ".join(
+            "(d.standard_no = ? and c.clause_no = ?)" for _ in refs
+        )
+        ref_params = [value for ref in refs for value in ref]
         rows = conn.execute(
             f"""
             select c.*, d.document_type, d.status, d.official_url, d.source_platform,
@@ -3032,11 +3073,10 @@ class KnowledgeStore:
             from chunks c
             join documents d on d.document_id = c.document_id
             where {' and '.join(base_where)}
-              and d.standard_no = ?
-              and c.clause_no in ({placeholders})
-            order by c.clause_no
+              and ({ref_where})
+            order by d.standard_no, c.clause_no
             """,
-            [*base_params, TECHNICAL_REQUIREMENT_STANDARD_NO, *clauses],
+            [*base_params, *ref_params],
         ).fetchall()
         for rank, row in enumerate(rows, start=1):
             self._add_candidate(candidate_rows, row, "reference", rank, 1.0)
@@ -3792,11 +3832,13 @@ class KnowledgeStore:
             for value in payload.get("standard_numbers") or []
             if str(value).strip()
         ][:20]
-        document_types = [
-            str(value).strip()
-            for value in payload.get("document_types") or []
-            if str(value).strip()
-        ][:20]
+        document_types = list(
+            controlled_document_types(
+                payload.get("document_types"),
+                expand_standard=True,
+                limit=20,
+            )
+        )
 
         where = governed_answer_document_where("")
         params: list[Any] = []

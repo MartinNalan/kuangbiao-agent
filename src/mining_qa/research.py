@@ -14,11 +14,14 @@ from .engineering_distance import (
     parse_engineering_distance_matrix,
     render_engineering_distance_answer,
 )
+from .evidence_text import extract_evidence_by_anchor_sequences
 from .knowledge_client import KnowledgeClient
 from .llm_client import LLMClient
 from .llm_observability import llm_call_context
 from .prompt_registry import prompt_text
+from .query_classification import controlled_document_types
 from .query_understanding import (
+    PROTECTED_QUERY_INTENTS,
     PROJECTION_REFERENCE_STANDARD_NUMBERS,
     QueryPlan,
     TRANSFER_ANCHOR_STANDARD_NUMBERS,
@@ -27,15 +30,23 @@ from .query_understanding import (
     default_document_types,
     default_evidence_groups,
     is_post_filing_license_steps_query,
+    is_reserve_filing_materials_query,
     normalize_user_query,
     query_plan_from_payload,
     understand_query,
 )
 from .technical_stage_requirements import (
+    ROCK_GOLD_EXPLORATION_CLAUSE,
+    ROCK_GOLD_STANDARD_NO,
+    ROCK_GOLD_STANDARD_TITLE,
+    TECHNICAL_REQUIREMENT_APPLICABILITY_CLAUSE,
     TECHNICAL_REQUIREMENT_STANDARD_NO,
     TECHNICAL_REQUIREMENT_STANDARD_TITLE,
-    stage_requirement_clauses,
+    explicit_resource_scale_from_text,
+    stage_requirement_evidence_refs,
+    stage_requirement_exception_clauses,
     stage_requirement_label,
+    stage_requirement_matrix_clauses,
 )
 from .schemas import (
     Limitations,
@@ -454,6 +465,25 @@ class ResearchPlanner:
             )
         if base.intent == "service_materials":
             fallback = ResearchPlanner._fallback(question, base)
+            if is_reserve_filing_materials_query(question):
+                return replace(
+                    plan,
+                    intent="service_materials",
+                    strategy="document_inventory",
+                    anchor_titles=fallback.anchor_titles,
+                    anchor_standard_numbers=(),
+                    corpus_title_terms=fallback.corpus_title_terms,
+                    corpus_standard_numbers=(),
+                    document_types=fallback.document_types,
+                    comparison_dimensions=fallback.comparison_dimensions,
+                    evidence_queries=fallback.evidence_queries,
+                    evidence_targets=fallback.evidence_targets,
+                    required_evidence_groups=fallback.required_evidence_groups,
+                    scope_note=(
+                        "只检索矿产资源储量评审备案服务指南中该事项自身的申请材料，"
+                        "不得用采矿权申请清单中要求提交备案文件的反向关系代替。"
+                    ),
+                )
             if is_post_filing_license_steps_query(question):
                 return replace(
                     plan,
@@ -491,6 +521,23 @@ class ResearchPlanner:
                 evidence_targets=fallback.evidence_targets,
                 required_evidence_groups=fallback.required_evidence_groups,
                 scope_note="只检索采矿权申请资料清单及要求、对应政策附件和办事指南，不按发证机关分叉。",
+            )
+        if base.intent == "reserve_estimation_basis":
+            fallback = ResearchPlanner._fallback(question, base)
+            return replace(
+                plan,
+                intent=fallback.intent,
+                strategy="requirements_matrix",
+                anchor_titles=fallback.anchor_titles,
+                anchor_standard_numbers=fallback.anchor_standard_numbers,
+                corpus_title_terms=fallback.corpus_title_terms,
+                corpus_standard_numbers=fallback.corpus_standard_numbers,
+                document_types=fallback.document_types,
+                comparison_dimensions=fallback.comparison_dimensions,
+                evidence_queries=fallback.evidence_queries,
+                evidence_targets=fallback.evidence_targets,
+                required_evidence_groups=(),
+                scope_note=fallback.scope_note,
             )
         if base.intent == "exploration_to_mining_eligibility":
             fallback = ResearchPlanner._fallback(question, base)
@@ -619,8 +666,14 @@ class ResearchPlanner:
         base_plan: QueryPlan | None = None,
     ) -> ResearchPlan:
         base = base_plan or understand_query(question)
+        technical_refs = (
+            stage_requirement_evidence_refs(base.normalized_query)
+            if base.intent == "technical_stage_requirement"
+            else ()
+        )
         requirements_matrix = ResearchPlanner._is_requirements_matrix(base)
         post_filing_steps = is_post_filing_license_steps_query(question)
+        reserve_filing_materials = is_reserve_filing_materials_query(question)
         direct_authority = (
             base.intent == "authority_responsibility"
             and not ResearchPlanner._requests_cross_document_comparison(question)
@@ -638,12 +691,29 @@ class ResearchPlanner:
             title_terms.extend(base.candidate_title_terms)
             document_types = ["standard", "national_standard", "industry_standard"]
         elif base.intent == "service_materials":
-            if post_filing_steps:
+            if reserve_filing_materials:
+                title_terms.append("矿产资源储量评审备案服务指南")
+                document_types = ["service_guide", "administrative_service_guide"]
+            elif post_filing_steps:
                 title_terms.append("采矿权变更（续期）登记临时服务指南")
                 document_types = ["service_guide", "administrative_service_guide"]
             else:
                 title_terms.append("采矿权申请资料清单及要求")
                 document_types = list(default_document_types("service_materials"))
+        elif base.intent == "reserve_estimation_basis":
+            title_terms.extend(
+                [
+                    "固体矿产资源储量分类",
+                    "固体矿产资源储量核实报告编写规范",
+                    "矿产资源储量技术标准解读300问",
+                ]
+            )
+            document_types = [
+                "standard",
+                "national_standard",
+                "industry_standard",
+                "guidance",
+            ]
         elif base.intent == "exploration_to_mining_eligibility":
             title_terms.append("矿产地质勘查规范")
             document_types = [
@@ -658,6 +728,8 @@ class ResearchPlanner:
             ]
         elif base.intent == "technical_stage_requirement":
             title_terms.append(TECHNICAL_REQUIREMENT_STANDARD_TITLE)
+            if any(standard_no == ROCK_GOLD_STANDARD_NO for standard_no, _ in technical_refs):
+                title_terms.append(ROCK_GOLD_STANDARD_TITLE)
             document_types = ["standard", "national_standard", "industry_standard"]
         elif any(term in question for term in ("分矿种规范", "单矿种规范", "各矿种规范", "矿种勘查规范")):
             title_terms.append("矿产地质勘查规范")
@@ -678,7 +750,12 @@ class ResearchPlanner:
                 "department_rule",
                 "guidance",
             ]
-        if requirements_matrix and base.classification and base.classification.business_action:
+        if (
+            requirements_matrix
+            and base.intent != "reserve_estimation_basis"
+            and base.classification
+            and base.classification.business_action
+        ):
             document_types = list(
                 dict.fromkeys(
                     (
@@ -702,18 +779,18 @@ class ResearchPlanner:
         )
         evidence_queries = (base.retrieval_query or base.normalized_query,)
         required_evidence_groups: tuple[tuple[str, ...], ...] = ()
+        technical_evidence_targets: list[dict[str, Any]] | None = None
         if direct_authority:
             dimensions = ("责任部门", "权限事项", "许可证颁发机关条件", "适用范围")
             evidence_queries = (
                 "自然资规〔2023〕6号 矿产资源储量评审备案范围和权限 "
-                "自然资源部负责本级已颁发勘查许可证或采矿许可证 "
-                "其他由省级自然资源主管部门负责",
+                "自然资源部 本级许可证 省级自然资源主管部门 负责",
             )
             required_evidence_groups = (
                 ("矿产资源储量评审备案", "评审备案范围和权限"),
                 (
-                    "自然资源部负责本级已颁发勘查许可证或采矿许可证",
-                    "其他由省级自然资源主管部门负责",
+                    "自然资源部 本级许可证",
+                    "省级自然资源主管部门 负责",
                 ),
             )
         elif direct_engineering_distance:
@@ -730,11 +807,21 @@ class ResearchPlanner:
                 ("倾斜", "倾 斜"),
             )
         elif base.intent == "service_materials":
-            if post_filing_steps:
+            if reserve_filing_materials:
+                dimensions = ("申请材料名称", "材料内容", "附图附表附件", "适用事项")
+                evidence_queries = (
+                    "矿产资源储量评审备案服务指南 申请材料 申请函 矿产资源储量信息表",
+                    "矿产资源储量报告 附图 附表 附件",
+                )
+                required_evidence_groups = (
+                    ("申请函", "矿产资源储量信息表", "矿产资源储量报告"),
+                    ("申请材料", "材料名称", "附图", "附表", "附件"),
+                )
+            elif post_filing_steps:
                 dimensions = ("下一步办理事项", "对应申请材料", "适用条件", "缴费或有偿处置")
                 evidence_queries = (
                     "采矿权变更（续期）登记 申请材料目录 采矿权登记申请书 矿产资源储量评审备案文件",
-                    "矿业权出让收益（价款）缴纳或有偿处置证明材料",
+                    "矿业权出让收益 价款缴纳 有偿处置证明材料",
                 )
                 required_evidence_groups = (
                     ("申请材料目录", "采矿权登记申请书"),
@@ -749,6 +836,20 @@ class ResearchPlanner:
                     f"采矿权{application or ''}申请 表中标记 要求 提交形式",
                 )
                 required_evidence_groups = default_evidence_groups("service_materials")
+        elif base.intent == "reserve_estimation_basis":
+            dimensions = (
+                "资源量转换为储量的最低评价要求",
+                "勘查阶段提交储量的依据",
+                "矿山建设阶段提交储量的依据",
+                "正常生产和长期停产阶段的依据",
+                "转换因素及适用限制",
+            )
+            evidence_queries = (
+                "资源量转换为储量 至少经过预可行性研究 与之相当的技术经济评价 转换因素",
+                "提交储量 勘查阶段 矿山建设阶段 正常生产阶段 停产超过3年 "
+                "可行性研究 开发利用方案 初步设计 排产计划",
+            )
+            required_evidence_groups = ()
         elif base.intent == "exploration_to_mining_eligibility":
             dimensions = (
                 "一般转采条件",
@@ -764,23 +865,74 @@ class ResearchPlanner:
             required_evidence_groups = ()
         elif base.intent == "technical_stage_requirement":
             stage_label = stage_requirement_label(base.normalized_query)
-            clauses = stage_requirement_clauses(base.normalized_query)
+            matrix_clauses = stage_requirement_matrix_clauses(base.normalized_query)
+            exception_clauses = stage_requirement_exception_clauses(base.normalized_query)
+            applicability_clauses = tuple(
+                clause
+                for standard_no, clause in technical_refs
+                if standard_no == TECHNICAL_REQUIREMENT_STANDARD_NO
+                and clause == TECHNICAL_REQUIREMENT_APPLICABILITY_CLAUSE
+            )
             dimensions = (
                 "资源量规模",
                 "矿石加工选冶难易程度",
                 "工艺矿物学研究程度",
                 "矿石加工选冶试验或物化性能测试要求",
             )
-            evidence_queries = (
-                " ".join(
+            matrix_query = " ".join(
+                (
+                    TECHNICAL_REQUIREMENT_STANDARD_NO,
+                    stage_label,
+                    *applicability_clauses,
+                    *matrix_clauses,
+                    "资源量规模 矿石加工选冶难易程度",
+                )
+            )
+            evidence_queries_list = [matrix_query]
+            technical_evidence_targets = [
+                {
+                    "label": "通用阶段条件矩阵",
+                    "query": matrix_query,
+                    "document_types": document_types,
+                    "required": True,
+                }
+            ]
+            if exception_clauses:
+                exception_query = " ".join(
                     (
                         TECHNICAL_REQUIREMENT_STANDARD_NO,
-                        stage_label,
-                        *clauses,
-                        "资源量规模 矿石加工选冶难易程度",
+                        *exception_clauses,
+                        "样品采集确有困难 实验室扩大连续试验 实验室流程试验",
                     )
-                ),
-            )
+                )
+                evidence_queries_list.append(exception_query)
+                technical_evidence_targets.append(
+                    {
+                        "label": "采样困难例外",
+                        "query": exception_query,
+                        "document_types": document_types,
+                        "required": True,
+                    }
+                )
+            if any(
+                standard_no == ROCK_GOLD_STANDARD_NO
+                and clause == ROCK_GOLD_EXPLORATION_CLAUSE
+                for standard_no, clause in technical_refs
+            ):
+                rock_gold_query = (
+                    f"{ROCK_GOLD_STANDARD_NO} {ROCK_GOLD_EXPLORATION_CLAUSE} "
+                    "岩金 勘探阶段 易选 较易选 难选 新类型矿石"
+                )
+                evidence_queries_list.append(rock_gold_query)
+                technical_evidence_targets.append(
+                    {
+                        "label": "岩金专项阶段要求",
+                        "query": rock_gold_query,
+                        "document_types": document_types,
+                        "required": True,
+                    }
+                )
+            evidence_queries = tuple(evidence_queries_list)
             required_evidence_groups = ()
         elif "选冶" in question or "加工技术性能试验" in question:
             dimensions = (
@@ -821,6 +973,28 @@ class ResearchPlanner:
                 else dimensions
             )
             evidence_queries = (base.retrieval_query or base.normalized_query,)
+        reserve_evidence_targets = (
+            [
+                {
+                    "label": "资源量转换为储量的规范性最低要求",
+                    "query": evidence_queries[0],
+                    "document_types": [
+                        "standard",
+                        "national_standard",
+                        "industry_standard",
+                    ],
+                    "required": True,
+                },
+                {
+                    "label": "各阶段提交储量的技术经济依据",
+                    "query": evidence_queries[1],
+                    "document_types": ["guidance", "industry_standard"],
+                    "required": True,
+                },
+            ]
+            if base.intent == "reserve_estimation_basis"
+            else None
+        )
         return ResearchPlan(
             canonical_question=base.normalized_query,
             intent=base.intent,
@@ -838,7 +1012,9 @@ class ResearchPlanner:
             anchor_titles=tuple(
                 dict.fromkeys(
                     (
-                        "采矿权变更（续期）登记临时服务指南"
+                        "矿产资源储量评审备案服务指南"
+                        if reserve_filing_materials
+                        else "采矿权变更（续期）登记临时服务指南"
                         if post_filing_steps
                         else "采矿权申请资料清单及要求",
                         *_explicit_titles(question),
@@ -851,14 +1027,18 @@ class ResearchPlanner:
                 dict.fromkeys(
                     ("自然资规〔2023〕6号", *base.standard_numbers)
                     if direct_authority
-                    else (() if post_filing_steps else ("自然资规〔2023〕4号附件4", *base.standard_numbers))
+                    else (
+                        ()
+                        if reserve_filing_materials or post_filing_steps
+                        else ("自然资规〔2023〕4号附件4", *base.standard_numbers)
+                    )
                     if base.intent == "service_materials"
                     else (
                         *TRANSFER_ANCHOR_STANDARD_NUMBERS,
                         *base.standard_numbers,
                     )
                     if base.intent == "exploration_to_mining_eligibility"
-                    else (TECHNICAL_REQUIREMENT_STANDARD_NO,)
+                    else tuple(dict.fromkeys(standard_no for standard_no, _ in technical_refs))
                     if base.intent == "technical_stage_requirement"
                     else (
                         *PROJECTION_REFERENCE_STANDARD_NUMBERS,
@@ -882,7 +1062,11 @@ class ResearchPlanner:
             comparison_dimensions=tuple(dimensions),
             evidence_queries=evidence_queries,
             evidence_targets=_clean_evidence_targets(
-                (
+                reserve_evidence_targets
+                if reserve_evidence_targets is not None
+                else technical_evidence_targets
+                if technical_evidence_targets is not None
+                else (
                     [
                         {
                             "label": "矿产资源储量评审备案权限关系",
@@ -900,7 +1084,11 @@ class ResearchPlanner:
             ),
             required_evidence_groups=required_evidence_groups,
             scope_note=(
-                "以现行权威文件中直接规定许可证颁发机关与储量评审备案责任部门关系的条款为准；"
+                "先以现行标准确定资源量转换为储量的最低技术经济评价要求，再按阶段核对提交储量"
+                "所依据的预可研/可研、开发利用方案、矿山初步设计、排产计划及重新评价要求；"
+                "《300问》只能作为明确标注的解读材料，不能替代规范性原文。"
+                if base.intent == "reserve_estimation_basis"
+                else "以现行权威文件中直接规定许可证颁发机关与储量评审备案责任部门关系的条款为准；"
                 "单一权威条款覆盖责任主体、权限事项和决定条件时即可形成结论。"
                 if direct_authority
                 else "以目标矿种现行勘查规范中的工程间距表为准；指定勘查类型的表格行同时覆盖"
@@ -908,6 +1096,13 @@ class ResearchPlanner:
                 if direct_engineering_distance
                 else "按采矿权变更（续期）登记办事指南核对评审备案后至领证前的材料和手续。"
                 if post_filing_steps
+                else "只按矿产资源储量评审备案服务指南核对该事项自身的申请材料目录。"
+                if reserve_filing_materials
+                else (
+                    "按固定受理审查证据合同，同时核对通用试验研究程度标准的适用维度、"
+                    "阶段条件矩阵和例外；岩金勘探问题还必须并行核对岩金专项勘查规范。"
+                )
+                if base.intent == "technical_stage_requirement"
                 else "按知识库目录中的受控文件范围逐份检索。"
             ),
             planner_used=False,
@@ -939,8 +1134,10 @@ class ResearchPlanner:
         if classification is None:
             return False
         return bool(
-            classification.primary_intent in {"eligibility_condition", "technical_method"}
-            and classification.output_shape in {"condition_matrix", "requirements_and_advice"}
+            classification.primary_intent
+            in {"eligibility_condition", "reserve_estimation_basis", "technical_method"}
+            and classification.output_shape
+            in {"condition_matrix", "stage_basis_matrix", "requirements_and_advice"}
         )
 
 
@@ -1290,6 +1487,19 @@ class ResearchTaskRunner:
                     }
                 )
             documents = list(corpus.get("items") or [])
+            if not documents and plan.strategy != "requirements_matrix":
+                # Directory titles are a useful scope hint, but never a proof
+                # that the corpus lacks evidence.  If enumeration is empty,
+                # reuse the accepted content-first fixed-pool route and infer
+                # candidate documents from clause hits before declaring a gap.
+                fallback_corpus = await self._discover_requirement_documents(
+                    task,
+                    plan,
+                    knowledge,
+                )
+                if fallback_corpus.get("items"):
+                    corpus = fallback_corpus
+                    documents = list(corpus.get("items") or [])
             documents = self._prioritize_documents(documents, plan)
             total_documents = int(corpus.get("total") or len(documents))
             candidate_truncated = bool(corpus.get("truncated"))
@@ -1356,6 +1566,29 @@ class ResearchTaskRunner:
                 )
                 return
 
+            if plan.intent == "technical_stage_requirement":
+                missing_refs = self._missing_technical_stage_refs(
+                    task["retrieval_question"],
+                    sources,
+                )
+                if missing_refs:
+                    await self._finish_insufficient(
+                        store,
+                        task,
+                        plan,
+                        snapshot,
+                        total_documents,
+                        candidate_truncated,
+                        "已命中部分选冶试验条款，但固定受理审查证据合同仍缺少："
+                        + "；".join(
+                            f"{standard_no} 第{clause}条"
+                            for standard_no, clause in missing_refs
+                        ),
+                        settings,
+                        examined_documents=len(documents),
+                    )
+                    return
+
             required_targets = [
                 target.label for target in plan.evidence_targets if target.required
             ]
@@ -1393,7 +1626,12 @@ class ResearchTaskRunner:
             ]
             analyzer = ResearchAnalyzer(settings, llm)
             facts: list[dict[str, Any]] = []
-            if plan.strategy == "requirements_matrix":
+            if plan.intent == "technical_stage_requirement":
+                facts = self._technical_stage_requirement_facts(
+                    indexed_sources,
+                    task["retrieval_question"],
+                )
+            elif plan.strategy == "requirements_matrix":
                 # Do not dispatch condition matrices to a topic-specific
                 # formatter. The same evidence contract works for technical,
                 # administrative and mixed questions.
@@ -1416,8 +1654,6 @@ class ResearchTaskRunner:
                 facts = self._engineering_distance_facts(plan, indexed_sources)
             elif plan.intent == "projection_comparison":
                 facts = self._projection_facts(indexed_sources, task["retrieval_question"])
-            elif plan.intent == "technical_stage_requirement":
-                facts = self._technical_stage_requirement_facts(indexed_sources)
             else:
                 batch_size = settings.research_analysis_batch_size
                 for start in range(0, len(indexed_sources), batch_size):
@@ -1714,7 +1950,17 @@ class ResearchTaskRunner:
                                 task["retrieval_question"],
                             )
                         ]
-                        target_sources = target_sources[:3]
+                        if plan.intent == "technical_stage_requirement":
+                            target_sources = [
+                                source
+                                for source in target_sources
+                                if self._technical_stage_source_is_expected(
+                                    task["retrieval_question"],
+                                    source,
+                                )
+                            ][:8]
+                        else:
+                            target_sources = target_sources[:3]
                         if target_sources:
                             covered_targets.add(target_label)
                         for source in target_sources:
@@ -1756,11 +2002,51 @@ class ResearchTaskRunner:
         documents: dict[str, dict[str, Any]] = {}
         snapshot: str | None = None
         target_queries = (
-            tuple(target.query for target in plan.evidence_targets)
-            or plan.evidence_queries
-            or (plan.canonical_question,)
+            tuple(
+                (target.query, target.document_types or plan.document_types)
+                for target in plan.evidence_targets
+            )
+            or tuple((query, plan.document_types) for query in plan.evidence_queries)
+            or ((plan.canonical_question, plan.document_types),)
         )
-        for target_query in target_queries:
+        for target_query, raw_target_types in target_queries:
+            # A model-authored, syntactically valid type can still be
+            # semantically wrong.  Only deterministic protected routes may
+            # promote their target types into hard database filters; other
+            # research plans keep them as soft planning metadata.
+            target_types = (
+                controlled_document_types(
+                    raw_target_types,
+                    expand_standard=True,
+                    limit=20,
+                )
+                if plan.intent in PROTECTED_QUERY_INTENTS
+                else ()
+            )
+            filters = dict(task.get("filters") or {})
+            raw_filter_types = filters.get("document_types") or []
+            if isinstance(raw_filter_types, str):
+                raw_filter_types = [raw_filter_types]
+            filter_types = controlled_document_types(
+                raw_filter_types,
+                expand_standard=True,
+                limit=20,
+            )
+            if filter_types and target_types:
+                allowed_types = tuple(
+                    document_type
+                    for document_type in filter_types
+                    if document_type in set(target_types)
+                )
+                if not allowed_types:
+                    continue
+            else:
+                allowed_types = filter_types or target_types
+            if allowed_types:
+                # QueryPlan document types are soft retrieval metadata in the
+                # accepted v4 runtime.  Discovery needs an explicit filter so
+                # a technical evidence target cannot enumerate service guides.
+                filters["document_types"] = list(allowed_types)
             base = understand_query(target_query)
             discovery_plan = replace(
                 base,
@@ -1779,9 +2065,12 @@ class ResearchTaskRunner:
             )
             response = await knowledge.search(
                 target_query,
-                dict(task.get("filters") or {}),
+                filters,
                 discovery_plan,
-                top_k=6,
+                # Preserve the complete candidate window accepted by the v4
+                # baseline; clipping to six can hide a valid document before
+                # the per-document evidence check begins.
+                top_k=20,
                 allow_web_supplement=False,
             )
             snapshot = snapshot or response.coverage.get("knowledge_snapshot")
@@ -1911,20 +2200,27 @@ class ResearchTaskRunner:
     @staticmethod
     def _authority_direct_quote(text: str, issuer: str = "unknown") -> str:
         clean = re.sub(r"\s+", " ", text or "").strip()
-        full = re.search(
-            r"(自然资源部负责本级已颁发勘查许可证或采矿许可证的矿产资源储量评审备案工作，"
-            r"其他由省级自然资源主管部门负责。)",
+        full = extract_evidence_by_anchor_sequences(
             clean,
+            (
+                (("自然资源部", "本级", "许可证", "评审备案", "省级"),),
+                (
+                    ("自然资源部", "本级", "许可证", "评审备案"),
+                    ("省级", "自然资源主管部门", "负责"),
+                ),
+            ),
         )
         if full:
-            return full.group(1)
+            return full
         if issuer == "ministry":
-            ministry = re.search(
-                r"(自然资源部负责本级已颁发勘查许可证或采矿许可证的矿产资源储量评审备案工作[。；;]?)",
+            ministry = extract_evidence_by_anchor_sequences(
                 clean,
+                (
+                    (("自然资源部", "本级", "许可证", "评审备案"),),
+                ),
             )
             if ministry:
-                return ministry.group(1)
+                return ministry
         if issuer == "province":
             province = re.search(r"(其他由省级自然资源主管部门负责[。；;]?)", clean)
             if province:
@@ -1952,24 +2248,86 @@ class ResearchTaskRunner:
         return facts
 
     @staticmethod
+    def _technical_ref_key(standard_no: str, clause: str) -> tuple[str, str]:
+        return re.sub(r"\s+", "", standard_no or "").upper(), (clause or "").strip()
+
+    @classmethod
+    def _technical_stage_source_is_expected(
+        cls,
+        question: str,
+        source: Source,
+    ) -> bool:
+        expected = {
+            cls._technical_ref_key(standard_no, clause)
+            for standard_no, clause in stage_requirement_evidence_refs(question)
+        }
+        return cls._technical_ref_key(source.standard_no or "", source.chapter or "") in expected
+
+    @classmethod
+    def _missing_technical_stage_refs(
+        cls,
+        question: str,
+        sources: list[Source],
+    ) -> tuple[tuple[str, str], ...]:
+        present = {
+            cls._technical_ref_key(source.standard_no or "", source.chapter or "")
+            for source in sources
+        }
+        return tuple(
+            (standard_no, clause)
+            for standard_no, clause in stage_requirement_evidence_refs(question)
+            if cls._technical_ref_key(standard_no, clause) not in present
+        )
+
+    @classmethod
     def _technical_stage_requirement_facts(
+        cls,
         indexed_sources: list[tuple[int, Source, str]],
+        question: str,
     ) -> list[dict[str, Any]]:
         facts: list[dict[str, Any]] = []
+        matrix_refs = {
+            cls._technical_ref_key(TECHNICAL_REQUIREMENT_STANDARD_NO, clause)
+            for clause in stage_requirement_matrix_clauses(question)
+        }
+        exception_refs = {
+            cls._technical_ref_key(TECHNICAL_REQUIREMENT_STANDARD_NO, clause)
+            for clause in stage_requirement_exception_clauses(question)
+        }
+        applicability_ref = cls._technical_ref_key(
+            TECHNICAL_REQUIREMENT_STANDARD_NO,
+            TECHNICAL_REQUIREMENT_APPLICABILITY_CLAUSE,
+        )
+        rock_gold_ref = cls._technical_ref_key(
+            ROCK_GOLD_STANDARD_NO,
+            ROCK_GOLD_EXPLORATION_CLAUSE,
+        )
         for index, source, document_id in indexed_sources:
-            if re.sub(r"\s+", "", source.standard_no or "").upper() != (
-                TECHNICAL_REQUIREMENT_STANDARD_NO.replace(" ", "").upper()
-            ):
+            ref = cls._technical_ref_key(source.standard_no or "", source.chapter or "")
+            if not cls._technical_stage_source_is_expected(question, source):
                 continue
-            if not re.fullmatch(r"6\.[3-5]\.[1-4]", source.chapter or ""):
+            if ref in matrix_refs:
+                dimension = "条件化试验研究要求"
+                target_label = "通用阶段条件矩阵"
+            elif ref in exception_refs:
+                dimension = "采样困难例外"
+                target_label = "采样困难例外"
+            elif ref == applicability_ref:
+                dimension = "试验研究程度确定维度"
+                target_label = "通用阶段条件矩阵"
+            elif ref == rock_gold_ref:
+                dimension = "岩金专项阶段要求"
+                target_label = "岩金专项阶段要求"
+            else:
                 continue
             facts.append(
                 {
                     "document_id": document_id,
                     "classification": "special_provision",
-                    "dimension": "条件化试验研究要求",
+                    "dimension": dimension,
                     "finding": normalize_user_query(source.quote or "")[:900],
                     "source_indices": [index],
+                    "target_label": target_label,
                 }
             )
         return facts
@@ -2389,12 +2747,11 @@ class ResearchTaskRunner:
             return self._render_transfer_answer(sources)
         if plan.intent == "projection_comparison":
             return self._render_projection_comparison(question, facts, sources)
-        # Retain the legacy renderer only for direct callers that do not pass
-        # extracted facts. Normal deep execution uses the generic contract and
-        # cannot silently skip a missing condition dimension.
-        if plan.intent == "technical_stage_requirement" and not requirements_matrix:
-            return self._render_technical_stage_requirement_answer(question, sources)
-        if plan.intent == "technical_stage_requirement" and not facts:
+        if plan.intent == "technical_stage_requirement":
+            # This is a fixed admissibility-review item.  Render the verified
+            # clause contract deterministically so the generic comparison
+            # formatter cannot flatten the exception or omit the gold-specific
+            # requirement after retrieval has already found it.
             return self._render_technical_stage_requirement_answer(question, sources)
         summary = (
             "本次研究已按问题中的独立条件维度检索，并仅使用命中的直接条款形成下列条件矩阵。"
@@ -2623,10 +2980,35 @@ class ResearchTaskRunner:
     def _split_stage_requirement_quote(quote: str, clause: str) -> tuple[str, str]:
         text = re.sub(r"\s+", " ", quote or "").strip()
         text = re.sub(rf"^{re.escape(clause)}\s*", "", text)
-        if "，在" in text:
-            condition, requirement = text.split("，在", 1)
-            return condition.strip(), f"在{requirement.strip()}"
+        split_match = re.search(r"[，,]\s*(应?在)", text)
+        if split_match:
+            condition = text[: split_match.start()]
+            requirement = text[split_match.end() :]
+            return condition.strip(), f"{split_match.group(1)}{requirement.strip()}"
         return text or "相关条件", "见该条款原文"
+
+    @staticmethod
+    def _stage_condition_for_question(condition: str, question: str) -> str:
+        if explicit_resource_scale_from_text(question) != "large":
+            return condition
+
+        selected: list[str] = []
+        for value in (item.strip() for item in re.split(r"或", condition)):
+            if not value or not re.search(
+                r"(?:大型|大中型|大、中型)资源量规模",
+                value,
+            ):
+                continue
+            if re.search(r"(?:大中型|大、中型)资源量规模", value):
+                narrowed = re.sub(
+                    r"(?:大中型|大、中型)资源量规模",
+                    "大型资源量规模",
+                    value,
+                    count=1,
+                )
+                value = f"{narrowed}（原文适用于大、中型）"
+            selected.append(value)
+        return "或".join(selected) if selected else condition
 
     @classmethod
     def _render_technical_stage_requirement_answer(
@@ -2634,18 +3016,29 @@ class ResearchTaskRunner:
         question: str,
         sources: list[Source],
     ) -> str:
-        expected_clauses = stage_requirement_clauses(question)
-        by_clause = {
-            source.chapter: source
+        expected_refs = stage_requirement_evidence_refs(question)
+        by_ref = {
+            cls._technical_ref_key(source.standard_no or "", source.chapter or ""): source
             for source in sources
-            if re.sub(r"\s+", "", source.standard_no or "").upper()
-            == TECHNICAL_REQUIREMENT_STANDARD_NO.replace(" ", "").upper()
         }
-        if not expected_clauses or not all(clause in by_clause for clause in expected_clauses):
+        normalized_expected = tuple(
+            cls._technical_ref_key(standard_no, clause)
+            for standard_no, clause in expected_refs
+        )
+        if not normalized_expected or not all(ref in by_ref for ref in normalized_expected):
+            missing = [
+                f"{standard_no} 第{clause}条"
+                for (standard_no, clause), ref in zip(expected_refs, normalized_expected)
+                if ref not in by_ref
+            ]
             return (
                 "**研究结论**\n\n"
-                "未取得该阶段完整的条件矩阵条款，不能仅凭单条或章节标题概括技术要求。"
+                "未取得该固定审查项目的完整证据合同，不能仅凭部分条款概括技术要求。"
+                + (f"缺少：{'；'.join(missing)}。" if missing else "")
             )
+
+        matrix_clauses = stage_requirement_matrix_clauses(question)
+        exception_clauses = stage_requirement_exception_clauses(question)
         lines = [
             "**研究结论**",
             "",
@@ -2658,15 +3051,64 @@ class ResearchTaskRunner:
             "| 资源量规模与矿石类型 | 试验研究要求 | 依据条款 |",
             "| --- | --- | --- |",
         ]
-        for clause in expected_clauses:
-            quote = cls._stage_requirement_quote(by_clause[clause].quote or "", clause)
+        for clause in matrix_clauses:
+            source = by_ref[
+                cls._technical_ref_key(TECHNICAL_REQUIREMENT_STANDARD_NO, clause)
+            ]
+            quote = cls._stage_requirement_quote(source.quote or "", clause)
             condition, requirement = cls._split_stage_requirement_quote(quote, clause)
+            condition = cls._stage_condition_for_question(condition, question)
             lines.append(f"| {_markdown_cell(condition)} | {_markdown_cell(requirement)} | {clause} |")
+
+        applicability = by_ref.get(
+            cls._technical_ref_key(
+                TECHNICAL_REQUIREMENT_STANDARD_NO,
+                TECHNICAL_REQUIREMENT_APPLICABILITY_CLAUSE,
+            )
+        )
+        if applicability:
+            lines.extend(
+                [
+                    "",
+                    f"- **确定条件**（{TECHNICAL_REQUIREMENT_APPLICABILITY_CLAUSE}）：{applicability.quote}",
+                ]
+            )
+
+        rock_gold = by_ref.get(
+            cls._technical_ref_key(ROCK_GOLD_STANDARD_NO, ROCK_GOLD_EXPLORATION_CLAUSE)
+        )
+        if rock_gold:
+            lines.extend(
+                [
+                    "",
+                    f"- **岩金专项核对**（{ROCK_GOLD_STANDARD_NO} 第{ROCK_GOLD_EXPLORATION_CLAUSE}条）："
+                    f"{rock_gold.quote}",
+                ]
+            )
+
+        for clause in exception_clauses:
+            exception = by_ref.get(
+                cls._technical_ref_key(TECHNICAL_REQUIREMENT_STANDARD_NO, clause)
+            )
+            if exception:
+                lines.extend(
+                    [
+                        "",
+                        f"- **采样困难例外**（{clause}）：{exception.quote}",
+                    ]
+                )
+
+        explicit_large = explicit_resource_scale_from_text(question) == "large"
         lines.extend(
             [
                 "",
-                "若补充资源量规模及矿石属于易选、较易选还是难选/新类型，可据此确定唯一适用行；"
-                "在此之前，上表已覆盖该阶段的全部条件组合。",
+                (
+                    "本题已明确为大型资源量规模；要落到唯一一行，还需确定矿石属于易选、"
+                    "较易选还是难选/新类型。上表及岩金专项条款已经覆盖该固定审查项目的条件分支。"
+                    if explicit_large
+                    else "若补充资源量规模及矿石属于易选、较易选还是难选/新类型，可据此确定唯一适用行；"
+                    "在此之前，上表已覆盖该阶段的全部条件组合。"
+                ),
             ]
         )
         return "\n".join(lines)
@@ -2986,15 +3428,36 @@ class ResearchTaskRunner:
     @staticmethod
     def _transfer_direct_quote(text: str) -> str:
         clean = re.sub(r"\s+", " ", text).strip()
+        match = extract_evidence_by_anchor_sequences(
+            clean,
+            (
+                (
+                    ("探矿权转采矿权", "评审备案", "储量报告"),
+                    ("大型", "勘探程度", "其他矿山", "详查"),
+                ),
+                (
+                    (
+                        "探矿权转采矿权",
+                        "评审备案",
+                        "大型",
+                        "勘探程度",
+                        "其他矿山",
+                        "详查",
+                    ),
+                ),
+                (("核实报告", "不能替代", "转采矿权", "地质勘查报告"),),
+            ),
+            limit=700,
+        )
+        if match:
+            return match
         patterns = (
-            r"(探矿权转采矿权，应当依据经评审备案的矿产资源储量报告。资源储量规模为大型的非煤矿山、大中型煤矿应当达到勘探程度，其他矿山应当达到详查（含）以上程度。)",
-            r"(矿产资源储量核实报告不能替代探矿权转采矿权时应提交的地质勘查报告。)",
             r"((?:卤水.*?|深层固体盐类.*?|详查报告.*?)(?:可作为矿山设计开采依据|供矿山设计开采|作为矿山建设设计的依据).*?。)",
         )
         for pattern in patterns:
-            match = re.search(pattern, clean)
-            if match:
-                return match.group(1).strip()
+            special_match = re.search(pattern, clean)
+            if special_match:
+                return special_match.group(1).strip()
         for sentence in re.split(r"(?<=[。！？；;])\s*", clean):
             compact = re.sub(r"\s+", "", sentence)
             if (

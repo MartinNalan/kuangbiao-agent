@@ -10,11 +10,17 @@ from .llm_client import LLMClient
 from .llm_observability import llm_call_context
 from .prompt_layout import structured_prompt_messages, unwrap_output_schema_envelope
 from .prompt_registry import prompt_text
+from .query_classification import ALLOWED_DOCUMENT_TYPES, controlled_document_types
 from .query_understanding import (
     QueryPlan,
     TRANSFER_REPORT_OBJECT_TERMS,
     apply_semantic_plan,
+    is_reserve_filing_materials_query,
     normalize_user_query,
+)
+from .technical_stage_requirements import (
+    stage_requirement_evidence_refs,
+    stage_requirement_label,
 )
 
 
@@ -37,26 +43,15 @@ PlannerIntent = Literal[
     "regulation_lookup",
     "clause_comparison",
     "related_documents",
+    "reserve_estimation_basis",
     "definition_explanation",
     "cross_document_audit",
+    "technical_requirement_sufficiency",
+    "technical_test_conformity_verification",
+    "technical_stage_requirement",
 ]
 
 SearchMode = Literal["default", "scoped", "comparison", "exhaustive", "catalog"]
-
-ALLOWED_DOCUMENT_TYPES = {
-    "standard",
-    "national_standard",
-    "industry_standard",
-    "policy_document",
-    "policy_attachment",
-    "law",
-    "regulation",
-    "department_rule",
-    "guidance",
-    "service_guide",
-    "administrative_service_guide",
-    "amendment",
-}
 
 @dataclass(frozen=True)
 class QueryVariant:
@@ -91,11 +86,17 @@ class RetrievalPlanner:
         started = perf_counter()
         if not self.settings.query_planner_enabled or not self.llm.enabled:
             plan = apply_semantic_plan(base_plan, None)
+            variants = self._govern_query_variants(
+                question,
+                plan,
+                self._deterministic_query_variants(plan),
+            )
             return PlannerResult(
                 plan=plan,
                 used=False,
                 elapsed_ms=(perf_counter() - started) * 1000,
-                evidence_targets=self._primary_evidence_target(plan),
+                query_variants=variants,
+                evidence_targets=variants or self._primary_evidence_target(plan),
             )
 
         base_system = (
@@ -113,10 +114,19 @@ class RetrievalPlanner:
                     "这些目标不是可选同义词扩展，任何一个没有直接条款时都不能宣称已形成完整结论。"
                     "用户已经列举多个条件分支时，应保留为条件矩阵，不得改写为跨文件比较或先要求补充其中一个分支。"
                     "行政申请语境中的‘要件、必备资料、所需资料’应理解为申请材料；"
+                    "‘估算储量、提交储量、资源量转换为储量’中的储量是技术动作对象；出现预可研、"
+                    "可研、技术经济评价、开发利用方案、初步设计或排产计划时，必须保持"
+                    "reserve_estimation_basis，分别检索最低转换要求和各阶段技术依据，不能改成"
+                    "评审备案报件清单。只有明确询问评审备案申请材料、报件或材料清单才是"
+                    "service_materials，且不能用‘采矿权申请需要备案文件’反向证明备案申请材料。"
                     "政策正文引用附件清单时，document_types 必须包含 policy_attachment，不能只检索父政策正文。"
                     "required_evidence_groups 是 AND 关系，每个子数组内部是 OR 关系。"
                     "普通工程间距表不能作为矿体外推规则证据；仅出现同一个词但没有目标关系的内容应放入 negative_terms。"
                     "candidate_titles 和 standard_numbers 只有在问题明确给出或你高度确信时填写。"
+                    "必须区分业务背景与回答目标。‘转采审查中、办理转采时’可以只是背景；"
+                    "若用户实际询问勘查阶段选冶试验级别、规模或条件分支，intent 必须是"
+                    "technical_stage_requirement，不能改成 exploration_to_mining_eligibility。"
+                    "‘不要回答转采总体要求、不得用转采条款替代’是排除范围，不是正向转采锚点。"
                     "权限问题必须严格区分许可证颁发机关与矿业权出让机关。"
                     "license_issuer_level 只表示用户现有勘查许可证或采矿许可证由哪一级机关颁发；"
                     "mining_right_granting_level 只表示矿业权出让、配置或登记权限层级。"
@@ -211,12 +221,9 @@ class RetrievalPlanner:
             payload["search_mode"] = (
                 semantic_search_mode if semantic_search_mode in allowed_search_modes else "default"
             )
-            raw_document_types = payload.get("document_types")
-            if not isinstance(raw_document_types, list):
-                raw_document_types = []
-            payload["document_types"] = [
-                str(value) for value in raw_document_types if str(value) in ALLOWED_DOCUMENT_TYPES
-            ]
+            payload["document_types"] = list(
+                controlled_document_types(payload.get("document_types"))
+            )
             for role_field in ("license_issuer_level", "mining_right_granting_level"):
                 role_value = str(payload.get(role_field) or "unknown").strip().lower()
                 payload[role_field] = (
@@ -242,21 +249,33 @@ class RetrievalPlanner:
             )
         except (json.JSONDecodeError, TypeError, ValueError, OSError) as error:
             plan = apply_semantic_plan(base_plan, None)
+            variants = self._govern_query_variants(
+                question,
+                plan,
+                self._deterministic_query_variants(plan),
+            )
             return PlannerResult(
                 plan=plan,
                 used=False,
                 elapsed_ms=(perf_counter() - started) * 1000,
                 error=type(error).__name__,
-                evidence_targets=self._primary_evidence_target(plan),
+                query_variants=variants,
+                evidence_targets=variants or self._primary_evidence_target(plan),
             )
         except Exception as error:
             plan = apply_semantic_plan(base_plan, None)
+            variants = self._govern_query_variants(
+                question,
+                plan,
+                self._deterministic_query_variants(plan),
+            )
             return PlannerResult(
                 plan=plan,
                 used=False,
                 elapsed_ms=(perf_counter() - started) * 1000,
                 error=type(error).__name__,
-                evidence_targets=self._primary_evidence_target(plan),
+                query_variants=variants,
+                evidence_targets=variants or self._primary_evidence_target(plan),
             )
 
     @classmethod
@@ -294,14 +313,9 @@ class RetrievalPlanner:
             if semantic_search_mode in allowed_search_modes
             else "default"
         )
-        raw_document_types = value.get("document_types")
-        if not isinstance(raw_document_types, list):
-            raw_document_types = []
-        value["document_types"] = [
-            str(document_type)
-            for document_type in raw_document_types
-            if str(document_type) in ALLOWED_DOCUMENT_TYPES
-        ]
+        value["document_types"] = list(
+            controlled_document_types(value.get("document_types"))
+        )
         for role_field in ("license_issuer_level", "mining_right_granting_level"):
             role_value = str(value.get(role_field) or "unknown").strip().lower()
             value[role_field] = (
@@ -395,6 +409,9 @@ class RetrievalPlanner:
 
     @staticmethod
     def _primary_evidence_target(plan: QueryPlan) -> tuple[QueryVariant, ...]:
+        deterministic = RetrievalPlanner._deterministic_query_variants(plan)
+        if deterministic:
+            return deterministic
         query = normalize_user_query(plan.retrieval_query or plan.normalized_query)
         if not query:
             return ()
@@ -404,6 +421,117 @@ class RetrievalPlanner:
                 query=query,
                 document_types=plan.document_types,
                 alternative_terms=plan.alternative_terms[:4],
+            ),
+        )
+
+    @staticmethod
+    def _deterministic_query_variants(plan: QueryPlan) -> tuple[QueryVariant, ...]:
+        if (
+            plan.intent == "service_materials"
+            and is_reserve_filing_materials_query(plan.normalized_query)
+        ):
+            return (
+                QueryVariant(
+                    target="矿产资源储量评审备案自身的完整申请材料目录",
+                    query=(
+                        "矿产资源储量评审备案服务指南 申请材料 申请函 "
+                        "矿产资源储量信息表 矿产资源储量报告 附图 附表 附件"
+                    ),
+                    document_types=("service_guide", "administrative_service_guide"),
+                    alternative_terms=("申请函", "信息表", "储量报告", "申请材料目录"),
+                ),
+            )
+        if plan.intent == "technical_stage_requirement":
+            refs = stage_requirement_evidence_refs(plan.normalized_query)
+            general_refs = tuple(
+                clause
+                for standard_no, clause in refs
+                if standard_no == "DZ/T 0340-2020"
+            )
+            variants: list[QueryVariant] = []
+            if "6.5.6" in general_refs:
+                opening_refs = tuple(
+                    clause
+                    for clause in general_refs
+                    if clause in {"6.1.1", "6.5.1", "6.5.2"}
+                )
+                closing_refs = tuple(
+                    clause
+                    for clause in general_refs
+                    if clause in {"6.5.3", "6.5.4", "6.5.6"}
+                )
+                variants.extend(
+                    [
+                        QueryVariant(
+                            target="选冶试验确定维度及易选分支",
+                            query=(
+                                f"DZ/T 0340-2020 {' '.join(opening_refs)} "
+                                "试验研究程度要求取决于不同勘查阶段 "
+                                "矿石加工选冶难易程度 资源量规模 附录A"
+                            ).strip(),
+                            document_types=("standard", "national_standard", "industry_standard"),
+                            alternative_terms=("易选矿石", "实验室流程试验", "资源量规模"),
+                        ),
+                        QueryVariant(
+                            target="较易选、难选分支及采样困难例外",
+                            query=(
+                                f"DZ/T 0340-2020 {' '.join(closing_refs)} "
+                                f"{stage_requirement_label(plan.normalized_query)} "
+                                "大型资源量规模 较易选 难选 实验室扩大连续试验 "
+                                "样品采集困难 成果可靠性"
+                            ).strip(),
+                            document_types=("standard", "national_standard", "industry_standard"),
+                            alternative_terms=("半工业试验", "工业试验", "成果应用的可靠性"),
+                        ),
+                    ]
+                )
+            else:
+                variants.append(
+                    QueryVariant(
+                        target="通用选冶试验条件矩阵",
+                        query=(
+                            f"DZ/T 0340-2020 {' '.join(general_refs)} "
+                            f"{stage_requirement_label(plan.normalized_query)} "
+                            "资源量规模 易选 较易选 难选 试验研究程度"
+                        ).strip(),
+                        document_types=("standard", "national_standard", "industry_standard"),
+                        alternative_terms=("矿石加工选冶难易程度", "试验研究程度"),
+                    )
+                )
+            if any(standard_no == "DZ/T 0205-2020" for standard_no, _ in refs):
+                variants.append(
+                    QueryVariant(
+                        target="岩金勘探阶段矿种专项要求",
+                        query=(
+                            "DZ/T 0205-2020 4.3.4 矿产地质勘查规范 岩金 勘探阶段 "
+                            "易选 较易选 难选 新类型矿石 实验室流程试验 "
+                            "实验室扩大连续试验 半工业试验 工业试验"
+                        ),
+                        document_types=("standard", "national_standard", "industry_standard"),
+                        alternative_terms=("岩金", "矿石类型", "选冶技术性能试验"),
+                    )
+                )
+            return tuple(variants)
+        if plan.intent != "reserve_estimation_basis":
+            return ()
+        return (
+            QueryVariant(
+                target="资源量转换为储量的规范性最低要求",
+                query=(
+                    "资源量转换为储量 至少经过预可行性研究 "
+                    "与之相当的技术经济评价 转换因素"
+                ),
+                document_types=("standard", "national_standard", "industry_standard"),
+                alternative_terms=("储量", "预可行性研究", "技术经济评价", "转换因素"),
+            ),
+            QueryVariant(
+                target="各阶段提交储量的技术经济依据",
+                query=(
+                    "勘查阶段拟提交储量 矿山建设阶段 矿山正常生产阶段 "
+                    "停产超过3年 开发利用方案 初步设计 排产计划"
+                ),
+                document_types=("guidance", "industry_standard"),
+                alternative_terms=("可行性研究", "开发利用方案", "矿山初步设计", "排产计划"),
             ),
         )
 
@@ -422,6 +550,15 @@ class RetrievalPlanner:
         the user explicitly asks about a report object.
         """
 
+        if (
+            plan.intent == "service_materials"
+            and is_reserve_filing_materials_query(plan.normalized_query)
+        ):
+            return RetrievalPlanner._deterministic_query_variants(plan)
+        if plan.intent == "reserve_estimation_basis":
+            return RetrievalPlanner._deterministic_query_variants(plan)
+        if plan.intent == "technical_stage_requirement":
+            return RetrievalPlanner._deterministic_query_variants(plan)
         if plan.intent != "exploration_to_mining_eligibility":
             return variants
         normalized = normalize_user_query(question)

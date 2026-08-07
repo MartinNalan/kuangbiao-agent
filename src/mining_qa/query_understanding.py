@@ -6,17 +6,24 @@ from dataclasses import asdict, dataclass, replace
 from typing import Any
 
 from .domain_lexicon import matched_lexicon_entries
+from .evidence_text import contains_evidence_anchor_group
 from .governed_query_routing import route_governed_query
 from .query_classification import (
     QueryClassification,
     build_classification,
     classification_from_payload,
+    controlled_document_types,
     legacy_intent_for_primary,
 )
 from .technical_stage_requirements import (
+    ROCK_GOLD_EXPLORATION_CLAUSE,
+    ROCK_GOLD_STANDARD_NO,
+    ROCK_GOLD_STANDARD_TITLE,
     TECHNICAL_REQUIREMENT_STANDARD_NO,
     TECHNICAL_REQUIREMENT_STANDARD_TITLE,
+    is_rock_gold_question,
     stage_requirement_clauses,
+    stage_requirement_evidence_refs,
     stage_section_from_text,
 )
 
@@ -136,6 +143,61 @@ AUTHORITY_TOPIC_TERMS = (
 )
 AUTHENTICITY_TERMS = ("真实性", "真实准确", "弄虚作假", "真实性负责")
 RESERVE_REPORT_TERMS = ("资源储量报告", "矿产资源储量报告", "储量报告")
+RESERVE_ESTIMATION_ACTION_TERMS = (
+    "估算储量",
+    "估储量",
+    "测算储量",
+    "提交储量",
+    "形成储量",
+    "转为储量",
+    "转成储量",
+    "转换为储量",
+    "资源量转储量",
+    "资源量转换为储量",
+)
+RESERVE_TECHNICAL_BASIS_TERMS = (
+    "预可研",
+    "预可行性研究",
+    "可研报告",
+    "可行性研究",
+    "技术经济评价",
+    "开发利用方案",
+    "矿山初步设计",
+    "初步设计",
+    "排产计划",
+    "转换因素",
+)
+RESERVE_FILING_TERMS = (
+    "矿产资源储量评审备案",
+    "资源储量评审备案",
+    "储量评审备案",
+    "矿产资源储量备案",
+    "资源储量备案",
+    "储量备案",
+)
+RESERVE_FILING_MATERIAL_MARKERS = (
+    "申请材料",
+    "申请资料",
+    "报件",
+    "材料清单",
+    "资料清单",
+    "申请函",
+    "信息表",
+    "需要提交什么",
+    "需要提交哪些",
+    "要提交什么",
+    "要提交哪些",
+    "需提交什么",
+    "需提交哪些",
+    "需要什么材料",
+    "需要哪些材料",
+    "要什么材料",
+    "要哪些材料",
+    "提交材料",
+    "提交资料",
+    "材料有哪些",
+    "资料有哪些",
+)
 EXPLORATION_STAGE_TERMS = ("详查", "勘探", "普查", "勘查程度", "勘查阶段")
 TECHNICAL_REQUIREMENT_SATISFACTION_TERMS = (
     "是否满足",
@@ -218,6 +280,22 @@ MINING_CONVERSION_TERMS = (
     "可作为矿山设计开采依据",
     "供矿山设计开采",
     "作为矿山建设设计的依据",
+)
+
+# These are user instructions that exclude a topic from the answer.  They are
+# deliberately narrower than ordinary legal/technical negation: a substantive
+# question such as “核实报告不能替代地质勘查报告吗” must remain searchable.
+_META_EXCLUSION_PATTERNS = (
+    re.compile(r"(?:不要|无需|不用|不必|别再?)(?:回答|讨论|检索|查找|查证|引用|围绕)[^，,。；;！？!?]{0,80}"),
+    re.compile(r"(?:不是|并非)(?:在)?(?:问|询问|讨论|回答|检索)[^，,。；;！？!?]{0,80}"),
+    re.compile(r"(?:不要|不得|不能|不应)用[^，,。；;！？!?]{0,50}(?:条款|规定|政策)[^，,。；;！？!?]{0,30}替代[^，,。；;！？!?]{0,30}"),
+    re.compile(r"与[^，,。；;！？!?]{1,40}无关"),
+)
+
+_TRANSFER_DECISION_PATTERNS = (
+    re.compile(r"(?:能否|可否|能不能|是否(?:可以|能够)?).{0,16}(?:转采|申请采矿权)"),
+    re.compile(r"(?:转采|申请采矿权).{0,18}(?:条件|资格|能否|可否|是否符合|是否满足|需要满足|应达到什么勘查程度)"),
+    re.compile(r"(?:转采审查|转采条件).{0,12}(?:是否要求|是否包括|是否需要)"),
 )
 TRANSFER_ANCHOR_STANDARD_NUMBERS = ("自然资规〔2023〕4号", "DZ/T 0430-2023")
 TRANSFER_EQUIVALENT_TERMS = (
@@ -414,6 +492,19 @@ class QueryPlan:
 
 
 DEFAULT_EVIDENCE_GROUPS: dict[str, tuple[tuple[str, ...], ...]] = {
+    "reserve_estimation_basis": (
+        ("资源量转换为储量", "资源量转为储量", "估算储量", "提交储量", "储量"),
+        (
+            "预可行性研究",
+            "可行性研究",
+            "技术经济评价",
+            "开发利用方案",
+            "矿山初步设计",
+            "初步设计",
+            "排产计划",
+            "转换因素",
+        ),
+    ),
     "projection_comparison": (
         ("无限外推", "有限外推", "外推", "尖推", "平推"),
         ("工程间距", "基本间距", "实际间距", "经验工程间距"),
@@ -483,6 +574,12 @@ DEFAULT_EVIDENCE_GROUPS: dict[str, tuple[tuple[str, ...], ...]] = {
 }
 
 DEFAULT_DOCUMENT_TYPES: dict[str, tuple[str, ...]] = {
+    "reserve_estimation_basis": (
+        "standard",
+        "national_standard",
+        "industry_standard",
+        "guidance",
+    ),
     "engineering_distance_lookup": ("standard", "national_standard", "industry_standard"),
     "projection_rule": ("standard", "national_standard", "industry_standard"),
     "projection_numeric_rule": ("standard", "national_standard", "industry_standard"),
@@ -523,6 +620,7 @@ DEFAULT_DOCUMENT_TYPES: dict[str, tuple[str, ...]] = {
 
 
 PROTECTED_QUERY_INTENTS = {
+    "reserve_estimation_basis",
     "engineering_distance_lookup",
     "projection_numeric_rule",
     "authority_responsibility",
@@ -549,6 +647,86 @@ def default_evidence_groups(intent: str) -> tuple[tuple[str, ...], ...]:
 
 def default_document_types(intent: str) -> tuple[str, ...]:
     return DEFAULT_DOCUMENT_TYPES.get(intent, ())
+
+
+def is_reserve_filing_materials_query(query: str) -> bool:
+    """Whether the user asks for the administrative filing inventory.
+
+    This direction is deliberately different from a mining-right application
+    that merely lists a reserve-filing document as one prerequisite.
+    """
+
+    normalized = normalize_user_query(query)
+    return bool(
+        any(term in normalized for term in RESERVE_FILING_TERMS)
+        and any(term in normalized for term in RESERVE_FILING_MATERIAL_MARKERS)
+    )
+
+
+def is_reserve_estimation_basis_query(query: str) -> bool:
+    """Protect questions about the technical basis used to form reserves.
+
+    In ``提交储量依据哪些材料`` the object of ``提交`` is ``储量``.  It is
+    not the same relation as ``评审备案需要提交哪些申请材料`` where the
+    object is an administrative material.  Strong technical-evaluation terms
+    resolve any remaining colloquial ambiguity in favour of this route.
+    """
+
+    normalized = normalize_user_query(query)
+    has_reserve_action = any(term in normalized for term in RESERVE_ESTIMATION_ACTION_TERMS)
+    has_technical_anchor = any(
+        term in normalized for term in RESERVE_TECHNICAL_BASIS_TERMS
+    )
+    submitted_report_example = any(
+        term in normalized
+        for term in ("提交储量报告", "提交资源储量报告", "提交矿产资源储量报告")
+    )
+    explicit_technical_relation = bool(
+        (
+            has_reserve_action
+            and not submitted_report_example
+            and (
+                has_technical_anchor
+                or any(
+                    term in normalized
+                    for term in ("依据", "作为依据", "为依据", "怎么估算", "如何估算")
+                )
+            )
+        )
+        or any(
+            term in normalized
+            for term in ("储量如何估算", "储量怎么估算", "储量估算依据", "储量的估算依据")
+        )
+    )
+    asks_for_basis = any(
+        term in normalized
+        for term in (
+            "依据",
+            "为基础",
+            "根据什么",
+            "需要哪些材料",
+            "需要什么材料",
+            "哪些技术资料",
+            "什么技术资料",
+            "怎么估算",
+            "如何估算",
+        )
+    )
+    if is_reserve_filing_materials_query(normalized) and not explicit_technical_relation:
+        # An explicit filing/recording matter plus an administrative material
+        # question takes precedence.  Examples may mention ``提交储量报告`` or
+        # ``可研报告`` while asking whether those reports belong in the filing
+        # package; those substrings must not reverse the grammatical relation.
+        return False
+    return bool(
+        explicit_technical_relation
+        or (has_reserve_action and (asks_for_basis or has_technical_anchor))
+        or (
+            "储量" in normalized
+            and has_technical_anchor
+            and any(term in normalized for term in ("依据", "材料", "资料", "报告", "评价"))
+        )
+    )
 
 
 def _clean_terms(values: Any, *, limit: int = 16) -> tuple[str, ...]:
@@ -693,16 +871,18 @@ def apply_semantic_plan(base: QueryPlan, payload: dict[str, Any] | None) -> Quer
     scope_origin = base.scope_origin
     if scope_origin == "none" and (semantic_titles or semantic_standards):
         scope_origin = "llm"
-    raw_document_types = _clean_terms(payload.get("document_types"), limit=12)
-    document_types_list: list[str] = []
-    for document_type in raw_document_types:
-        if document_type == "standard":
-            document_types_list.extend(("standard", "national_standard", "industry_standard"))
-        else:
-            document_types_list.append(document_type)
-    document_types = tuple(
-        dict.fromkeys((*default_document_types(intent), *document_types_list))
+    semantic_document_types = controlled_document_types(
+        payload.get("document_types"),
+        expand_standard=True,
     )
+    if base.intent in PROTECTED_QUERY_INTENTS:
+        # A semantic rewrite cannot broaden a protected route from technical
+        # standards into an unrelated administrative corpus (or vice versa).
+        document_types = base.document_types or default_document_types(base.intent)
+    else:
+        document_types = tuple(
+            dict.fromkeys((*default_document_types(intent), *semantic_document_types))
+        )
     default_groups = default_evidence_groups(intent)
     semantic_groups = _clean_groups(payload.get("required_evidence_groups"))
     protected_groups = tuple(
@@ -720,8 +900,10 @@ def apply_semantic_plan(base: QueryPlan, payload: dict[str, Any] | None) -> Quer
     semantic_issuer = _authority_level(payload.get("license_issuer_level"))
     semantic_granting = _authority_level(payload.get("mining_right_granting_level"))
     quoted_generic_authority_rule = (
-        "自然资源部负责本级已颁发勘查许可证或采矿许可证" in base.normalized_query
-        and "其他由省级自然资源主管部门负责" in base.normalized_query
+        contains_evidence_anchor_group(
+            base.normalized_query,
+            (("自然资源部", "本级", "许可证", "省级", "主管部门"),),
+        )
         and base.license_issuer_level == "unknown"
     )
     if confidence < 0.8 or quoted_generic_authority_rule:
@@ -811,27 +993,10 @@ def query_plan_from_payload(query: str, payload: dict[str, Any] | None) -> Query
         )
     target_document_types: tuple[str, ...] = ()
     if semantic_target_query:
-        allowed_document_types = {
-            "standard",
-            "national_standard",
-            "industry_standard",
-            "policy_document",
-            "policy_attachment",
-            "law",
-            "regulation",
-            "department_rule",
-            "guidance",
-            "service_guide",
-            "administrative_service_guide",
-            "amendment",
-        }
-        target_types: list[str] = []
-        for document_type in _clean_terms(payload.get("document_types"), limit=12):
-            if document_type == "standard":
-                target_types.extend(("standard", "national_standard", "industry_standard"))
-            elif document_type in allowed_document_types:
-                target_types.append(document_type)
-        target_document_types = tuple(dict.fromkeys(target_types))
+        target_document_types = controlled_document_types(
+            payload.get("document_types"),
+            expand_standard=True,
+        )
     protected = base.intent in PROTECTED_QUERY_INTENTS
     allowed = {
         "canonical_query": payload.get("normalized_query") or payload.get("canonical_query"),
@@ -867,9 +1032,26 @@ def query_plan_from_payload(query: str, payload: dict[str, Any] | None) -> Query
             confidence=plan.planner_confidence or 0.72,
         ),
     )
+    if plan.intent == "reserve_estimation_basis" and plan.classification:
+        # Saved research plans are untrusted model-shaped payloads.  Preserve
+        # the deterministic relation and evidence contract even if an older
+        # task stored a filing-material interpretation or Chinese type labels.
+        classification = replace(
+            classification,
+            primary_intent=plan.classification.primary_intent,
+            secondary_intents=plan.classification.secondary_intents,
+            target_entity=plan.classification.target_entity,
+            business_action=plan.classification.business_action,
+            document_types=plan.classification.document_types,
+            evidence_slots=plan.classification.evidence_slots,
+            output_shape=plan.classification.output_shape,
+            ambiguities=plan.classification.ambiguities,
+            missing_slots=plan.classification.missing_slots,
+        )
     resolved_intent = legacy_intent_for_primary(classification.primary_intent, plan.intent)
     if (
         plan.intent in {
+            "reserve_estimation_basis",
             "technical_requirement_sufficiency",
             "technical_test_conformity_verification",
             "technical_stage_requirement",
@@ -939,6 +1121,53 @@ def normalize_user_query(query: str) -> str:
     if "勘查" in normalized and any(term in normalized for term in ENGINEERING_DISTANCE_TERMS):
         normalized = _SHORT_TYPE_PATTERN.sub(replace_type, normalized)
     return normalized
+
+
+def intent_focus_text(query: str) -> str:
+    """Return text that may positively trigger an intent.
+
+    The full normalized question remains untouched for retrieval and evidence
+    constraints.  This view removes only explicit meta-instructions such as
+    “不要回答转采总体要求” or “不得用转采条款替代”, so those words cannot
+    become positive routing anchors.  Ordinary normative negation is retained.
+    """
+
+    normalized = normalize_user_query(query)
+    clauses = re.split(r"(?<=[，,。；;！？!?])", normalized)
+    kept: list[str] = []
+    for clause in clauses:
+        value = clause.strip()
+        if not value:
+            continue
+        if any(pattern.search(value) for pattern in _META_EXCLUSION_PATTERNS):
+            continue
+        kept.append(value)
+    return " ".join(kept) or normalized
+
+
+def is_transfer_decision_query(query: str) -> bool:
+    focus = intent_focus_text(query)
+    return any(pattern.search(focus) for pattern in _TRANSFER_DECISION_PATTERNS)
+
+
+def is_status_verification_query(query: str) -> bool:
+    normalized = normalize_user_query(query)
+    return any(
+        marker in normalized
+        for marker in (
+            "是否现行",
+            "是否废止",
+            "还有效",
+            "是否有效",
+            "已废止",
+            "被替代",
+            "废止了吗",
+            "最新版",
+            "最新版本",
+            "现行版本",
+            "现在执行哪个版本",
+        )
+    )
 
 
 _BROAD_CLASSIFICATION_PATTERNS = (
@@ -1158,6 +1387,7 @@ def understand_query(query: str) -> QueryPlan:
     normalized = normalize_user_query(original)
     governed_route = route_governed_query(normalized)
     normalized = governed_route.canonical_question
+    focus_text = intent_focus_text(normalized)
     target_type_match = re.search(r"([ⅠⅡⅢ])类型", normalized)
     target_type = target_type_match.group(1) if target_type_match else None
 
@@ -1167,6 +1397,8 @@ def understand_query(query: str) -> QueryPlan:
     has_related_documents = any(term in normalized for term in RELATED_DOCUMENT_TERMS)
     has_license = any(term in normalized for term in LICENSE_TERMS)
     guide_titles = service_guide_title_terms(normalized)
+    has_reserve_estimation_basis = is_reserve_estimation_basis_query(normalized)
+    has_reserve_filing_materials = is_reserve_filing_materials_query(normalized)
     post_filing_license_steps = is_post_filing_license_steps_query(normalized)
     has_mining_right_change_materials = any(
         term in normalized
@@ -1175,7 +1407,13 @@ def understand_query(query: str) -> QueryPlan:
     has_mining_right_materials_by_procedure = has_license and any(
         term in normalized for term in MINING_RIGHT_MATERIAL_BY_PROCEDURE_TERMS
     )
-    has_service_materials = post_filing_license_steps or has_mining_right_change_materials or (
+    has_mining_right_named_material = bool(
+        has_license
+        and any(term in normalized for term in ("首次", "新立", "延续", "续期", "变更", "注销"))
+        and any(term in normalized for term in ("需要提交", "是否提交", "要提交", "需提交"))
+        and any(term in normalized for term in ("材料", "资料", "文件"))
+    )
+    has_service_materials = has_reserve_filing_materials or post_filing_license_steps or has_mining_right_change_materials or has_mining_right_named_material or (
         (bool(guide_titles) or has_license)
         and any(term in normalized for term in SERVICE_MATERIAL_TERMS)
     ) or has_mining_right_materials_by_procedure
@@ -1190,11 +1428,12 @@ def understand_query(query: str) -> QueryPlan:
     has_authenticity = any(term in normalized for term in AUTHENTICITY_TERMS) and any(
         term in normalized for term in RESERVE_REPORT_TERMS
     )
-    has_mining_conversion = any(term in normalized for term in MINING_CONVERSION_TERMS)
+    has_mining_conversion = any(term in focus_text for term in MINING_CONVERSION_TERMS)
     has_exploration_to_mining = has_mining_conversion and (
-        any(term in normalized for term in EXPLORATION_STAGE_TERMS)
-        or "探转采" in normalized
+        any(term in focus_text for term in EXPLORATION_STAGE_TERMS)
+        or "探转采" in focus_text
     )
+    has_transfer_decision = is_transfer_decision_query(focus_text)
     has_companion_resource_type = any(term in normalized for term in COMPANION_MINERAL_TERMS) and (
         any(term in normalized for term in RESOURCE_TYPE_TERMS)
         or (
@@ -1231,28 +1470,28 @@ def understand_query(query: str) -> QueryPlan:
         )
     )
     has_technical_requirement_sufficiency = (
-        any(term in normalized for term in TECHNICAL_REQUIREMENT_SATISFACTION_TERMS)
-        and any(term in normalized for term in TECHNICAL_STUDY_TERMS)
+        any(term in focus_text for term in TECHNICAL_REQUIREMENT_SATISFACTION_TERMS)
+        and any(term in focus_text for term in TECHNICAL_STUDY_TERMS)
         and (
-            any(term in normalized for term in EXPLORATION_STAGE_TERMS)
-            or "要求" in normalized
-            or "研究程度" in normalized
-            or sum(term in normalized for term in TECHNICAL_STUDY_TERMS) >= 2
+            any(term in focus_text for term in EXPLORATION_STAGE_TERMS)
+            or "要求" in focus_text
+            or "研究程度" in focus_text
+            or sum(term in focus_text for term in TECHNICAL_STUDY_TERMS) >= 2
         )
     )
     has_technical_test_conformity = (
-        any(term in normalized for term in TECHNICAL_STUDY_TERMS)
-        and any(term in normalized for term in TECHNICAL_TEST_CONFORMITY_TERMS)
+        any(term in focus_text for term in TECHNICAL_STUDY_TERMS)
+        and any(term in focus_text for term in TECHNICAL_TEST_CONFORMITY_TERMS)
     )
     has_technical_stage_requirement = (
-        any(term in normalized for term in EXPLORATION_STAGE_TERMS)
-        and any(term in normalized for term in TECHNICAL_STAGE_REQUIREMENT_TERMS)
+        any(term in focus_text for term in EXPLORATION_STAGE_TERMS)
+        and any(term in focus_text for term in TECHNICAL_STAGE_REQUIREMENT_TERMS)
         and not has_technical_requirement_sufficiency
         and not has_technical_test_conformity
     )
     has_technical_standard_selection = (
-        any(term in normalized for term in TECHNICAL_STANDARD_SELECTION_TERMS)
-        and any(term in normalized for term in STANDARD_SELECTION_PHRASES)
+        any(term in focus_text for term in TECHNICAL_STANDARD_SELECTION_TERMS)
+        and any(term in focus_text for term in STANDARD_SELECTION_PHRASES)
     )
     has_authority = any(term in normalized for term in AUTHORITY_INTENT_TERMS) and any(
         term in normalized for term in AUTHORITY_TOPIC_TERMS
@@ -1313,9 +1552,38 @@ def understand_query(query: str) -> QueryPlan:
                 "不得弄虚作假",
             ]
         )
+    elif has_reserve_estimation_basis:
+        intent = "reserve_estimation_basis"
+        search_mode = "scoped"
+        retrieval_terms.extend(
+            [
+                "资源量转换为储量",
+                "储量估算与提交依据",
+                "预可行性研究",
+                "可行性研究",
+                "与之相当的技术经济评价",
+                "矿产资源开发利用方案",
+                "矿山初步设计",
+                "最新矿山排产计划",
+                "转换因素",
+                normalized,
+            ]
+        )
     elif has_service_materials:
         intent = "service_materials"
-        if post_filing_license_steps:
+        if has_reserve_filing_materials:
+            candidate_titles.append("矿产资源储量评审备案服务指南")
+            retrieval_terms.extend(
+                [
+                    "矿产资源储量评审备案服务指南",
+                    "申请材料",
+                    "申请函",
+                    "矿产资源储量信息表",
+                    "矿产资源储量报告",
+                    "附图 附表 附件",
+                ]
+            )
+        elif post_filing_license_steps:
             candidate_titles.append("采矿权变更（续期）登记临时服务指南")
             retrieval_terms.extend(
                 [
@@ -1323,7 +1591,9 @@ def understand_query(query: str) -> QueryPlan:
                     "申请材料目录",
                     "采矿权登记申请书",
                     "矿产资源储量评审备案文件",
-                    "矿业权出让收益（价款）缴纳或有偿处置证明材料",
+                    "矿业权出让收益",
+                    "价款缴纳",
+                    "有偿处置证明材料",
                 ]
             )
         elif "采矿权申请资料清单及要求" in guide_titles:
@@ -1331,7 +1601,7 @@ def understand_query(query: str) -> QueryPlan:
         if guide_titles and not post_filing_license_steps:
             candidate_titles.extend(guide_titles)
             retrieval_terms.extend([*guide_titles, "申请材料", "申请材料目录"])
-        elif not post_filing_license_steps:
+        elif not post_filing_license_steps and not has_reserve_filing_materials:
             candidate_titles.extend(["采矿权申请资料清单及要求", "矿产资源勘查开采登记管理"])
             standards.append("自然资规〔2023〕4号")
             retrieval_terms.extend(
@@ -1369,7 +1639,9 @@ def understand_query(query: str) -> QueryPlan:
         )
         candidate_titles.extend(time_limit_titles)
         retrieval_terms.extend([*time_limit_titles, "办结时限", "工作日"])
-    elif has_exploration_to_mining:
+    elif has_exploration_to_mining and (
+        not has_technical_stage_requirement or has_transfer_decision
+    ):
         intent = "exploration_to_mining_eligibility"
         search_mode = "comparison"
         retrieval_terms.extend(
@@ -1429,6 +1701,7 @@ def understand_query(query: str) -> QueryPlan:
     elif has_technical_stage_requirement:
         intent = "technical_stage_requirement"
         stage_section = stage_section_from_text(normalized)
+        evidence_refs = stage_requirement_evidence_refs(normalized)
         retrieval_terms.extend(
             [
                 normalized,
@@ -1436,10 +1709,19 @@ def understand_query(query: str) -> QueryPlan:
                 TECHNICAL_REQUIREMENT_STANDARD_NO,
                 stage_section or "",
                 *stage_requirement_clauses(normalized),
+                *(f"{standard_no} {clause}" for standard_no, clause in evidence_refs),
                 "资源量规模",
                 "矿石加工选冶难易程度",
             ]
         )
+        if is_rock_gold_question(normalized) and stage_section == "6.5":
+            retrieval_terms.extend(
+                [
+                    ROCK_GOLD_STANDARD_TITLE,
+                    ROCK_GOLD_STANDARD_NO,
+                    ROCK_GOLD_EXPLORATION_CLAUSE,
+                ]
+            )
     elif has_technical_standard_selection:
         # Questions such as "哪个规范规定了金矿选矿试验要求" ask for the
         # governing document. They should not fall through to a generic LLM
@@ -1538,10 +1820,7 @@ def understand_query(query: str) -> QueryPlan:
         search_mode = "comparison"
         retrieval_terms.extend(["比较主题", "适用条件", "具体差异", normalized])
 
-    if intent == "general" and any(
-        term in normalized
-        for term in ("还有效", "是否有效", "现行", "废止", "替代", "最新版", "新版本")
-    ):
+    if intent == "general" and is_status_verification_query(normalized):
         intent = "standard_selection"
         search_mode = "catalog"
         retrieval_terms.extend(["标准状态", "现行", "废止", "替代", normalized])
@@ -1553,8 +1832,8 @@ def understand_query(query: str) -> QueryPlan:
         retrieval_terms.extend(
             [
                 "矿产资源储量评审备案范围和权限",
-                "自然资源部负责本级已颁发勘查许可证或采矿许可证",
-                "其他由省级自然资源主管部门负责",
+                "自然资源部 本级许可证",
+                "省级自然资源主管部门 负责",
             ]
         )
 
@@ -1643,13 +1922,12 @@ def understand_query(query: str) -> QueryPlan:
         "deterministic" if candidate_titles or standards else "none"
     )
     document_types = default_document_types(intent)
+    if intent == "service_materials" and has_reserve_filing_materials:
+        document_types = ("service_guide", "administrative_service_guide")
     # Status verification is a governance lookup, not a standard-body search.
     # It must include policies, amendments and regulations even though the
     # legacy renderer continues to use the standard_selection intent.
-    if any(
-        term in normalized
-        for term in ("还有效", "是否有效", "现行", "废止", "替代", "最新版", "新版本")
-    ):
+    if is_status_verification_query(normalized):
         document_types = (
             "standard",
             "national_standard",

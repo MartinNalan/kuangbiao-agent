@@ -5,25 +5,27 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CLOUD_CONFIG="${CLOUD_CONFIG:-${PROJECT_ROOT}/.cloud.env}"
 MODE="${1:-deploy}"
 ROLLBACK_ID="${2:-}"
-V4_MANIFEST_REL="data/knowledge_base_v4/runtime_private/hybrid_fixed20_v4/runtime_manifest.json"
+V4_MANIFEST_REL="data/knowledge_base_v4/runtime_private/hybrid_fixed20_t094_v1/runtime_manifest.json"
 V4_MANIFEST="${PROJECT_ROOT}/${V4_MANIFEST_REL}"
+EXPECTED_RUNTIME_ID="v4-hybrid-fixed20-p1fix-t094-v1"
+EXPECTED_DECISION_VERSION="t092"
 
 V4_ASSETS=(
   "data/knowledge_base_v4/db/corpus.sqlite"
-  "data/knowledge_base_v4/retrieval_preprocessing_v1/retrieval_units_v1.jsonl"
-  "data/knowledge_base_v4/runtime_private/hybrid_fixed20_v4/fts.sqlite"
+  "data/knowledge_base_v4/retrieval_preprocessing_t088_v1/retrieval_units_v1.jsonl"
+  "data/knowledge_base_v4/runtime_private/hybrid_fixed20_t088_v1/fts.sqlite"
   "${V4_MANIFEST_REL}"
-  "data/knowledge_base_v4/embedding_artifacts_private/qwen37_text_embedding_1024_t027_v1/manifest.json"
-  "data/knowledge_base_v4/embedding_artifacts_private/qwen37_text_embedding_1024_t027_v1/document_embeddings.npy"
-  "data/knowledge_base_v4/embedding_artifacts_private/qwen37_text_embedding_1024_t027_v1/row_mapping.jsonl"
+  "data/knowledge_base_v4/embedding_artifacts_private/qwen37_text_embedding_1024_t088_v1/manifest.json"
+  "data/knowledge_base_v4/embedding_artifacts_private/qwen37_text_embedding_1024_t088_v1/document_embeddings.npy"
+  "data/knowledge_base_v4/embedding_artifacts_private/qwen37_text_embedding_1024_t088_v1/row_mapping.jsonl"
   "schemas/v4_governed_concept_families_v1.json"
 )
 
 usage() {
-  echo "Usage: bash scripts/deploy_v4_cloud.sh [deploy|rollback BACKUP_ID]" >&2
+  echo "Usage: bash scripts/deploy_v4_cloud.sh [preflight|deploy|rollback BACKUP_ID]" >&2
 }
 
-if [[ "${MODE}" != "deploy" && "${MODE}" != "rollback" ]]; then
+if [[ "${MODE}" != "preflight" && "${MODE}" != "deploy" && "${MODE}" != "rollback" ]]; then
   usage
   exit 2
 fi
@@ -96,6 +98,12 @@ for candidate in src scripts deploy web schemas requirements.txt pyproject.toml;
 done
 tar -xzf "${backup}/application-code.tar.gz" -C "${app}"
 install -m 0600 "${backup}/runtime.env" "${app}/.env"
+if [[ -f "${backup}/corpus.sqlite" ]]; then
+  install -m 0600 "${backup}/corpus.sqlite" \
+    "${app}/data/knowledge_base_v4/db/corpus.sqlite"
+  chown kuangbiao:kuangbiao \
+    "${app}/data/knowledge_base_v4/db/corpus.sqlite"
+fi
 if [[ -f "${backup}/kuangbiao-api.service" ]]; then
   install -m 0644 "${backup}/kuangbiao-api.service" /etc/systemd/system/kuangbiao-api.service
 fi
@@ -116,6 +124,10 @@ for _ in $(seq 1 30); do
   sleep 2
 done
 curl --fail --silent --max-time 5 http://127.0.0.1:18080/health >/dev/null
+if [[ -f "${backup}/deeptutor-was-active" ]]; then
+  "${sudo_cmd[@]}" systemctl is-active --quiet deeptutor-cloud.service
+  [[ "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:8001/)" == "200" ]]
+fi
 echo "rollback_status=complete"
 echo "rollback_id=${backup_id}"
 REMOTE
@@ -139,26 +151,119 @@ if [[ ! -x "${PYTHON_BIN}" ]]; then
   exit 1
 fi
 
-"${PYTHON_BIN}" - "${PROJECT_ROOT}" "${V4_MANIFEST}" <<'PY'
+"${PYTHON_BIN}" - "${PROJECT_ROOT}" "${V4_MANIFEST}" "${EXPECTED_RUNTIME_ID}" <<'PY'
 import hashlib
 import json
+import subprocess
 import sys
 from pathlib import Path
 
 root = Path(sys.argv[1])
 manifest_path = Path(sys.argv[2])
+expected_runtime_id = sys.argv[3]
 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-if manifest.get("runtime_id") != "v4-hybrid-fixed20-p1fix-v4":
+if manifest.get("runtime_id") != expected_runtime_id:
     raise SystemExit("Unexpected v4 runtime_id")
-for label, item in manifest["artifacts"].items():
-    path = Path(item["path"])
-    if not path.is_absolute():
-        path = root / path
+
+expected_artifact_paths = {
+    "data/knowledge_base_v4/db/corpus.sqlite",
+    "data/knowledge_base_v4/retrieval_preprocessing_t088_v1/retrieval_units_v1.jsonl",
+    "data/knowledge_base_v4/runtime_private/hybrid_fixed20_t088_v1/fts.sqlite",
+    "data/knowledge_base_v4/embedding_artifacts_private/qwen37_text_embedding_1024_t088_v1/manifest.json",
+    "data/knowledge_base_v4/embedding_artifacts_private/qwen37_text_embedding_1024_t088_v1/document_embeddings.npy",
+    "data/knowledge_base_v4/embedding_artifacts_private/qwen37_text_embedding_1024_t088_v1/row_mapping.jsonl",
+    "schemas/v4_governed_concept_families_v1.json",
+}
+artifacts = manifest.get("artifacts")
+if not isinstance(artifacts, dict) or len(artifacts) != 7:
+    raise SystemExit("T094 must bind exactly seven accepted private assets")
+artifact_paths = {str(item.get("path")) for item in artifacts.values()}
+if artifact_paths != expected_artifact_paths:
+    raise SystemExit("T094 private asset set changed")
+for label, item in artifacts.items():
+    path = root / str(item["path"])
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    if digest != item["sha256"]:
+    if digest != item.get("sha256"):
         raise SystemExit(f"Local v4 hash mismatch: {label}")
-print("local_v4_assets=verified")
+
+runtime_sources = manifest.get("runtime_sources") or {}
+if runtime_sources.get("selection") != "repository_static_python_import_closure":
+    raise SystemExit("T094 runtime-source selection policy changed")
+if runtime_sources.get("gold_or_report_used_for_selection") is not False:
+    raise SystemExit("T094 runtime-source selection must not use Gold or reports")
+closure = runtime_sources.get("python_import_closure")
+if not isinstance(closure, dict):
+    raise SystemExit("T094 python_import_closure is missing")
+files = closure.get("files")
+if not isinstance(files, dict) or not files:
+    raise SystemExit("T094 python_import_closure.files is missing")
+if closure.get("file_count") != len(files):
+    raise SystemExit("T094 python_import_closure file_count mismatch")
+if any(str(relative).startswith("scripts/") for relative in files):
+    raise SystemExit("T094 production closure must contain scripts=0")
+forbidden_stores = {
+    "src/mining_qa/v4_retrieval_store_t090.py",
+    "src/mining_qa/v4_retrieval_store_t092.py",
+}
+reached_forbidden = forbidden_stores.intersection(files)
+if reached_forbidden:
+    raise SystemExit(
+        "T094 production closure reached a T090/T092 Store: "
+        + ", ".join(sorted(reached_forbidden))
+    )
+for relative, expected_sha256 in files.items():
+    relative = str(relative)
+    relative_path = Path(relative)
+    if relative_path.is_absolute() or relative_path.as_posix() != relative:
+        raise SystemExit(f"Invalid T094 closure path: {relative}")
+    path = (root / relative_path).resolve()
+    try:
+        path.relative_to(root.resolve())
+    except ValueError as exc:
+        raise SystemExit(f"T094 closure path escapes project: {relative}") from exc
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    if digest != expected_sha256:
+        raise SystemExit(f"Local T094 closure hash mismatch: {relative}")
+    subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", relative],
+        cwd=root,
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+def canonical_sha256(value):
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+if closure.get("bundle_sha256") != canonical_sha256(files):
+    raise SystemExit("T094 python_import_closure bundle_sha256 mismatch")
+closure_body = dict(closure)
+declared_closure_sha256 = closure_body.pop("closure_sha256", None)
+if declared_closure_sha256 != canonical_sha256(closure_body):
+    raise SystemExit("T094 python_import_closure closure_sha256 mismatch")
+
+sys.path.insert(0, str(root / "src"))
+from mining_qa.v4_runtime_t094_contract import (  # noqa: E402
+    validate_t094_runtime_import_closure,
+)
+
+validated = validate_t094_runtime_import_closure(closure, root)
+if validated != closure:
+    raise SystemExit("T094 import closure recomputation mismatch")
+print("local_t094_assets_import_closure_and_git_tracking=verified")
 PY
+
+if [[ "${MODE}" == "preflight" ]]; then
+  echo "deployment_preflight=passed"
+  echo "runtime_id=${EXPECTED_RUNTIME_ID}"
+  exit 0
+fi
 
 DEPLOY_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 BACKUP_CREATED=false
@@ -181,11 +286,50 @@ app="$1"
 deploy_id="$2"
 backup="${app}/data/backups/v4-cutover-${deploy_id}"
 if [[ "$(id -u)" -eq 0 ]]; then sudo_cmd=(); else sudo_cmd=(sudo); fi
+"${sudo_cmd[@]}" systemctl is-active --quiet kuangbiao-api.service
+"${sudo_cmd[@]}" systemctl is-active --quiet kuangbiao-kb.service
+"${sudo_cmd[@]}" systemctl is-active --quiet deeptutor-cloud.service
+[[ "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:8001/)" == "200" ]]
 mkdir -p "${backup}"
 install -m 0600 "${app}/.env" "${backup}/runtime.env"
-if [[ -f "${app}/data/app/application.sqlite" ]]; then
-  cp -a --reflink=auto "${app}/data/app/application.sqlite" "${backup}/application.sqlite"
-fi
+python3 - "${app}" "${backup}" <<'PY'
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+app = Path(sys.argv[1])
+backup = Path(sys.argv[2])
+sources = {
+    "application": app / "data/app/application.sqlite",
+    "candidates": app / "data/knowledge_base_v4/runtime_private/candidates.sqlite",
+}
+counts = {}
+for label, source in sources.items():
+    if not source.is_file():
+        continue
+    destination = backup / f"{label}.sqlite"
+    source_connection = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
+    destination_connection = sqlite3.connect(destination)
+    try:
+        source_connection.backup(destination_connection)
+        integrity = destination_connection.execute("pragma integrity_check").fetchone()[0]
+        if integrity != "ok":
+            raise SystemExit(f"{label} backup integrity failed")
+        if label == "application":
+            counts["users"] = int(
+                destination_connection.execute("select count(*) from users").fetchone()[0]
+            )
+    finally:
+        destination_connection.close()
+        source_connection.close()
+(backup / "pre_cutover_counts.json").write_text(
+    json.dumps(counts, sort_keys=True) + "\n", encoding="utf-8"
+)
+PY
+install -m 0600 "${app}/data/knowledge_base_v4/db/corpus.sqlite" \
+  "${backup}/corpus.sqlite"
+touch "${backup}/deeptutor-was-active"
 for unit in kuangbiao-api.service kuangbiao-kb.service; do
   if [[ -f "/etc/systemd/system/${unit}" ]]; then
     cp -a "/etc/systemd/system/${unit}" "${backup}/${unit}"
@@ -200,7 +344,9 @@ for candidate in src scripts deploy web schemas requirements.txt pyproject.toml;
 done
 tar -czf "${backup}/application-code.tar.gz" -C "${app}" "${paths[@]}"
 {
-  [[ -f "${app}/data/app/application.sqlite" ]] && sha256sum "${app}/data/app/application.sqlite"
+  sha256sum "${backup}/application.sqlite"
+  [[ -f "${backup}/candidates.sqlite" ]] && sha256sum "${backup}/candidates.sqlite"
+  sha256sum "${backup}/corpus.sqlite"
   [[ -f "${app}/data/knowledge_base/db/knowledge_base.sqlite" ]] && sha256sum "${app}/data/knowledge_base/db/knowledge_base.sqlite"
   [[ -f "${app}/data/knowledge_base/indexes/dense.usearch" ]] && sha256sum "${app}/data/knowledge_base/indexes/dense.usearch"
   [[ -f "${app}/data/knowledge_base/indexes/dense_manifest.json" ]] && sha256sum "${app}/data/knowledge_base/indexes/dense_manifest.json"
@@ -211,6 +357,14 @@ echo "backup_status=complete"
 echo "backup_id=${deploy_id}"
 REMOTE
 BACKUP_CREATED=true
+
+"${SSH[@]}" "${REMOTE}" bash -s <<'REMOTE'
+set -Eeuo pipefail
+if [[ "$(id -u)" -eq 0 ]]; then sudo_cmd=(); else sudo_cmd=(sudo); fi
+"${sudo_cmd[@]}" systemctl stop kuangbiao-api.service kuangbiao-kb.service
+"${sudo_cmd[@]}" systemctl is-active --quiet deeptutor-cloud.service
+[[ "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:8001/)" == "200" ]]
+REMOTE
 
 # Deploy only files recorded by Git.  This prevents local KB governance,
 # experimental, or unrelated untracked scripts from leaking onto production.
@@ -229,44 +383,136 @@ BACKUP_CREATED=true
     -e "${RSYNC_SSH}" "${relative_assets[@]}" "${REMOTE}:${CLOUD_APP_DIR}/"
 )
 
-"${SSH[@]}" "${REMOTE}" bash -s -- "${CLOUD_APP_DIR}" "${V4_MANIFEST_REL}" <<'REMOTE'
+"${SSH[@]}" "${REMOTE}" bash -s -- \
+  "${CLOUD_APP_DIR}" "${V4_MANIFEST_REL}" \
+  "${EXPECTED_RUNTIME_ID}" "${EXPECTED_DECISION_VERSION}" <<'REMOTE'
 set -Eeuo pipefail
 app="$1"
 manifest_rel="$2"
+expected_runtime_id="$3"
+expected_decision_version="$4"
 if [[ "$(id -u)" -eq 0 ]]; then sudo_cmd=(); else sudo_cmd=(sudo); fi
 "${app}/.venv/bin/pip" install --disable-pip-version-check --timeout 60 --retries 5 -r "${app}/requirements.txt" >/dev/null
 chown -R kuangbiao:kuangbiao "${app}/src" "${app}/scripts" "${app}/deploy" "${app}/web" "${app}/schemas" "${app}/data/knowledge_base_v4"
 find "${app}/data/knowledge_base_v4" -type d -exec chmod 700 {} +
 find "${app}/data/knowledge_base_v4" -type f -exec chmod 600 {} +
-python3 - "${app}" "${manifest_rel}" <<'PY'
+python3 - "${app}" "${manifest_rel}" "${expected_runtime_id}" <<'PY'
 import hashlib
 import json
 import sys
 from pathlib import Path
 
 root = Path(sys.argv[1])
-manifest = json.loads((root / sys.argv[2]).read_text(encoding="utf-8"))
-for label, item in manifest["artifacts"].items():
-    path = Path(item["path"])
-    if not path.is_absolute():
-        path = root / path
+manifest_path = root / sys.argv[2]
+expected_runtime_id = sys.argv[3]
+manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+if manifest.get("runtime_id") != expected_runtime_id:
+    raise SystemExit("Unexpected remote v4 runtime_id")
+
+expected_artifact_paths = {
+    "data/knowledge_base_v4/db/corpus.sqlite",
+    "data/knowledge_base_v4/retrieval_preprocessing_t088_v1/retrieval_units_v1.jsonl",
+    "data/knowledge_base_v4/runtime_private/hybrid_fixed20_t088_v1/fts.sqlite",
+    "data/knowledge_base_v4/embedding_artifacts_private/qwen37_text_embedding_1024_t088_v1/manifest.json",
+    "data/knowledge_base_v4/embedding_artifacts_private/qwen37_text_embedding_1024_t088_v1/document_embeddings.npy",
+    "data/knowledge_base_v4/embedding_artifacts_private/qwen37_text_embedding_1024_t088_v1/row_mapping.jsonl",
+    "schemas/v4_governed_concept_families_v1.json",
+}
+artifacts = manifest.get("artifacts")
+if not isinstance(artifacts, dict) or len(artifacts) != 7:
+    raise SystemExit("Remote T094 must bind exactly seven accepted private assets")
+artifact_paths = {str(item.get("path")) for item in artifacts.values()}
+if artifact_paths != expected_artifact_paths:
+    raise SystemExit("Remote T094 private asset set changed")
+for label, item in artifacts.items():
+    path = root / str(item["path"])
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    if digest != item["sha256"]:
+    if digest != item.get("sha256"):
         raise SystemExit(f"Remote v4 hash mismatch: {label}")
-print("remote_v4_assets=verified")
+
+runtime_sources = manifest.get("runtime_sources") or {}
+if runtime_sources.get("selection") != "repository_static_python_import_closure":
+    raise SystemExit("Remote T094 runtime-source selection policy changed")
+if runtime_sources.get("gold_or_report_used_for_selection") is not False:
+    raise SystemExit("Remote T094 runtime-source selection must not use Gold or reports")
+closure = runtime_sources.get("python_import_closure")
+if not isinstance(closure, dict):
+    raise SystemExit("Remote T094 python_import_closure is missing")
+files = closure.get("files")
+if not isinstance(files, dict) or not files:
+    raise SystemExit("Remote T094 python_import_closure.files is missing")
+if closure.get("file_count") != len(files):
+    raise SystemExit("Remote T094 python_import_closure file_count mismatch")
+if any(str(relative).startswith("scripts/") for relative in files):
+    raise SystemExit("Remote T094 production closure must contain scripts=0")
+forbidden_stores = {
+    "src/mining_qa/v4_retrieval_store_t090.py",
+    "src/mining_qa/v4_retrieval_store_t092.py",
+}
+reached_forbidden = forbidden_stores.intersection(files)
+if reached_forbidden:
+    raise SystemExit(
+        "Remote T094 closure reached a T090/T092 Store: "
+        + ", ".join(sorted(reached_forbidden))
+    )
+for relative, expected_sha256 in files.items():
+    relative = str(relative)
+    relative_path = Path(relative)
+    if relative_path.is_absolute() or relative_path.as_posix() != relative:
+        raise SystemExit(f"Invalid remote T094 closure path: {relative}")
+    path = (root / relative_path).resolve()
+    try:
+        path.relative_to(root.resolve())
+    except ValueError as exc:
+        raise SystemExit(f"Remote T094 closure path escapes project: {relative}") from exc
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    if digest != expected_sha256:
+        raise SystemExit(f"Remote T094 closure hash mismatch: {relative}")
+
+def canonical_sha256(value):
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+if closure.get("bundle_sha256") != canonical_sha256(files):
+    raise SystemExit("Remote T094 python_import_closure bundle_sha256 mismatch")
+closure_body = dict(closure)
+declared_closure_sha256 = closure_body.pop("closure_sha256", None)
+if declared_closure_sha256 != canonical_sha256(closure_body):
+    raise SystemExit("Remote T094 python_import_closure closure_sha256 mismatch")
+
+sys.path.insert(0, str(root / "src"))
+from mining_qa.v4_runtime_t094_contract import (  # noqa: E402
+    validate_t094_runtime_import_closure,
+)
+
+validated = validate_t094_runtime_import_closure(closure, root)
+if validated != closure:
+    raise SystemExit("Remote T094 import closure recomputation mismatch")
+print("remote_t094_assets_and_import_closure=verified")
 PY
 sudo -u kuangbiao env \
   PYTHONPATH="${app}/src" \
   KNOWLEDGE_RUNTIME_VERSION=v4 \
   V4_RUNTIME_MANIFEST="${app}/${manifest_rel}" \
   V4_CANDIDATE_DB_PATH="${app}/data/knowledge_base_v4/runtime_private/candidates.sqlite" \
-  "${app}/.venv/bin/python" - <<'PY'
+  TECHNICAL_SUFFICIENCY_DECISION_VERSION="${expected_decision_version}" \
+  "${app}/.venv/bin/python" - "${expected_runtime_id}" "${expected_decision_version}" <<'PY'
+import sys
+
+from mining_qa.config import get_settings
 from mining_qa import knowledge_service
 
+expected_runtime_id = sys.argv[1]
+expected_decision_version = sys.argv[2]
 health = knowledge_service.store.health()
 expected = {
     "runtime_version": "v4",
-    "runtime_id": "v4-hybrid-fixed20-p1fix-v4",
+    "runtime_id": expected_runtime_id,
     "document_count": 156,
     "retrieval_leaf_count": 23250,
     "vector_count": 23250,
@@ -279,16 +525,23 @@ for key, value in expected.items():
         raise SystemExit(f"v4 preflight mismatch: {key}")
 if not health.get("query_embedding_ready"):
     raise SystemExit("v4 query embedding is not configured")
-print("remote_v4_store_preflight=passed")
+if get_settings().technical_sufficiency_decision_version != expected_decision_version:
+    raise SystemExit("technical-sufficiency Decision version mismatch")
+print("remote_t094_store_preflight=passed")
 PY
 REMOTE
 
-"${SSH[@]}" "${REMOTE}" bash -s -- "${CLOUD_APP_DIR}" "${V4_MANIFEST_REL}" <<'REMOTE'
+"${SSH[@]}" "${REMOTE}" bash -s -- \
+  "${CLOUD_APP_DIR}" "${V4_MANIFEST_REL}" \
+  "${EXPECTED_RUNTIME_ID}" "${EXPECTED_DECISION_VERSION}" "${DEPLOY_ID}" <<'REMOTE'
 set -Eeuo pipefail
 app="$1"
 manifest_rel="$2"
+expected_runtime_id="$3"
+expected_decision_version="$4"
+deploy_id="$5"
 if [[ "$(id -u)" -eq 0 ]]; then sudo_cmd=(); else sudo_cmd=(sudo); fi
-python3 - "${app}/.env" "${app}/${manifest_rel}" <<'PY'
+python3 - "${app}/.env" "${app}/${manifest_rel}" "${expected_decision_version}" <<'PY'
 import os
 import sys
 from pathlib import Path
@@ -297,6 +550,7 @@ path = Path(sys.argv[1])
 updates = {
     "KNOWLEDGE_RUNTIME_VERSION": "v4",
     "V4_RUNTIME_MANIFEST": sys.argv[2],
+    "TECHNICAL_SUFFICIENCY_DECISION_VERSION": sys.argv[3],
     "V4_CANDIDATE_DB_PATH": str(Path(sys.argv[2]).parent.parent / "candidates.sqlite"),
     "V4_EMBEDDING_MODEL": "qwen3.7-text-embedding",
     "V4_EMBEDDING_DIMENSIONS": "1024",
@@ -342,7 +596,7 @@ temporary.write_text("\n".join(result) + "\n", encoding="utf-8")
 os.chmod(temporary, 0o600)
 temporary.replace(path)
 PY
-python3 - "${app}/.env" <<'PY'
+python3 - "${app}/.env" "${expected_decision_version}" <<'PY'
 import sys
 from pathlib import Path
 
@@ -354,6 +608,7 @@ for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
         values[key.strip()] = value.strip()
 expected = {
     "KNOWLEDGE_RUNTIME_VERSION": "v4",
+    "TECHNICAL_SUFFICIENCY_DECISION_VERSION": sys.argv[2],
     "UNIFIED_QUERY_PLANNING_ENABLED": "true",
     "PROMPT_LAYOUT_VARIANT": "schema_prefix",
     "LLM_USAGE_LEDGER_ENABLED": "false",
@@ -361,7 +616,7 @@ expected = {
 for key, value in expected.items():
     if values.get(key) != value:
         raise SystemExit(f"runtime setting mismatch: {key}")
-print("t085_runtime_switches=passed")
+print("t094_runtime_switches=passed")
 PY
 chown kuangbiao:kuangbiao "${app}/.env"
 install -m 0644 "${app}/deploy/systemd/kuangbiao-kb.service" /etc/systemd/system/kuangbiao-kb.service
@@ -372,16 +627,18 @@ for _ in $(seq 1 45); do
   if curl --fail --silent --max-time 3 http://127.0.0.1:18081/knowledge/health >/dev/null; then break; fi
   sleep 2
 done
-python3 - <<'PY'
+python3 - "${expected_runtime_id}" <<'PY'
 import json
+import sys
 import urllib.request
 
+expected_runtime_id = sys.argv[1]
 with urllib.request.urlopen("http://127.0.0.1:18081/knowledge/health", timeout=5) as response:
     health = json.load(response)
 expected = {
     "status": "ok",
     "runtime_version": "v4",
-    "runtime_id": "v4-hybrid-fixed20-p1fix-v4",
+    "runtime_id": expected_runtime_id,
     "document_count": 156,
     "retrieval_leaf_count": 23250,
     "vector_count": 23250,
@@ -402,7 +659,7 @@ for _ in $(seq 1 45); do
   if curl --fail --silent --max-time 3 http://127.0.0.1:18080/health >/dev/null; then break; fi
   sleep 2
 done
-python3 - "${app}" <<'PY'
+python3 - "${app}" "${deploy_id}" <<'PY'
 import json
 import sqlite3
 import sys
@@ -410,6 +667,7 @@ import urllib.request
 from pathlib import Path
 
 app = Path(sys.argv[1])
+deploy_id = sys.argv[2]
 with urllib.request.urlopen("http://127.0.0.1:18080/health", timeout=5) as response:
     health = json.load(response)
 if not health.get("ok") or not health.get("knowledge_base_enabled"):
@@ -425,7 +683,9 @@ users = connection.execute("select count(*) from users").fetchone()[0]
 connection.close()
 if integrity != "ok":
     raise SystemExit("application database integrity failed")
-if users < 1:
+counts_path = app / f"data/backups/v4-cutover-{deploy_id}/pre_cutover_counts.json"
+baseline_users = int(json.loads(counts_path.read_text(encoding="utf-8"))["users"])
+if users < baseline_users:
     raise SystemExit("application user records disappeared")
 print("platform_health=passed")
 print(f"registered_users={users}")
@@ -436,10 +696,17 @@ if [[ "${public_code}" != "404" ]]; then
   exit 1
 fi
 echo "public_private_kb_boundary=passed"
+"${sudo_cmd[@]}" systemctl is-active --quiet deeptutor-cloud.service
+deeptutor_code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:8001/)"
+if [[ "${deeptutor_code}" != "200" ]]; then
+  echo "DeepTutor health changed: ${deeptutor_code}" >&2
+  exit 1
+fi
+echo "deeptutor_boundary=passed"
 REMOTE
 
 DEPLOY_COMPLETE=true
 trap - ERR
 echo "deployment_status=complete"
 echo "backup_id=${DEPLOY_ID}"
-echo "runtime_id=v4-hybrid-fixed20-p1fix-v4"
+echo "runtime_id=${EXPECTED_RUNTIME_ID}"
